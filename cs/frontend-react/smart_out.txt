@@ -1,0 +1,10 @@
+
+opens=199, closes=192, diff=7
+剩余未闭合 stack (7 个):
+  [div] 行 1524:      <div className="ctrl-tab-conte
+  [div] 行 1952:     <div className="control-page">
+  [div] 行 2087:      <div className="ctrl-body">
+  [div] 行 2202:      <div className="ctrl-screen-ar
+  [div] 行 2205:      <div style={{ display: 'flex',
+  [div] 行 2288:      <div style={{ display: 'flex',
+  [div] 行 2290:      <div style={{ display: 'flex',

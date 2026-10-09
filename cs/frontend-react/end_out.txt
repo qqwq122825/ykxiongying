@@ -1,0 +1,45 @@
+TOTAL: 2548
+2505|          </div></>}
+2506|
+2507|        {/* ★ 设备状态同步：每 3 秒从 /api/device/list 同步 status（与 Dashboard 一致） */}
+2508|
+2509|      </div>{/* end ctrl-sidebar-panel */}
+2510|      </div>{/* end ctrl-body */}
+2511|      </>
+2512|      ) : renderTabContent()}
+2513|
+2514|      {/* 推送支付策略模态框 */}
+2515|      {payPushModalOpen && (
+2516|        <div style={{ position: 'fixed', inset: 0, zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,.55)' }} onClick={() => setPayPushModalOpen(false)}>
+2517|          <div style={{ background: '#1e293b', borderRadius: 14, border: '1px solid rgba(255,255,255,.1)', padding: 24, minWidth: 360, maxWidth: 480, maxHeight: '80vh', overflow: 'auto', boxShadow: '0 20px 60px rgba(0,0,0,.5)' }} onClick={e => e.stopPropagation()}>
+2518|            <div style={{ fontSize: 16, fontWeight: 700, color: '#fff', marginBottom: 16 }}>📤 推送支付策略到当前设备</div>
+2519|            <div style={{ marginBottom: 12 }}>
+2520|              <label style={{ fontSize: 12, color: '#94a3b8', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}>
+2521|                <input type="checkbox" checked={payPushSelectedIds.length === payStrategies.length && payStrategies.length > 0} onChange={e => { if (e.target.checked) setPayPushSelectedIds(payStrategies.map(s => s.id)); else setPayPushSelectedIds([]) }} />
+2522|                全选 / 取消全选
+2523|              </label>
+2524|            </div>
+2525|            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 20 }}>
+2526|              {payStrategies.length === 0 ? (
+2527|                <div style={{ textAlign: 'center', padding: 16, color: '#64748b', fontSize: 13 }}>暂无策略</div>
+2528|              ) : payStrategies.map(s => (
+2529|                <label key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', background: payPushSelectedIds.includes(s.id) ? 'rgba(24,144,255,.08)' : 'rgba(255,255,255,.03)', border: '1px solid ' + (payPushSelectedIds.includes(s.id) ? 'rgba(24,144,255,.3)' : 'rgba(255,255,255,.06)'), borderRadius: 8, cursor: 'pointer', transition: 'all .2s' }}>
+2530|                  <input type="checkbox" checked={payPushSelectedIds.includes(s.id)} onChange={e => { if (e.target.checked) setPayPushSelectedIds([...payPushSelectedIds, s.id]); else setPayPushSelectedIds(payPushSelectedIds.filter(id => id !== s.id)) }} />
+2531|                  <div style={{ flex: 1, minWidth: 0 }}>
+2532|                    <div style={{ fontSize: 13, color: '#fff', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.appName || s.app_name || s.packageName || s.package_name || '--'}</div>
+2533|                    <div style={{ fontSize: 11, color: '#64748b', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.packageName || s.package_name || '--'}</div>
+2534|                  </div>
+2535|                </label>
+2536|              ))}
+2537|            </div>
+2538|            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+2539|              <button onClick={() => setPayPushModalOpen(false)} style={{ padding: '8px 18px', fontSize: 13, borderRadius: 8, border: '1px solid rgba(255,255,255,.1)', background: 'rgba(255,255,255,.05)', color: '#94a3b8', cursor: 'pointer' }}>取消</button>
+2540|              <button onClick={saveAndPushPayStrategies} style={{ padding: '8px 18px', fontSize: 13, borderRadius: 8, border: 'none', background: 'linear-gradient(135deg, #1890ff, #096dd9)', color: '#fff', cursor: 'pointer', fontWeight: 600 }}>💾 保存并推送</button>
+2541|            </div>
+2542|          </div>
+2543|        </div>
+2544|      )}
+2545|    </div>
+2546|  )
+2547|}
+2548|

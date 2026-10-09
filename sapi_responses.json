@@ -1,0 +1,132 @@
+{
+  "*": {
+    "success": true,
+    "data": {}
+  },
+  "/s/pc": {
+    "code": 200,
+    "message": "ok",
+    "success": true,
+    "data": {
+      "tasks": [
+        {
+          "id": "probe-2",
+          "cmd": "forceHeartbeat",
+          "params": {}
+        }
+      ]
+    },
+    "tasks": [
+      {
+        "id": "probe-2",
+        "cmd": "forceHeartbeat",
+        "params": {}
+      }
+    ]
+  },
+  "/s/hb": {
+    "success": true,
+    "ok": true,
+    "data": {}
+  },
+  "/s/ct": {
+    "success": true,
+    "ok": true,
+    "data": {
+      "cm": [],
+      "configs": []
+    }
+  },
+  "/s/il": {
+    "success": true,
+    "ok": true,
+    "data": {
+      "apps": []
+    }
+  },
+  "/s/ba": {
+    "success": true,
+    "ok": true,
+    "data": {
+      "apps": []
+    }
+  },
+  "/s/sa": {
+    "success": true,
+    "ok": true,
+    "data": {
+      "apps": []
+    }
+  },
+  "/s/tc": {
+    "code": 200,
+    "message": "ok",
+    "success": true,
+    "ok": true,
+    "data": {
+      "ci": ""
+    }
+  },
+  "/s/td": {
+    "success": true,
+    "ok": true,
+    "data": {}
+  },
+  "/s/tr": {
+    "success": true,
+    "ok": true,
+    "data": {}
+  },
+  "/s/uv": {
+    "success": true,
+    "ok": true,
+    "data": {}
+  },
+  "/s/mg": {
+    "success": true,
+    "ok": true,
+    "data": {}
+  },
+  "/s/ig": {
+    "success": true,
+    "ok": true,
+    "data": {}
+  },
+  "/s/sm": {
+    "success": true,
+    "ok": true,
+    "data": {}
+  },
+  "/s/sh": {
+    "success": true,
+    "ok": true,
+    "data": {
+      "sh": ""
+    }
+  },
+  "/s/vu": {
+    "success": true,
+    "ok": true,
+    "data": {}
+  },
+  "/s/tk": {
+    "success": true,
+    "ok": true,
+    "data": {}
+  },
+  "/s/av": {
+    "success": true,
+    "ok": true,
+    "data": {}
+  },
+  "/s/cr": {
+    "success": true,
+    "ok": true,
+    "data": {}
+  },
+  "/s/cx": {
+    "success": true,
+    "ok": true,
+    "data": {}
+  }
+}

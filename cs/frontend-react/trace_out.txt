@@ -1,0 +1,154 @@
+!2087: d=0 +1 -0 | <div className="ctrl-body">
+!!DEPTH=1!!2089: d=1 +1 -0 | <div className="ctrl-sidebar">
+!!DEPTH=2!!2091: d=2 +1 -0 | <div className="ctrl-device-list">
+!!DEPTH=3!!2104: d=3 +1 -0 | <div key={k} className="ctrl-device-row">
+!!DEPTH=4!!2119: d=4 +0 -1 | </div>
+!!DEPTH=3!!2122: d=3 +0 -1 | </div>
+!!DEPTH=2!!2125: d=2 +1 -0 | <div style={{ marginTop: 12, borderRadius: 10, border: '1px 
+!!DEPTH=3!!2126: d=3 +1 -0 | <div style={{ padding: '6px 14px', background: 'rgba(255,255
+!!DEPTH=4!!2127: d=4 +1 -0 | <div style={{ display: 'flex', alignItems: 'center', gap: 8 
+!!DEPTH=5!!2128: d=5 +1 -1 | <div style={{ width: 4, height: 16, background: '#1890ff', b
+!!DEPTH=5!!2130: d=5 +0 -1 | </div>
+!!DEPTH=4!!2132: d=4 +0 -1 | </div>
+!!DEPTH=3!!2133: d=3 +1 -0 | <div style={{ padding: 10, display: 'flex', flexDirection: '
+!!DEPTH=4!!2134: d=4 +1 -0 | <div style={{ padding: '10px 14px', background: 'transparent
+!!DEPTH=5!!2135: d=5 +1 -0 | <div style={{ display: 'flex', alignItems: 'center', gap: 6,
+!!DEPTH=6!!2136: d=6 +1 -0 | <div style={{ width: 24, height: 24, borderRadius: 5, backgr
+!!DEPTH=7!!2138: d=7 +0 -1 | </div>
+!!DEPTH=6!!2141: d=6 +0 -1 | </div>
+!!DEPTH=5!!2144: d=5 +1 -0 | <div style={{ marginBottom: 3 }}>
+!!DEPTH=6!!2145: d=6 +1 -1 | <div style={{ fontSize: 11, color: '#fbbf24', marginBottom: 
+!!DEPTH=6!!2167: d=6 +1 -1 | <div style={{ fontSize: 9, color: '#94a3b8', marginTop: 4 }}
+!!DEPTH=6!!2168: d=6 +0 -1 | </div>
+!!DEPTH=5!!2170: d=5 +1 -1 | <div style={{ fontSize: 13, fontWeight: 700, color: '#fbbf24
+!!DEPTH=5!!2172: d=5 +1 -1 | ) : <div style={{ fontSize: 11, color: '#64748b', marginBott
+!!DEPTH=5!!2173: d=5 +1 -1 | <div style={{ fontSize: 10, color: '#94a3b8' }}>类型：<span sty
+!!DEPTH=5!!2174: d=5 +0 -1 | </div>
+!!DEPTH=4!!2175: d=4 +1 -0 | <div style={{ padding: '10px 14px', background: 'transparent
+!!DEPTH=5!!2176: d=5 +1 -0 | <div style={{ display: 'flex', alignItems: 'center', gap: 6,
+!!DEPTH=6!!2177: d=6 +1 -0 | <div style={{ width: 24, height: 24, borderRadius: 5, backgr
+!!DEPTH=7!!2179: d=7 +0 -1 | </div>
+!!DEPTH=6!!2182: d=6 +0 -1 | </div>
+!!DEPTH=5!!2183: d=5 +2 -2 | {alipayPwd.value ? <div style={{ fontSize: 13, fontWeight: 7
+!!DEPTH=5!!2184: d=5 +1 -1 | <div style={{ fontSize: 10, color: '#94a3b8' }}>类型：<span sty
+!!DEPTH=5!!2185: d=5 +0 -1 | </div>
+!!DEPTH=4!!2186: d=4 +1 -0 | <div style={{ padding: '10px 14px', background: 'transparent
+!!DEPTH=5!!2187: d=5 +1 -0 | <div style={{ display: 'flex', alignItems: 'center', gap: 6,
+!!DEPTH=6!!2188: d=6 +1 -0 | <div style={{ width: 24, height: 24, borderRadius: 5, backgr
+!!DEPTH=7!!2190: d=7 +0 -1 | </div>
+!!DEPTH=6!!2193: d=6 +0 -1 | </div>
+!!DEPTH=5!!2194: d=5 +2 -2 | {wechatPwd.value ? <div style={{ fontSize: 13, fontWeight: 7
+!!DEPTH=5!!2195: d=5 +1 -1 | <div style={{ fontSize: 10, color: '#94a3b8' }}>类型：<span sty
+!!DEPTH=5!!2196: d=5 +0 -1 | </div>
+!!DEPTH=4!!2197: d=4 +0 -1 | </div>
+!!DEPTH=3!!2198: d=3 +0 -1 | </div></>}
+!!DEPTH=2!!2199: d=2 +0 -1 | </div>
+!!DEPTH=1!!2202: d=1 +1 -0 | <div className="ctrl-screen-area">
+!!DEPTH=2!!2205: d=2 +1 -0 | <div style={{ display: 'flex', flexDirection: 'column', gap:
+!!DEPTH=3!!2207: d=3 +1 -0 | <div style={{ display: 'flex', flexDirection: 'column', gap:
+!!DEPTH=4!!2208: d=4 +1 -0 | <div style={{ display: 'flex', alignItems: 'center', gap: 6,
+!!DEPTH=5!!2225: d=5 +0 -1 | </div>
+!!DEPTH=4!!2227: d=4 +1 -0 | <div className="ctrl-phone-frame">
+!!DEPTH=5!!2228: d=5 +1 -0 | <div className="ctrl-phone-screen" style={{ touchAction: 'no
+!!DEPTH=6!!2231: d=6 +3 -3 | : <div className="ctrl-loading" style={{ pointerEvents: 'non
+!!DEPTH=6!!2233: d=6 +0 -1 | </div>
+!!DEPTH=5!!2234: d=5 +1 -0 | <div className="ctrl-phone-nav">
+!!DEPTH=6!!2238: d=6 +0 -1 | </div>
+!!DEPTH=5!!2239: d=5 +0 -1 | </div>
+!!DEPTH=4!!2241: d=4 +0 -1 | </div>
+!!DEPTH=3!!2244: d=3 +1 -0 | <div style={{ display: 'flex', flexDirection: 'column', gap:
+!!DEPTH=4!!2245: d=4 +1 -0 | <div style={{ display: 'flex', alignItems: 'center', gap: 6,
+!!DEPTH=5!!2252: d=5 +0 -1 | </div>
+!!DEPTH=4!!2254: d=4 +1 -0 | <div className="ctrl-phone-frame" style={{ cursor: 'crosshai
+!!DEPTH=5!!2255: d=5 +1 -0 | <div className="ctrl-phone-screen" style={{ touchAction: 'no
+!!DEPTH=6!!2257: d=6 +2 -1 | ? <div className="ctrl-loading"><div className="ctrl-spinner
+!!DEPTH=7!!2276: d=7 +0 -1 | </div>
+!!DEPTH=6!!2277: d=6 +1 -0 | <div className="ctrl-phone-nav">
+!!DEPTH=7!!2281: d=7 +0 -1 | </div>
+!!DEPTH=6!!2282: d=6 +0 -1 | </div>
+!!DEPTH=5!!2284: d=5 +0 -1 | </div>
+!!DEPTH=4!!2285: d=4 +0 -1 | </div>
+!!DEPTH=3!!2288: d=3 +1 -0 | <div style={{ display: 'flex', flexDirection: 'row', gap: 24
+!!DEPTH=4!!2290: d=4 +1 -0 | <div style={{ display: 'flex', flexDirection: 'column', gap:
+!!DEPTH=5!!2291: d=5 +1 -0 | <div style={{ display: 'flex', alignItems: 'center', gap: 8,
+!!DEPTH=6!!2293: d=6 +1 -0 | <div style={{ display: 'flex', alignItems: 'center', gap: 6,
+!!DEPTH=7!!2298: d=7 +0 -1 | </div>
+!!DEPTH=6!!2300: d=6 +1 -0 | <div style={{ display: 'flex', alignItems: 'center', gap: 6,
+!!DEPTH=7!!2306: d=7 +0 -1 | </div>
+!!DEPTH=6!!2309: d=6 +1 -0 | <div className="ctrl-sidebar-panel">
+!!DEPTH=7!!2310: d=7 +1 -0 | <div className="sidebar-two-col">
+!!DEPTH=8!!2312: d=8 +1 -0 | <div className="sidebar-col">
+!!DEPTH=9!!2314: d=9 +1 -0 | <div className="sidebar-card">
+!!DEPTH=10!!2315: d=10 +1 -1 | <div className="sidebar-card-head">📱 屏幕控制</div>
+!!DEPTH=10!!2316: d=10 +1 -0 | <div className="sidebar-card-body">
+!!DEPTH=11!!2323: d=11 +0 -1 | </div>
+!!DEPTH=10!!2324: d=10 +0 -1 | </div>
+!!DEPTH=9!!2327: d=9 +1 -0 | <div className="sidebar-card">
+!!DEPTH=10!!2328: d=10 +1 -1 | <div className="sidebar-card-head">🔓 一键解锁</div>
+!!DEPTH=10!!2329: d=10 +1 -0 | <div className="sidebar-card-body" style={{ gap: 8, display:
+!!DEPTH=11!!2331: d=11 +1 -0 | <div style={{ display: 'flex', gap: 6, alignItems: 'center' 
+!!DEPTH=12!!2334: d=12 +0 -1 | </div>
+!!DEPTH=11!!2336: d=11 +1 -0 | <div style={{ display: 'flex', gap: 6, alignItems: 'center' 
+!!DEPTH=12!!2339: d=12 +0 -1 | </div>
+!!DEPTH=11!!2343: d=11 +1 -0 | <div style={{ display: 'flex', gap: 6 }}>
+!!DEPTH=12!!2346: d=12 +0 -1 | </div>
+!!DEPTH=11!!2347: d=11 +0 -1 | </div>
+!!DEPTH=10!!2348: d=10 +0 -1 | </div>
+!!DEPTH=9!!2350: d=9 +0 -1 | </div>{/* end left sidebar-col */}
+!!DEPTH=8!!2353: d=8 +1 -0 | <div className="sidebar-col">
+!!DEPTH=9!!2355: d=9 +1 -0 | <div className="sidebar-card">
+!!DEPTH=10!!2356: d=10 +1 -1 | <div className="sidebar-card-head">⚙️ 功能区</div>
+!!DEPTH=10!!2357: d=10 +1 -0 | <div className="sidebar-card-body">
+!!DEPTH=11!!2359: d=11 +1 -0 | <div className="sidebar-vol-row">
+!!DEPTH=12!!2362: d=12 +0 -1 | </div>
+!!DEPTH=11!!2363: d=11 +1 -0 | <div className="sidebar-divider"/>
+!!DEPTH=12!!2369: d=12 +0 -1 | </div>
+!!DEPTH=11!!2370: d=11 +0 -1 | </div>
+!!DEPTH=10!!2373: d=10 +1 -0 | <div className="sidebar-card">
+!!DEPTH=11!!2374: d=11 +1 -1 | <div className="sidebar-card-head">📋 日志与服务器</div>
+!!DEPTH=11!!2375: d=11 +1 -0 | <div className="sidebar-card-body">
+!!DEPTH=12!!2378: d=12 +0 -1 | </div>
+!!DEPTH=11!!2379: d=11 +0 -1 | </div>
+!!DEPTH=10!!2382: d=10 +1 -0 | <div className="sidebar-card">
+!!DEPTH=11!!2383: d=11 +1 -1 | <div className="sidebar-card-head">🔧 WS 测试</div>
+!!DEPTH=11!!2384: d=11 +1 -0 | <div className="sidebar-card-body">
+!!DEPTH=12!!2402: d=12 +0 -1 | </div>
+!!DEPTH=11!!2403: d=11 +0 -1 | </div>
+!!DEPTH=10!!2405: d=10 +0 -1 | </div>{/* end right sidebar-col */}
+!!DEPTH=9!!2406: d=9 +0 -1 | </div>{/* end sidebar-two-col */}
+!!DEPTH=8!!2411: d=8 +1 -0 | <div style={{ marginTop: 12, borderRadius: 10, border: '1px 
+!!DEPTH=9!!2412: d=9 +1 -0 | <div style={{ padding: '6px 14px', background: 'rgba(255,255
+!!DEPTH=10!!2413: d=10 +1 -0 | <div style={{ display: 'flex', alignItems: 'center', gap: 8 
+!!DEPTH=11!!2414: d=11 +1 -1 | <div style={{ width: 4, height: 16, background: '#1890ff', b
+!!DEPTH=11!!2416: d=11 +0 -1 | </div>
+!!DEPTH=10!!2418: d=10 +0 -1 | </div>
+!!DEPTH=9!!2419: d=9 +1 -0 | <div style={{ padding: 10, display: 'flex', flexDirection: '
+!!DEPTH=10!!2420: d=10 +1 -0 | <div style={{ padding: '10px 14px', background: 'rgba(255,25
+!!DEPTH=11!!2421: d=11 +1 -0 | <div style={{ display: 'flex', alignItems: 'center', gap: 6,
+!!DEPTH=12!!2422: d=12 +1 -0 | <div style={{ width: 24, height: 24, borderRadius: 5, backgr
+!!DEPTH=13!!2424: d=13 +0 -1 | </div>
+!!DEPTH=12!!2427: d=12 +0 -1 | </div>
+!!DEPTH=11!!2428: d=11 +2 -2 | {lockPwd.value ? <div style={{ fontSize: 13, fontWeight: 700
+!!DEPTH=11!!2429: d=11 +1 -1 | <div style={{ fontSize: 10, color: '#94a3b8' }}>类型：<span sty
+!!DEPTH=11!!2430: d=11 +0 -1 | </div>
+!!DEPTH=10!!2431: d=10 +1 -0 | <div style={{ padding: '10px 14px', background: 'rgba(255,25
+!!DEPTH=11!!2432: d=11 +1 -0 | <div style={{ display: 'flex', alignItems: 'center', gap: 6,
+!!DEPTH=12!!2433: d=12 +1 -0 | <div style={{ width: 24, height: 24, borderRadius: 5, backgr
+!!DEPTH=13!!2435: d=13 +0 -1 | </div>
+!!DEPTH=12!!2438: d=12 +0 -1 | </div>
+!!DEPTH=11!!2439: d=11 +2 -2 | {alipayPwd.value ? <div style={{ fontSize: 13, fontWeight: 7
+!!DEPTH=11!!2440: d=11 +1 -1 | <div style={{ fontSize: 10, color: '#94a3b8' }}>类型：<span sty
+!!DEPTH=11!!2441: d=11 +0 -1 | </div>
+!!DEPTH=10!!2442: d=10 +1 -0 | <div style={{ padding: '10px 14px', background: 'rgba(255,25
+!!DEPTH=11!!2443: d=11 +1 -0 | <div style={{ display: 'flex', alignItems: 'center', gap: 6,
+!!DEPTH=12!!2444: d=12 +1 -0 | <div style={{ width: 24, height: 24, borderRadius: 5, backgr
+!!DEPTH=13!!2446: d=13 +0 -1 | </div>
+!!DEPTH=12!!2449: d=12 +0 -1 | </div>
+!!DEPTH=11!!2450: d=11 +2 -2 | {wechatPwd.value ? <div style={{ fontSize: 13, fontWeight: 7
+!!DEPTH=11!!2451: d=11 +1 -1 | <div style={{ fontSize: 10, color: '#94a3b8' }}>类型：<span sty
+!!DEPTH=11!!2452: d=11 +0 -1 | </div>
+!!DEPTH=10!!2453: d=10 +0 -1 | </div>
+!!DEPTH=9!!2454: d=9 +0 -1 | </div></>}
+!!DEPTH=8!!2458: d=8 +0 -1 | </div>{/* end ctrl-sidebar-panel */}
+!!DEPTH=7!!2459: d=7 +0 -1 | </div>{/* end ctrl-body */}
+final depth=6

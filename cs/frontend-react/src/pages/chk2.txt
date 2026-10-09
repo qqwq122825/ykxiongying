@@ -1,0 +1,8 @@
+ 驱动器 C 中的卷没有标签。
+ 卷的序列号是 C82E-F3DE
+
+ C:\wwwroot\cs\frontend-react\src\pages 的目录
+
+2026/08/06  04:14           175,878 ControlPage.jsx
+               1 个文件        175,878 字节
+               0 个目录 25,813,975,040 可用字节

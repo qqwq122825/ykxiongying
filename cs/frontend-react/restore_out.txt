@@ -1,0 +1,1 @@
+DONE: 恢复 fragment 开=0, 闭=1

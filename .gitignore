@@ -1,0 +1,17 @@
+.DS_Store
+node_modules/
+vendor/
+logs/
+cs/runtime/
+cs/public/storage/
+cs/frontend-react/node_modules/
+cs/node-ws/node_modules/
+cs/vendor/
+cs/.env
+cs/.env.bak
+cs/node-ws/.env
+*.pid
+*.log
+.env
+.env.*
+!.env.example

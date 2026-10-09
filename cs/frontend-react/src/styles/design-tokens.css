@@ -1,0 +1,371 @@
+/* =============================================================
+ * 黑洞科技 · 设计令牌（Design Tokens）
+ * Design System v2.0 — 深石板 · 钢蓝
+ * -------------------------------------------------------------
+ * 这是全站唯一的设计变量源头。所有页面/组件必须通过 var() 引用，
+ * 禁止在业务代码里直接写颜色值或尺寸。
+ *
+ * 命名空间：--fc-*  (fc = fisher control)
+ *
+ * 层级：
+ *   1. 原始调色板（--fc-palette-*）    不直接使用
+ *   2. 语义令牌（--fc-bg, --fc-text…）  业务唯一引用入口
+ *   3. 组件级微调（panel/btn/badge）   引用语义令牌
+ * ============================================================= */
+
+/* ===========================================================
+ * 1. 调色板（PALETTE）— 不可直接使用，仅供语义令牌引用
+ * =========================================================== */
+:root {
+  /* —— 灰度（石墨）—— */
+  --fc-palette-graphite-950: #050813;
+  --fc-palette-graphite-900: #0a0e1a;
+  --fc-palette-graphite-850: #0d1322;
+  --fc-palette-graphite-800: #111827;
+  --fc-palette-graphite-750: #161f33;
+  --fc-palette-graphite-700: #1a2236;
+  --fc-palette-graphite-650: #1f2a44;
+  --fc-palette-graphite-600: #2d3a5c;
+  --fc-palette-graphite-500: #475569;
+  --fc-palette-graphite-400: #64748b;
+  --fc-palette-graphite-300: #94a3b8;
+  --fc-palette-graphite-200: #cbd5e1;
+  --fc-palette-graphite-100: #e2e8f0;
+  --fc-palette-graphite-50:  #f1f5f9;
+  --fc-palette-graphite-25:  #f8fafc;
+  --fc-palette-white:        #ffffff;
+
+  /* —— 钢蓝（Steel Blue）主色 —— */
+  --fc-palette-violet-700: #6d28d9;
+  --fc-palette-violet-600: #7c3aed;
+  --fc-palette-violet-500: #8b5cf6;   /* 主色 */
+  --fc-palette-violet-400: #a78bfa;
+  --fc-palette-violet-300: #c4b5fd;
+  --fc-palette-violet-200: #ddd6fe;
+  --fc-palette-violet-100: #ede9fe;
+
+  /* —— 琥珀金（Amber）强调色 —— */
+  --fc-palette-amber-700: #b45309;
+  --fc-palette-amber-600: #d97706;
+  --fc-palette-amber-500: #f59e0b;
+  --fc-palette-amber-400: #fbbf24;
+  --fc-palette-amber-300: #fcd34d;
+
+  /* —— 语义色 —— */
+  --fc-palette-emerald-600: #059669;
+  --fc-palette-emerald-500: #10b981;
+  --fc-palette-emerald-400: #34d399;
+  --fc-palette-rose-700:    #be123c;
+  --fc-palette-rose-600:    #e11d48;
+  --fc-palette-rose-500:    #ef4444;
+  --fc-palette-rose-400:    #f87171;
+}
+
+/* ===========================================================
+ * 2. 语义令牌（DARK — 默认主题）
+ * =========================================================== */
+:root,
+:root[data-theme="dark"] {
+  /* —— 表面层级（背景由深到浅，5 级）—— */
+  --fc-bg:           var(--fc-palette-graphite-900);   /* 页面底色 */
+  --fc-bg-deep:      var(--fc-palette-graphite-950);   /* 最深处（hero/暗角）*/
+  --fc-surface:      var(--fc-palette-graphite-800);   /* 卡片底 */
+  --fc-surface-hi:   var(--fc-palette-graphite-700);   /* 卡片悬浮 */
+  --fc-elevated:     var(--fc-palette-graphite-750);   /* 弹层/抽屉 */
+  --fc-overlay:      rgba(5, 8, 19, 0.72);             /* 遮罩 */
+
+  /* —— 边框 —— */
+  --fc-border:        var(--fc-palette-graphite-650);
+  --fc-border-soft:   var(--fc-palette-graphite-800);  /* 极弱分割线 */
+  --fc-border-hi:     var(--fc-palette-graphite-600);  /* 强调边 */
+  --fc-border-focus:  var(--fc-palette-violet-500);
+
+  /* —— 主色 / 强调 —— */
+  --fc-primary:        var(--fc-palette-violet-500);
+  --fc-primary-hi:     var(--fc-palette-violet-400);
+  --fc-primary-lo:     var(--fc-palette-violet-700);
+  --fc-primary-soft:   rgba(139, 92, 246, 0.12);       /* 主色弱底 */
+  --fc-primary-border: rgba(139, 92, 246, 0.32);
+  --fc-primary-glow:   0 0 0 3px rgba(139, 92, 246, 0.18);
+
+  --fc-accent:         var(--fc-palette-amber-500);
+  --fc-accent-hi:      var(--fc-palette-amber-400);
+  --fc-accent-soft:    rgba(245, 158, 11, 0.12);
+
+  /* —— 语义 —— */
+  --fc-success:        var(--fc-palette-emerald-500);
+  --fc-success-soft:   rgba(16, 185, 129, 0.12);
+  --fc-success-border: rgba(16, 185, 129, 0.32);
+  --fc-danger:         var(--fc-palette-rose-500);
+  --fc-danger-soft:    rgba(239, 68, 68, 0.12);
+  --fc-danger-border:  rgba(239, 68, 68, 0.32);
+  --fc-warn:           var(--fc-palette-amber-500);
+  --fc-warn-soft:      rgba(245, 158, 11, 0.12);
+  --fc-info:           var(--fc-palette-violet-500);
+  --fc-info-soft:      rgba(139, 92, 246, 0.12);
+
+  /* —— 文字 —— */
+  --fc-text-hi:   var(--fc-palette-graphite-50);   /* 标题/重点 */
+  --fc-text:      var(--fc-palette-graphite-200);  /* 正文 */
+  --fc-text-lo:   var(--fc-palette-graphite-400);  /* 辅助 */
+  --fc-text-mute: var(--fc-palette-graphite-500);  /* 极弱 */
+  --fc-text-on-primary: var(--fc-palette-white);
+
+  /* —— 阴影（细腻双层） —— */
+  --fc-shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.30);
+  --fc-shadow-sm: 0 2px 6px rgba(0, 0, 0, 0.28), 0 1px 2px rgba(0, 0, 0, 0.20);
+  --fc-shadow:    0 6px 16px rgba(0, 0, 0, 0.36), 0 2px 4px rgba(0, 0, 0, 0.22);
+  --fc-shadow-lg: 0 16px 36px rgba(0, 0, 0, 0.44), 0 4px 10px rgba(0, 0, 0, 0.28);
+  --fc-shadow-xl: 0 28px 60px rgba(0, 0, 0, 0.52), 0 10px 20px rgba(0, 0, 0, 0.30);
+  --fc-shadow-focus: 0 0 0 3px rgba(139, 92, 246, 0.22);
+
+  /* —— 渐变（克制使用）—— */
+  --fc-grad-primary:  linear-gradient(135deg, #7c3aed 0%, #8b5cf6 100%);
+  --fc-grad-accent:   linear-gradient(135deg, #d97706 0%, #f59e0b 100%);
+  --fc-grad-surface:  linear-gradient(180deg, #111827 0%, #0d1322 100%);
+  --fc-grad-hero:     radial-gradient(ellipse at top, rgba(139, 92, 246, 0.08) 0%, transparent 60%);
+
+  /* —— 选区/滚动条 —— */
+  --fc-selection-bg:   rgba(139, 92, 246, 0.32);
+  --fc-selection-text: var(--fc-palette-graphite-50);
+  --fc-scrollbar-thumb: rgba(71, 85, 105, 0.55);
+  --fc-scrollbar-thumb-hi: rgba(100, 116, 139, 0.75);
+  --fc-scrollbar-track: transparent;
+}
+
+/* ===========================================================
+ * 3. 语义令牌（LIGHT）
+ * =========================================================== */
+:root[data-theme="light"] {
+  /* —— 表面 —— */
+  --fc-bg:           var(--fc-palette-graphite-25);
+  --fc-bg-deep:      var(--fc-palette-graphite-100);
+  --fc-surface:      var(--fc-palette-white);
+  --fc-surface-hi:   var(--fc-palette-graphite-50);
+  --fc-elevated:     var(--fc-palette-white);
+  --fc-overlay:      rgba(15, 23, 42, 0.42);
+
+  /* —— 边框 —— */
+  --fc-border:        var(--fc-palette-graphite-100);
+  --fc-border-soft:   #f1f5f9;
+  --fc-border-hi:     var(--fc-palette-graphite-200);
+  --fc-border-focus:  var(--fc-palette-violet-500);
+
+  /* —— 主色 —— */
+  --fc-primary:        var(--fc-palette-violet-500);
+  --fc-primary-hi:     var(--fc-palette-violet-600);
+  --fc-primary-lo:     var(--fc-palette-violet-700);
+  --fc-primary-soft:   rgba(139, 92, 246, 0.08);
+  --fc-primary-border: rgba(139, 92, 246, 0.24);
+  --fc-primary-glow:   0 0 0 3px rgba(139, 92, 246, 0.16);
+
+  --fc-accent:         var(--fc-palette-amber-600);
+  --fc-accent-hi:      var(--fc-palette-amber-700);
+  --fc-accent-soft:    rgba(245, 158, 11, 0.10);
+
+  /* —— 语义 —— */
+  --fc-success:        var(--fc-palette-emerald-600);
+  --fc-success-soft:   rgba(5, 150, 105, 0.08);
+  --fc-success-border: rgba(5, 150, 105, 0.24);
+  --fc-danger:         var(--fc-palette-rose-600);
+  --fc-danger-soft:    rgba(225, 29, 72, 0.08);
+  --fc-danger-border:  rgba(225, 29, 72, 0.24);
+  --fc-warn:           var(--fc-palette-amber-600);
+  --fc-warn-soft:      rgba(217, 119, 6, 0.10);
+  --fc-info:           var(--fc-palette-violet-600);
+  --fc-info-soft:      rgba(124, 58, 237, 0.08);
+
+  /* —— 文字 —— */
+  --fc-text-hi:   var(--fc-palette-graphite-900);
+  --fc-text:      #334155;
+  --fc-text-lo:   var(--fc-palette-graphite-500);
+  --fc-text-mute: var(--fc-palette-graphite-400);
+  --fc-text-on-primary: var(--fc-palette-white);
+
+  /* —— 阴影（亮色下更柔）—— */
+  --fc-shadow-xs: 0 1px 2px rgba(15, 23, 42, 0.05);
+  --fc-shadow-sm: 0 1px 3px rgba(15, 23, 42, 0.06), 0 1px 2px rgba(15, 23, 42, 0.04);
+  --fc-shadow:    0 4px 12px rgba(15, 23, 42, 0.08), 0 2px 4px rgba(15, 23, 42, 0.04);
+  --fc-shadow-lg: 0 12px 28px rgba(15, 23, 42, 0.12), 0 4px 8px rgba(15, 23, 42, 0.06);
+  --fc-shadow-xl: 0 24px 48px rgba(15, 23, 42, 0.16), 0 8px 16px rgba(15, 23, 42, 0.08);
+  --fc-shadow-focus: 0 0 0 3px rgba(139, 92, 246, 0.20);
+
+  /* —— 渐变 —— */
+  --fc-grad-primary:  linear-gradient(135deg, #7c3aed 0%, #8b5cf6 100%);
+  --fc-grad-accent:   linear-gradient(135deg, #d97706 0%, #f59e0b 100%);
+  --fc-grad-surface:  linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+  --fc-grad-hero:     radial-gradient(ellipse at top, rgba(139, 92, 246, 0.06) 0%, transparent 60%);
+
+  /* —— 选区/滚动条 —— */
+  --fc-selection-bg:   rgba(139, 92, 246, 0.20);
+  --fc-selection-text: var(--fc-palette-graphite-900);
+  --fc-scrollbar-thumb: rgba(148, 163, 184, 0.45);
+  --fc-scrollbar-thumb-hi: rgba(100, 116, 139, 0.65);
+  --fc-scrollbar-track: transparent;
+}
+
+/* ===========================================================
+ * 4. 尺寸 / 间距 / 圆角（与色彩无关的几何令牌）
+ * =========================================================== */
+:root {
+  /* —— 4px 网格间距 —— */
+  --fc-space-0: 0;
+  --fc-space-1: 4px;
+  --fc-space-2: 8px;
+  --fc-space-3: 12px;
+  --fc-space-4: 16px;
+  --fc-space-5: 20px;
+  --fc-space-6: 24px;
+  --fc-space-7: 32px;
+  --fc-space-8: 40px;
+  --fc-space-9: 48px;
+  --fc-space-10: 64px;
+
+  /* —— 圆角（克制度）—— */
+  --fc-radius-xs: 4px;
+  --fc-radius-sm: 6px;
+  --fc-radius:    8px;     /* 通用 */
+  --fc-radius-md: 10px;    /* 按钮/输入框 */
+  --fc-radius-lg: 12px;    /* 卡片 */
+  --fc-radius-xl: 16px;    /* 大卡片/弹层 */
+  --fc-radius-pill: 999px;
+
+  /* —— 字号 —— */
+  --fc-text-xs:   11px;
+  --fc-text-sm:   13px;
+  --fc-text-base: 14px;
+  --fc-text-md:   15px;
+  --fc-text-lg:   17px;
+  --fc-text-xl:   20px;
+  --fc-text-2xl:  24px;
+  --fc-text-3xl:  30px;
+  --fc-text-4xl:  36px;
+
+  /* —— 行高 —— */
+  --fc-leading-tight: 1.2;
+  --fc-leading-snug:  1.4;
+  --fc-leading:       1.55;
+  --fc-leading-loose: 1.75;
+
+  /* —— 字重 —— */
+  --fc-weight-normal:   400;
+  --fc-weight-medium:   500;
+  --fc-weight-semibold: 600;
+  --fc-weight-bold:     700;
+
+  /* —— 字体 —— */
+  --fc-font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                  "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+  --fc-font-mono: "JetBrains Mono", "SF Mono", "Cascadia Code", Consolas,
+                  "Roboto Mono", "PingFang SC", monospace;
+
+  /* —— 动效曲线 —— */
+  --fc-ease:        cubic-bezier(0.4, 0, 0.2, 1);
+  --fc-ease-out:    cubic-bezier(0.16, 1, 0.3, 1);
+  --fc-ease-in:     cubic-bezier(0.4, 0, 1, 1);
+  --fc-ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  /* —— 动效时长 —— */
+  --fc-duration-fast: 120ms;
+  --fc-duration:      200ms;
+  --fc-duration-slow: 320ms;
+
+  /* —— Z 轴层级 —— */
+  --fc-z-base:    1;
+  --fc-z-sticky:  100;
+  --fc-z-fixed:   200;
+  --fc-z-dropdown: 500;
+  --fc-z-modal:   1000;
+  --fc-z-toast:   2000;
+  --fc-z-tooltip: 3000;
+}
+
+/* ===========================================================
+ * 5. 全局基线（baseline）— 不修改任何业务 DOM，只重置浏览器默认
+ * =========================================================== */
+:root {
+  color-scheme: dark light;
+}
+
+html, body {
+  background: var(--fc-bg);
+  color: var(--fc-text);
+  font-family: var(--fc-font-sans);
+  font-size: var(--fc-text-base);
+  line-height: var(--fc-leading);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  transition: background-color var(--fc-duration) var(--fc-ease),
+              color var(--fc-duration) var(--fc-ease);
+}
+
+::selection {
+  background: var(--fc-selection-bg);
+  color: var(--fc-selection-text);
+}
+
+/* —— 滚动条（Webkit） —— */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: var(--fc-scrollbar-track); }
+::-webkit-scrollbar-thumb {
+  background: var(--fc-scrollbar-thumb);
+  border-radius: var(--fc-radius-pill);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  transition: background var(--fc-duration) var(--fc-ease);
+}
+::-webkit-scrollbar-thumb:hover { background: var(--fc-scrollbar-thumb-hi); background-clip: padding-box; }
+
+/* Firefox 滚动条 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--fc-scrollbar-thumb) transparent;
+}
+
+/* ===========================================================
+ * 6. 工具类（utility classes）— 谨慎使用，业务优先用语义类
+ * =========================================================== */
+.fc-flex { display: flex; }
+.fc-flex-col { display: flex; flex-direction: column; }
+.fc-flex-1 { flex: 1 1 0; min-width: 0; min-height: 0; }
+.fc-items-center { align-items: center; }
+.fc-justify-between { justify-content: space-between; }
+.fc-justify-center { justify-content: center; }
+.fc-gap-1 { gap: var(--fc-space-1); }
+.fc-gap-2 { gap: var(--fc-space-2); }
+.fc-gap-3 { gap: var(--fc-space-3); }
+.fc-gap-4 { gap: var(--fc-space-4); }
+.fc-gap-6 { gap: var(--fc-space-6); }
+
+.fc-text-hi   { color: var(--fc-text-hi); }
+.fc-text-lo   { color: var(--fc-text-lo); }
+.fc-text-mute { color: var(--fc-text-mute); }
+.fc-text-primary { color: var(--fc-primary); }
+.fc-text-success { color: var(--fc-success); }
+.fc-text-danger  { color: var(--fc-danger); }
+.fc-text-warn    { color: var(--fc-warn); }
+
+.fc-text-xs   { font-size: var(--fc-text-xs); }
+.fc-text-sm   { font-size: var(--fc-text-sm); }
+.fc-text-md   { font-size: var(--fc-text-md); }
+.fc-text-lg   { font-size: var(--fc-text-lg); }
+.fc-text-xl   { font-size: var(--fc-text-xl); }
+.fc-text-2xl  { font-size: var(--fc-text-2xl); }
+
+.fc-font-mono { font-family: var(--fc-font-mono); font-variant-numeric: tabular-nums; }
+.fc-truncate  { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* —— 状态点（在线/离线/警告）—— */
+.fc-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--fc-text-mute);
+  flex-shrink: 0;
+}
+.fc-dot.is-online  { background: var(--fc-success); box-shadow: 0 0 0 3px var(--fc-success-soft); }
+.fc-dot.is-offline { background: var(--fc-text-mute); }
+.fc-dot.is-warn    { background: var(--fc-warn);    box-shadow: 0 0 0 3px var(--fc-warn-soft); }
+.fc-dot.is-danger  { background: var(--fc-danger);  box-shadow: 0 0 0 3px var(--fc-danger-soft); }

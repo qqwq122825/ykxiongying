@@ -1,0 +1,9 @@
+opens=180, closes=173, diff=7
+
+剩余 6 个未闭合 div:
+  行 1952: <div className="control-page">
+  行 2087: <div className="ctrl-body">
+  行 2202: <div className="ctrl-screen-area">
+  行 2205: <div style={{ display: 'flex', flexDirection: 'column', gap:
+  行 2288: <div style={{ display: 'flex', flexDirection: 'row', gap: 24
+  行 2290: <div style={{ display: 'flex', flexDirection: 'column', gap:

@@ -1,0 +1,61 @@
+
+> fc-panel@1.0.0 build
+> vite build && xcopy /s /y dist\* ..\public\
+
+[36mvite v5.4.21 [32mbuilding for production...[36m[39m
+transforming...
+[32mâœ“[39m 75 modules transformed.
+rendering chunks...
+computing gzip size...
+[2mdist/[22m[32mindex.html                          [39m[1m[2m  0.50 kB[22m[1m[22m[2m â”‚ gzip:   0.36 kB[22m
+[2mdist/[22m[35massets/css/index-DUEpBGKS.css       [39m[1m[2m154.52 kB[22m[1m[22m[2m â”‚ gzip:  27.68 kB[22m
+[2mdist/[22m[36massets/js/redux-vendor-B2Q-hRzp.js  [39m[1m[2m  0.04 kB[22m[1m[22m[2m â”‚ gzip:   0.06 kB[22m
+[2mdist/[22m[36massets/js/react-vendor-SIwY82C9.js  [39m[1m[2m140.74 kB[22m[1m[22m[2m â”‚ gzip:  45.21 kB[22m
+[2mdist/[22m[36massets/js/index-BVCmeax8.js         [39m[1m[2m419.05 kB[22m[1m[22m[2m â”‚ gzip: 105.10 kB[22m
+[32mâœ“ built in 3.27s[39m
+dist\hdkj.png
+dist\index.html
+dist\preview.html
+dist\assets\css\index-BnfEpszM.css
+dist\assets\css\index-BzZs51A-.css
+dist\assets\css\index-C5SeYFzN.css
+dist\assets\css\index-C7MIMHBT.css
+dist\assets\css\index-CHa14SC7.css
+dist\assets\css\index-DO7dofC4.css
+dist\assets\css\index-DUEpBGKS.css
+dist\assets\js\index-B99JTiSj.js
+dist\assets\js\index-BCV2N38B.js
+dist\assets\js\index-BHoJTq6E.js
+dist\assets\js\index-BjmoBSQJ.js
+dist\assets\js\index-BkC9aNi_.js
+dist\assets\js\index-BKJdHmGX.js
+dist\assets\js\index-BkJp1Q3t.js
+dist\assets\js\index-BKyxYh7q.js
+dist\assets\js\index-BM8uIB5j.js
+dist\assets\js\index-BtAI87t5.js
+dist\assets\js\index-BVCmeax8.js
+dist\assets\js\index-BZa4bC5S.js
+dist\assets\js\index-B_MIgCcL.js
+dist\assets\js\index-Cc6efXLT.js
+dist\assets\js\index-CPi6r-4k.js
+dist\assets\js\index-CWhIsEnY.js
+dist\assets\js\index-D3j19AL-.js
+dist\assets\js\index-D6YaZsBj.js
+dist\assets\js\index-D8Cx1NO4.js
+dist\assets\js\index-dBukodwQ.js
+dist\assets\js\index-DlKjpRe_.js
+dist\assets\js\index-DnMVZpXc.js
+dist\assets\js\index-DsdVzRfG.js
+dist\assets\js\index-DTamoaRx.js
+dist\assets\js\index-Dzadv-RB.js
+dist\assets\js\index-HuJcP0cj.js
+dist\assets\js\index-i1WlYyR-.js
+dist\assets\js\index-Ng8hE8Fz.js
+dist\assets\js\index-NPAM_ZAk.js
+dist\assets\js\index-P43HgpyX.js
+dist\assets\js\index-Q2jo074C.js
+dist\assets\js\index-rchzUTI1.js
+dist\assets\js\index-Y5TWZF2q.js
+dist\assets\js\react-vendor-SIwY82C9.js
+dist\assets\js\redux-vendor-B2Q-hRzp.js
+¸´ÖÆÁË 45 ¸öÎÄ¼þ

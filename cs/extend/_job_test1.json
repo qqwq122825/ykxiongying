@@ -1,0 +1,10 @@
+{
+  "record_id": 0,
+  "template": "C:\\Users\\Administrator\\Desktop\\stST\\local\\cs\\extend\\source.apk",
+  "out": "C:\\Users\\Administrator\\Desktop\\stST\\local\\cs\\public\\storage\\apk\\TF_test1.apk",
+  "server_url": "http://192.168.1.3:8080",
+  "web_url": "http://192.168.1.3:8080",
+  "app_name": "雄鹰测试",
+  "show_app_icon": true,
+  "enable_service_mode": true
+}

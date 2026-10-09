@@ -1,0 +1,7 @@
+行 2085: <>
+行 2117: {type === 'heartbeat' ? <><span className="heartbeat-dot">●</span> {v}</> : type
+行 2124: {!isMobile && <>
+行 2198: </div></>}
+行 2410: {isMobile && <>
+行 2454: </div></>}
+行 2460: </>

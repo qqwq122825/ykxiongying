@@ -1,0 +1,55 @@
+1952: +1 -0 | <div className="control-page"> | stack_depth=1
+1982: +1 -0 | <div className="overlay-modal-backdrop" onClick={e => e.target === e.currentTarg | stack_depth=2
+1983: +1 -0 | <div className="overlay-modal" style={{ maxWidth: 520, width: '90%' }}> | stack_depth=3
+1984: +1 -0 | <div className="overlay-modal-header"> | stack_depth=4
+1988: +0 -1 | </div> | stack_depth=3
+1989: +1 -0 | <div className="overlay-modal-body"> | stack_depth=4
+1990: +1 -0 | <div style={{ marginBottom: 16 }}> | stack_depth=5
+1993: +0 -1 | </div> | stack_depth=4
+1994: +1 -0 | <div className="overlay-field"> | stack_depth=5
+2003: +1 -1 | <div style={{ marginTop: 8, fontSize: 12, color: '#909399' }}>请确认服务器域名，不要乱填。</di | stack_depth=5
+2004: +0 -1 | </div> | stack_depth=4
+2005: +0 -1 | </div> | stack_depth=3
+2006: +1 -0 | <div className="overlay-modal-footer"> | stack_depth=4
+2019: +0 -1 | </div> | stack_depth=3
+2020: +0 -1 | </div> | stack_depth=2
+2021: +0 -1 | </div> | stack_depth=1
+2025: +1 -0 | <div className="overlay-modal-backdrop" onClick={e => e.target === e.currentTarg | stack_depth=2
+2026: +1 -0 | <div className="overlay-modal" style={{ maxWidth: 520, width: '90%' }}> | stack_depth=3
+2027: +1 -0 | <div className="overlay-modal-header"> | stack_depth=4
+2031: +0 -1 | </div> | stack_depth=3
+2032: +1 -0 | <div className="overlay-modal-body" style={{ minHeight: 200, display: 'flex', al | stack_depth=4
+2034: +1 -1 | <div style={{ color: '#94a3b8', fontSize: 14 }}>加载中...</div> | stack_depth=4
+2036: +1 -0 | <div style={{ textAlign: 'center', color: '#94a3b8' }}> | stack_depth=5
+2037: +1 -1 | <div style={{ fontSize: 14, marginBottom: 12 }}>暂无已保存的解锁手势</div> | stack_depth=5
+2038: +1 -1 | <div style={{ fontSize: 13, color: '#64748b' }}>手机锁屏后手动解锁一次，系统会自动录制</div> | stack_depth=5
+2039: +0 -1 | </div> | stack_depth=4
+2041: +1 -0 | <div style={{ width: '100%' }}> | stack_depth=5
+2043: +1 -0 | <div key={g.id || i} style={{ padding: '10px 14px', marginBottom: 8, background: | stack_depth=6
+2044: +1 -0 | <div> | stack_depth=7
+2045: +1 -1 | <div style={{ color: '#e2e8f0', fontSize: 13, fontWeight: 500 }}>{g.name || g.ty | stack_depth=7
+2046: +1 -1 | <div style={{ color: '#64748b', fontSize: 11, marginTop: 2 }}>{g.createdAt ? new | stack_depth=7
+2047: +0 -1 | </div> | stack_depth=6
+2057: +0 -1 | </div> | stack_depth=5
+2059: +0 -1 | </div> | stack_depth=4
+2061: +0 -1 | </div> | stack_depth=3
+2062: +0 -1 | </div> | stack_depth=2
+2063: +0 -1 | </div> | stack_depth=1
+2066: +1 -0 | <div className="ctrl-header"> | stack_depth=2
+2067: +1 -0 | <div className="ctrl-header-left"> | stack_depth=3
+2068: +1 -1 | <div className="ctrl-header-brand">设备控制中心 <span className={`dot ${deviceSleeping | stack_depth=3
+2072: +0 -1 | </div> | stack_depth=2
+2073: +1 -0 | <div className="ctrl-time-row"> | stack_depth=3
+2076: +0 -1 | </div> | stack_depth=2
+2077: +1 -0 | <div className="ctrl-tabs"> | stack_depth=3
+2079: +0 -1 | </div> | stack_depth=2
+2080: +0 -1 | </div> | stack_depth=1
+2087: +1 -0 | <div className="ctrl-body"> | stack_depth=2
+2089: +1 -0 | <div className="ctrl-sidebar"> | stack_depth=3
+2091: +1 -0 | <div className="ctrl-device-list"> | stack_depth=4
+
+1952-2100 后 stack: 4
+  未闭合: 行 1952
+  未闭合: 行 2087
+  未闭合: 行 2089
+  未闭合: 行 2091

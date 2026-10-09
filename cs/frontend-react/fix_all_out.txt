@@ -1,0 +1,3 @@
+OK 修复 1: PC 端 ReaderView 调用 - 行 2314
+OK 修复 2: 移动端 ReaderView 加 props - 插入到行 2272
+DONE

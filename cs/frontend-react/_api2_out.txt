@@ -1,0 +1,8 @@
+=== Test 1: GET / (静态首页) ===
+ERROR: RemoteDisconnected: Remote end closed connection without response
+
+=== Test 2: GET /api/logs?deviceId=cfe498502e2b7210&page=1&pageSize=2 ===
+ERROR: RemoteDisconnected: Remote end closed connection without response
+
+=== Test 3: GET /api/logs?...&search=test ===
+ERROR: RemoteDisconnected: Remote end closed connection without response

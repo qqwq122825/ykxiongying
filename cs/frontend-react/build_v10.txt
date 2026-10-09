@@ -1,0 +1,40 @@
+
+> fc-panel@1.0.0 build
+> vite build && xcopy /s /y dist\* ..\public\
+
+[36mvite v5.4.21 [32mbuilding for production...[36m[39m
+transforming...
+[32m✓[39m 12 modules transformed.
+[31mx[39m Build failed in 199ms
+[31merror during build:
+[31m[vite:esbuild] Transform failed with 2 errors:
+C:/wwwroot/cs/frontend-react/src/pages/ControlPage.jsx:2460:8: ERROR: Unexpected closing fragment tag does not match opening "div" tag
+C:/wwwroot/cs/frontend-react/src/pages/ControlPage.jsx:2495:12: ERROR: Unterminated regular expression[31m
+file: [36mC:/wwwroot/cs/frontend-react/src/pages/ControlPage.jsx:2460:8[31m
+[33m
+[33mUnexpected closing fragment tag does not match opening "div" tag[33m
+2458|        </div>{/* end ctrl-sidebar-panel */}
+2459|        </div>{/* end ctrl-body */}
+2460|        </>
+   |          ^
+2461|        ) : renderTabContent()}
+2462|  
+
+[33mUnterminated regular expression[33m
+2493|        )}
+2494|        </div>
+2495|        </div>
+   |              ^
+2496|        </div>
+2497|        </div>
+[31m
+    at failureErrorWithLog (C:\wwwroot\cs\frontend-react\node_modules\esbuild\lib\main.js:1472:15)
+    at C:\wwwroot\cs\frontend-react\node_modules\esbuild\lib\main.js:755:50
+    at responseCallbacks.<computed> (C:\wwwroot\cs\frontend-react\node_modules\esbuild\lib\main.js:622:9)
+    at handleIncomingPacket (C:\wwwroot\cs\frontend-react\node_modules\esbuild\lib\main.js:677:12)
+    at Socket.readFromStdout (C:\wwwroot\cs\frontend-react\node_modules\esbuild\lib\main.js:600:7)
+    at Socket.emit (node:events:519:28)
+    at addChunk (node:internal/streams/readable:559:12)
+    at readableAddChunkPushByteMode (node:internal/streams/readable:510:3)
+    at Readable.push (node:internal/streams/readable:390:5)
+    at Pipe.onStreamRead (node:internal/stream_base_commons:191:23)[39m

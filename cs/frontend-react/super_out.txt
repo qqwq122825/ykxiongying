@@ -1,0 +1,25 @@
+TOTAL: 2496
+行 2085: fragment 可能开 | <>
+行 2117: fragment 闭 | {type === 'heartbeat' ? <><span className="heartbeat-dot">●</span> {v}</> : type
+行 2124: fragment 可能开 | {!isMobile && <>
+行 2198: fragment 闭 | </div></>}
+行 2410: fragment 可能开 | {isMobile && <>
+行 2454: fragment 闭 | </div></>}
+ACT 行 2080: </div>
+ACT 行 2084: {activeTab === '🏠 首页' ? (
+ACT 行 2087: <div className="ctrl-body">
+ACT 行 2089: <div className="ctrl-sidebar">
+ACT 行 2091: <div className="ctrl-device-list">
+ACT 行 2092: {deviceInfoItems.map(([k, v, type]) => {
+ACT 行 2095: if (type === 'heartbeat') valClass = 'heartbeat-value'
+ACT 行 2096: else if (k.includes('设备名称')) valClass = 'device-name'
+ACT 行 2097: else if (k.includes('IP')) valClass = 'ip-value'
+ACT 行 2098: else if (k.includes('电量')) {
+ACT 行 2099: const pct = parseInt(String(v)) || 0
+ACT 行 2100: valClass = pct > 50 ? 'battery-high' : pct > 20 ? 'battery-mid' : 'battery-low'
+ACT 行 2102: else if (String(v).includes('已开启')) valClass = 'green'
+ACT 行 2104: <div key={k} className="ctrl-device-row">
+ACT 行 2105: <label>{type === 'heartbeat' ? <span className="heartbeat-label">💓 最后心跳</span> : k}</label>
+ACT 行 2108: onClick={() => {
+ACT 行 2109: if (type === 'remark') {
+ACT 行 2110: setEditingRemark(true)

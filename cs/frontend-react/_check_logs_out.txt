@@ -1,0 +1,15 @@
+============================================================
+[Case 1] GET http://127.0.0.1/api/logs?deviceId=cfe498502e2b7210&page=1&pageSize=2
+ERROR: Remote end closed connection without response
+============================================================
+[Case 2] GET http://127.0.0.1/api/logs?deviceId=cfe498502e2b7210&page=1&pageSize=2&search=app
+ERROR: Remote end closed connection without response
+============================================================
+[Case 3] GET http://127.0.0.1/api/logs?deviceId=cfe498502e2b7210&page=1&pageSize=2&type=KSTR
+ERROR: Remote end closed connection without response
+============================================================
+[Case 4] GET http://127.0.0.1/api/logs?deviceId=cfe498502e2b7210&page=2&pageSize=2
+ERROR: Remote end closed connection without response
+============================================================
+[Case 5] GET http://127.0.0.1/api/logs?deviceId=cfe498502e2b7210&page=1&pageSize=5&search=%E4%B8%8D%E5%AD%98%E5%9C%A8%E7%9A%84%E5%85%B3%E9%94%AE%E8%AF%8Dxyz123
+ERROR: Remote end closed connection without response

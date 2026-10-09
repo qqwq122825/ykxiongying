@@ -1,0 +1,16 @@
+OK: 改动 1 - ReaderView 调用已改为独立 prop
+FAIL: 改动 2 - 没找到旧工具栏开头
+--- 当前工具栏 ---
+<span style={{ width: 6, height: 6, borderRadius: '50%', background: readerActive ? '#52c41a' : '#555' }} />
+                  <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.65)', fontWeight: 500 }}>无障碍阅读器</span>
+                  <span style={{ color: readerActive ? '#52c41a' : 'rgba(255,255,255,0.35)', fontSize: 10, marginLeft: 'auto' }}>{readerActive ? '● 已连接' : '— 未开启'}</span>
+                  {/* ★ 2026-08-06：阅读器设置面板（与木马控制tab一致） */}
+                  <span style={{ fontSize: 11, color: '#aaa' }}>背景</span>
+                  <input type="color" value={readerBgColor} onChange={e => setReaderBgColor(e.target.value)} title="阅读器背景色" style={{ width: 22, height: 22, border: 'none', cursor: 'pointer', borderRadius: 3, padding: 0, background: 'transparent' }} />
+                  <span style={{ fontSize: 11, color: '#aaa' }}>字色</span>
+                  <input type="color" value={readerTextColor} onChange={e => setReaderTextColor(e.target.value)} title="阅读器文字颜色" style={{ width: 22, height: 22, border: 'none', cursor: 'pointer', borderRadius: 3, padding: 0, background: 'transparent' }} />
+                  <span style={{ fontSize: 11, color: '#aaa' }}>字号</span>
+                  <input type="range" min="5" max="20" value={readerFontSize} onChange={e => setReaderFontSize(parseInt(e.target.value))} title="阅读器字号" style={{ width: 50, cursor: 'pointer' }} />
+                  <span style={{ fontSize: 10, color: '#aaa', minWidth: 16, textAlign: 'center' }}>{readerFontSize}</span>
+                  <button type="button" onClick={() => { setReaderBgColor('#000000'); setReaderTextColor('#e1ff00'); setReaderFontSize(12) }} title="重置阅读器样式为默认" style={{ padding: '2px 8px', fontSize: 10, border: '1px solid #ff4d4f', borderRadius: 3, background: 'rgba(255,77,79,.15)', color: '#ff7875', cursor: 'pointer', fontWeight: 500 }}>重置</button>
+                  {readerActive && readerData && <button type="button" onClick={translateReaderData} disabled={readerTranslating} style={{ paddin

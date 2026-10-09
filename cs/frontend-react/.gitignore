@@ -1,0 +1,9 @@
+﻿node_modules/
+dist/
+static/
+*.log
+.DS_Store
+.vscode/
+.idea/
+_rar_tmp/
+frontend-react_bak_*/

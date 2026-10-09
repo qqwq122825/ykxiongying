@@ -1,0 +1,13 @@
+   13|readerBgColor     |readerBgColor, setReaderBgColor,
+   14|readerTextColor   |readerTextColor, setReaderTextColor,
+   15|readerFontSize    |readerFontSize, setReaderFontSize,
+  338|input type=       |<input type="text" placeholder="PIN或图案(1,2,3)" value={unlockPassword} onChange={e => setUnlockPassword(e.target.value)} style={{ width: '100
+  411|背景                |<span style={{ fontSize: 12, color: '#aaa' }}>背景</span>
+  412|readerBgColor     |<input type="color" value={readerBgColor} onChange={e => setReaderBgColor(e.target.value)} style={{ width: 28, height: 28, border: 'none', c
+  414|readerTextColor   |<input type="color" value={readerTextColor} onChange={e => setReaderTextColor(e.target.value)} style={{ width: 28, height: 28, border: 'none
+  415|字号                |<span style={{ fontSize: 12, color: '#aaa' }}>字号</span>
+  416|readerFontSize    |<input type="range" min="5" max="20" value={readerFontSize} onChange={e => setReaderFontSize(parseInt(e.target.value))} style={{ width: 60, 
+  417|readerFontSize    |<span style={{ fontSize: 11, color: '#aaa', minWidth: 20 }}>{readerFontSize}</span>
+  491|readerBgColor     |) : <ReaderView data={httpReaderData} onTap={(x, y) => { sendTunnelInput('tap', { x, y }); fetchReaderAfterAction() }} onGesture={g => { if 
+  497|input type=       |<input type="text" placeholder="输入文本内容" value={textInput} onChange={e => setTextInput(e.target.value)} onKeyPress={e => { if (e.key === 'Ent
+  674|input type=       |<input type="text" placeholder="输入配对码" value={pairCode} onChange={e => setPairCode(e.target.value)} style={{ width: 76, height: 26, padding:

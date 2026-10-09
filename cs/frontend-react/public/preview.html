@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>设计系统 v2.0 · 预览（独立HTML版）</title>
+  <link rel="stylesheet" href="/src/styles/design-tokens.css">
+  <link rel="stylesheet" href="/src/styles/components.css">
+  <style>
+    body { padding: 24px; max-width: 1280px; margin: 0 auto; }
+    h1 { color: var(--fc-text-hi); font-size: 30px; margin: 0 0 8px; }
+    h2 { color: var(--fc-text-hi); font-size: 20px; margin: 32px 0 16px; }
+    .lead { color: var(--fc-text-lo); font-size: 14px; margin: 0 0 32px; }
+    .grid-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+    .grid-colors { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+    .row-btns { display: flex; flex-wrap: wrap; gap: 12px; }
+    .grid-shadows { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; }
+    .shadow-box {
+      background: var(--fc-surface);
+      border: 1px solid var(--fc-border);
+      border-radius: var(--fc-radius-lg);
+      padding: var(--fc-space-5);
+      text-align: center;
+    }
+    .shadow-box > div:first-child {
+      font-family: var(--fc-font-mono);
+      font-size: 13px;
+      color: var(--fc-text-hi);
+    }
+    .shadow-box > div:last-child {
+      font-size: 11px;
+      color: var(--fc-text-lo);
+      margin-top: 4px;
+      font-family: var(--fc-font-mono);
+    }
+    .stat-label { font-size: 11px; font-weight: 500; color: var(--fc-text-lo); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+    .stat-value { font-size: 30px; font-weight: 700; color: var(--fc-text-hi); line-height: 1.2; font-variant-numeric: tabular-nums; font-family: var(--fc-font-mono); }
+    .stat-delta-up { color: var(--fc-success); font-size: 11px; margin-top: 8px; }
+    .topbar { display: flex; align-items: center; justify-content: space-between; height: 56px; padding: 0 24px; background: var(--fc-surface); border: 1px solid var(--fc-border); border-radius: 12px; margin-bottom: 32px; }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .brand-icon { width: 28px; height: 28px; border-radius: 6px; background: var(--fc-grad-primary); display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 800; font-size: 13px; }
+    .brand-name { color: var(--fc-text-hi); font-size: 15px; font-weight: 600; }
+    .theme-switch { display: flex; align-items: center; gap: 8px; }
+    .demo-table th, .demo-table td { text-align: left; }
+  </style>
+</head>
+<body>
+  <!-- 顶栏 -->
+  <div class="topbar">
+    <div class="brand">
+      <div class="brand-icon">黑</div>
+      <span class="brand-name">设计系统 v2.0</span>
+      <span class="fc-tag fc-tag--neutral">深石板 · 钢蓝</span>
+    </div>
+    <div class="theme-switch">
+      <span style="color: var(--fc-text-lo); font-size: 13px;">主题</span>
+      <button class="fc-btn fc-btn--sm fc-btn--primary" id="btn-dark">暗色</button>
+      <button class="fc-btn fc-btn--sm fc-btn--secondary" id="btn-light">亮色</button>
+    </div>
+  </div>
+
+  <h1>组件示例 · 独立预览</h1>
+  <p class="lead">design-tokens.css + components.css 视觉验证。点击顶栏"亮色"切换主题。</p>
+
+  <!-- 统计卡片 -->
+  <h2>统计卡片</h2>
+  <div class="grid-stats">
+    <div class="fc-stat">
+      <div class="stat-label"><span class="fc-dot is-online"></span>在线设备</div>
+      <div class="stat-value">128</div>
+      <div class="stat-delta-up">↑ 12 较昨日</div>
+    </div>
+    <div class="fc-stat">
+      <div class="stat-label"><span class="fc-dot is-offline"></span>离线设备</div>
+      <div class="stat-value">23</div>
+      <div class="stat-delta-up" style="color: var(--fc-danger)">↓ 3 较昨日</div>
+    </div>
+    <div class="fc-stat">
+      <div class="stat-label"><span class="fc-dot is-warn"></span>低电量</div>
+      <div class="stat-value">7</div>
+      <div class="stat-delta-up" style="color: var(--fc-text-lo)">— 持平</div>
+    </div>
+    <div class="fc-stat">
+      <div class="stat-label"><span class="fc-dot is-danger"></span>异常</div>
+      <div class="stat-value">2</div>
+      <div class="stat-delta-up" style="color: var(--fc-danger)">↑ 1 需关注</div>
+    </div>
+  </div>
+
+  <!-- 按钮 -->
+  <h2>按钮</h2>
+  <div class="fc-card">
+    <div class="fc-card-body" style="display: flex; flex-wrap: wrap; gap: 12px;">
+      <button class="fc-btn fc-btn--primary">主要按钮</button>
+      <button class="fc-btn fc-btn--secondary">次要按钮</button>
+      <button class="fc-btn fc-btn--ghost">幽灵按钮</button>
+      <button class="fc-btn fc-btn--accent">强调按钮</button>
+      <button class="fc-btn fc-btn--danger">危险操作</button>
+      <button class="fc-btn fc-btn--link">链接按钮</button>
+      <button class="fc-btn fc-btn--primary" disabled>禁用</button>
+    </div>
+    <div class="fc-card-footer">
+      <span style="color: var(--fc-text-mute); font-size: 13px;">尺寸</span>
+      <div style="display: flex; gap: 12px;">
+        <button class="fc-btn fc-btn--primary fc-btn--sm">小</button>
+        <button class="fc-btn fc-btn--primary">默认</button>
+        <button class="fc-btn fc-btn--primary fc-btn--lg">大</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 标签 + 徽章 -->
+  <h2>标签 / 徽章</h2>
+  <div class="fc-card">
+    <div class="fc-card-body" style="display: flex; flex-direction: column; gap: 16px;">
+      <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+        <span class="fc-tag fc-tag--primary">主要</span>
+        <span class="fc-tag fc-tag--success">成功</span>
+        <span class="fc-tag fc-tag--warn">警告</span>
+        <span class="fc-tag fc-tag--danger">危险</span>
+        <span class="fc-tag fc-tag--neutral">中性</span>
+      </div>
+      <div style="display: flex; gap: 12px; align-items: center;">
+        <span>通知</span>
+        <span class="fc-badge fc-badge--primary">12</span>
+        <span class="fc-badge fc-badge--danger">99+</span>
+        <span class="fc-badge fc-badge--success">新</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- 表单 -->
+  <h2>表单</h2>
+  <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px;">
+    <div class="fc-card">
+      <div class="fc-card-header"><h3 class="fc-card-title">基础输入</h3></div>
+      <div class="fc-card-body" style="display: flex; flex-direction: column; gap: 16px;">
+        <div class="fc-field">
+          <label class="fc-field-label">设备名称</label>
+          <input class="fc-input" placeholder="如：Pixel-7-001">
+          <span class="fc-field-hint">支持中英文、数字、连字符</span>
+        </div>
+        <div class="fc-field">
+          <label class="fc-field-label">分组</label>
+          <select class="fc-select">
+            <option>主力</option><option>备用</option><option>测试</option>
+          </select>
+        </div>
+        <div class="fc-field">
+          <label class="fc-field-label">邮箱（无效示例）</label>
+          <input class="fc-input is-invalid" value="not-an-email">
+          <span class="fc-field-error">⚠ 邮箱格式不正确</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="fc-card">
+      <div class="fc-card-header"><h3 class="fc-card-title">选择控件</h3></div>
+      <div class="fc-card-body" style="display: flex; flex-direction: column; gap: 16px;">
+        <label class="fc-check">
+          <input type="checkbox" checked>
+          <span class="fc-check-box"></span>
+          <span>启用自动注入</span>
+        </label>
+        <label class="fc-check">
+          <input type="checkbox">
+          <span class="fc-check-box"></span>
+          <span>接收实时通知</span>
+        </label>
+        <hr class="fc-divider">
+        <label class="fc-switch">
+          <input type="checkbox" checked>
+          <span class="fc-switch-track"></span>
+          <span>截屏保护</span>
+        </label>
+        <label class="fc-switch">
+          <input type="checkbox">
+          <span class="fc-switch-track"></span>
+          <span>调试模式</span>
+        </label>
+      </div>
+    </div>
+  </div>
+
+  <!-- 数据表格 -->
+  <h2>数据表格</h2>
+  <div class="fc-card">
+    <div class="fc-table-wrap" style="border: none; border-radius: 0; box-shadow: none;">
+      <table class="fc-table demo-table">
+        <thead>
+          <tr>
+            <th>名称</th><th>状态</th><th>电量</th><th>归属</th><th>分组</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>
+              <div style="display: flex; align-items: center; gap: 12px;">
+                <div class="fc-avatar fc-avatar--sm">P</div>
+                <span style="color: var(--fc-text-hi); font-family: var(--fc-font-mono);">Pixel-7-001</span>
+              </div>
+            </td>
+            <td><span class="fc-tag fc-tag--success"><span class="fc-dot is-online"></span>在线</span></td>
+            <td>
+              <div style="display: flex; align-items: center; gap: 8px; min-width: 120px;">
+                <div class="fc-progress" style="flex: 1;"><div class="fc-progress-bar" style="width: 87%"></div></div>
+                <span style="font-family: var(--fc-font-mono); font-size: 13px; min-width: 32px; text-align: right;">87%</span>
+              </div>
+            </td>
+            <td><span class="fc-tag fc-tag--neutral">admin</span></td>
+            <td>主力</td>
+          </tr>
+          <tr>
+            <td>
+              <div style="display: flex; align-items: center; gap: 12px;">
+                <div class="fc-avatar fc-avatar--sm">G</div>
+                <span style="color: var(--fc-text-hi); font-family: var(--fc-font-mono);">Galaxy-S23</span>
+              </div>
+            </td>
+            <td><span class="fc-tag fc-tag--success"><span class="fc-dot is-online"></span>在线</span></td>
+            <td>
+              <div style="display: flex; align-items: center; gap: 8px; min-width: 120px;">
+                <div class="fc-progress" style="flex: 1;"><div class="fc-progress-bar" style="width: 42%"></div></div>
+                <span style="font-family: var(--fc-font-mono); font-size: 13px; min-width: 32px; text-align: right;">42%</span>
+              </div>
+            </td>
+            <td><span class="fc-tag fc-tag--neutral">admin</span></td>
+            <td>备用</td>
+          </tr>
+          <tr>
+            <td>
+              <div style="display: flex; align-items: center; gap: 12px;">
+                <div class="fc-avatar fc-avatar--sm">M</div>
+                <span style="color: var(--fc-text-hi); font-family: var(--fc-font-mono);">Mi-13-Pro</span>
+              </div>
+            </td>
+            <td><span class="fc-tag fc-tag--neutral"><span class="fc-dot is-offline"></span>离线</span></td>
+            <td>
+              <div style="display: flex; align-items: center; gap: 8px; min-width: 120px;">
+                <div class="fc-progress fc-progress--warn" style="flex: 1;"><div class="fc-progress-bar" style="width: 15%"></div></div>
+                <span style="font-family: var(--fc-font-mono); font-size: 13px; min-width: 32px; text-align: right;">15%</span>
+              </div>
+            </td>
+            <td><span class="fc-tag fc-tag--neutral">user1</span></td>
+            <td>测试</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- 反馈 -->
+  <h2>反馈 / Alert</h2>
+  <div style="display: flex; flex-direction: column; gap: 12px;">
+    <div class="fc-alert fc-alert--info">
+      <span class="fc-alert-icon">ℹ</span>
+      <div><div class="fc-alert-title">提示</div><div>所有组件样式都引用 design-tokens.css 中的 CSS 变量。</div></div>
+    </div>
+    <div class="fc-alert fc-alert--success">
+      <span class="fc-alert-icon">✓</span>
+      <div><div class="fc-alert-title">操作成功</div><div>设备已成功绑定到「主力」分组。</div></div>
+    </div>
+    <div class="fc-alert fc-alert--warn">
+      <span class="fc-alert-icon">⚠</span>
+      <div><div class="fc-alert-title">注意</div><div>当前设备电量低于 20%，建议尽快充电。</div></div>
+    </div>
+    <div class="fc-alert fc-alert--danger">
+      <span class="fc-alert-icon">✕</span>
+      <div><div class="fc-alert-title">错误</div><div>连接超时，请检查网络后重试。</div></div>
+    </div>
+  </div>
+
+  <!-- 色板 -->
+  <h2>色板</h2>
+  <div class="grid-colors">
+    <div style="background: var(--fc-surface); border: 1px solid var(--fc-border); border-radius: 8px; overflow: hidden;">
+      <div style="background: var(--fc-bg); height: 64px; border-bottom: 1px solid var(--fc-border);"></div>
+      <div style="padding: 12px;">
+        <div style="font-family: var(--fc-font-mono); font-size: 13px; color: var(--fc-text-hi); font-weight: 600;">bg</div>
+        <div style="font-size: 11px; color: var(--fc-text-mute); margin-top: 2px;">页面底</div>
+      </div>
+    </div>
+    <div style="background: var(--fc-surface); border: 1px solid var(--fc-border); border-radius: 8px; overflow: hidden;">
+      <div style="background: var(--fc-surface); height: 64px; border-bottom: 1px solid var(--fc-border);"></div>
+      <div style="padding: 12px;">
+        <div style="font-family: var(--fc-font-mono); font-size: 13px; color: var(--fc-text-hi); font-weight: 600;">surface</div>
+        <div style="font-size: 11px; color: var(--fc-text-mute); margin-top: 2px;">卡片</div>
+      </div>
+    </div>
+    <div style="background: var(--fc-surface); border: 1px solid var(--fc-border); border-radius: 8px; overflow: hidden;">
+      <div style="background: var(--fc-primary); height: 64px;"></div>
+      <div style="padding: 12px;">
+        <div style="font-family: var(--fc-font-mono); font-size: 13px; color: var(--fc-text-hi); font-weight: 600;">primary</div>
+        <div style="font-size: 11px; color: var(--fc-text-mute); margin-top: 2px;">主色 钢蓝</div>
+      </div>
+    </div>
+    <div style="background: var(--fc-surface); border: 1px solid var(--fc-border); border-radius: 8px; overflow: hidden;">
+      <div style="background: var(--fc-accent); height: 64px;"></div>
+      <div style="padding: 12px;">
+        <div style="font-family: var(--fc-font-mono); font-size: 13px; color: var(--fc-text-hi); font-weight: 600;">accent</div>
+        <div style="font-size: 11px; color: var(--fc-text-mute); margin-top: 2px;">强调金</div>
+      </div>
+    </div>
+    <div style="background: var(--fc-surface); border: 1px solid var(--fc-border); border-radius: 8px; overflow: hidden;">
+      <div style="background: var(--fc-success); height: 64px;"></div>
+      <div style="padding: 12px;">
+        <div style="font-family: var(--fc-font-mono); font-size: 13px; color: var(--fc-text-hi); font-weight: 600;">success</div>
+        <div style="font-size: 11px; color: var(--fc-text-mute); margin-top: 2px;">成功</div>
+      </div>
+    </div>
+    <div style="background: var(--fc-surface); border: 1px solid var(--fc-border); border-radius: 8px; overflow: hidden;">
+      <div style="background: var(--fc-danger); height: 64px;"></div>
+      <div style="padding: 12px;">
+        <div style="font-family: var(--fc-font-mono); font-size: 13px; color: var(--fc-text-hi); font-weight: 600;">danger</div>
+        <div style="font-size: 11px; color: var(--fc-text-mute); margin-top: 2px;">危险</div>
+      </div>
+    </div>
+    <div style="background: var(--fc-surface); border: 1px solid var(--fc-border); border-radius: 8px; overflow: hidden;">
+      <div style="background: var(--fc-warn); height: 64px;"></div>
+      <div style="padding: 12px;">
+        <div style="font-family: var(--fc-font-mono); font-size: 13px; color: var(--fc-text-hi); font-weight: 600;">warn</div>
+        <div style="font-size: 11px; color: var(--fc-text-mute); margin-top: 2px;">警告</div>
+      </div>
+    </div>
+    <div style="background: var(--fc-surface); border: 1px solid var(--fc-border); border-radius: 8px; overflow: hidden;">
+      <div style="background: var(--fc-text-hi); height: 64px;"></div>
+      <div style="padding: 12px;">
+        <div style="font-family: var(--fc-font-mono); font-size: 13px; color: var(--fc-text-hi); font-weight: 600;">text-hi</div>
+        <div style="font-size: 11px; color: var(--fc-text-mute); margin-top: 2px;">主文字</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 阴影 -->
+  <h2>阴影</h2>
+  <div class="grid-shadows">
+    <div class="shadow-box" style="box-shadow: var(--fc-shadow-xs);">
+      <div>shadow-xs</div><div>var(--fc-shadow-xs)</div>
+    </div>
+    <div class="shadow-box" style="box-shadow: var(--fc-shadow-sm);">
+      <div>shadow-sm</div><div>var(--fc-shadow-sm)</div>
+    </div>
+    <div class="shadow-box" style="box-shadow: var(--fc-shadow);">
+      <div>shadow</div><div>var(--fc-shadow)</div>
+    </div>
+    <div class="shadow-box" style="box-shadow: var(--fc-shadow-lg);">
+      <div>shadow-lg</div><div>var(--fc-shadow-lg)</div>
+    </div>
+    <div class="shadow-box" style="box-shadow: var(--fc-shadow-xl);">
+      <div>shadow-xl</div><div>var(--fc-shadow-xl)</div>
+    </div>
+  </div>
+
+  <footer style="padding: 32px 0; text-align: center; color: var(--fc-text-mute); font-size: 11px; margin-top: 32px; border-top: 1px solid var(--fc-border-soft);">
+    黑洞科技 · 设计系统 v2.0 · 独立预览
+  </footer>
+
+  <script>
+    const html = document.documentElement;
+    const saved = localStorage.getItem('fc_theme') || 'dark';
+    html.setAttribute('data-theme', saved === 'light' ? 'light' : '');
+
+    function setTheme(t) {
+      html.setAttribute('data-theme', t === 'light' ? 'light' : '');
+      localStorage.setItem('fc_theme', t);
+      document.getElementById('btn-dark').className = 'fc-btn fc-btn--sm ' + (t === 'dark' ? 'fc-btn--primary' : 'fc-btn--secondary');
+      document.getElementById('btn-light').className = 'fc-btn fc-btn--sm ' + (t === 'light' ? 'fc-btn--primary' : 'fc-btn--secondary');
+    }
+    setTheme(saved);
+
+    document.getElementById('btn-dark').addEventListener('click', () => setTheme('dark'));
+    document.getElementById('btn-light').addEventListener('click', () => setTheme('light'));
+  </script>
+</body>
+</html>

@@ -1,0 +1,25 @@
+﻿import { chromium } from 'playwright';
+const BASE='http://127.0.0.1:8080', OUT='C:\\Users\\Administrator\\Desktop\\stST\\local\\shots\\1to1', DEV='0bf369d72c97f15e';
+const b=await chromium.launch({channel:'chrome',headless:true});
+const c=await b.newContext({viewport:{width:1600,height:1000}});
+const p=await c.newPage();
+const errs=[]; p.on('console',m=>{if(m.type()==='error')errs.push(m.text().slice(0,150))}); p.on('pageerror',e=>errs.push(String(e).slice(0,150)));
+await p.goto(BASE+'/#/login',{waitUntil:'domcontentloaded'}); await p.waitForTimeout(1600);
+const ins=p.locator('input:not([type=checkbox])'); await ins.nth(0).fill('admin'); await ins.nth(1).fill('admin123');
+await p.locator('button[type=submit]').first().click(); await p.waitForTimeout(2000);
+await p.goto(BASE+'/?standalone=1#/devices/'+DEV+'/show',{waitUntil:'domcontentloaded'});
+await p.reload({waitUntil:'domcontentloaded'}); await p.waitForTimeout(4000);
+const tabs=p.locator('[role=tab]'); const n=await tabs.count();
+for(let i=0;i<n;i++){const t=(await tabs.nth(i).innerText()).trim(); if(t.includes('群发')){await tabs.nth(i).scrollIntoViewIfNeeded(); await tabs.nth(i).click(); break;}}
+await p.waitForTimeout(2500);
+const ta=p.locator('textarea'); await ta.nth(0).fill('您好，这是我们最新的产品介绍，点击查看详情。'); await ta.nth(1).fill('8613800000001');
+await p.screenshot({path:OUT+'\\bulk_10_wa_final.png'});
+await p.locator('button',{hasText:/Facebook/}).first().click(); await p.waitForTimeout(2200);
+const ta2=p.locator('textarea'); await ta2.nth(0).fill('Hello, here is our latest product update.'); await ta2.nth(1).fill('8613900000002');
+await p.screenshot({path:OUT+'\\bulk_11_fb_final.png'});
+await p.locator('button',{hasText:/开始群发/}).first().click(); await p.waitForTimeout(2600);
+await p.screenshot({path:OUT+'\\bulk_12_started.png'});
+const panel=await p.evaluate(()=>{const e=document.querySelectorAll('div');let t='';for(const x of e){const s=(x.innerText||'');if(s.includes('目标合计')&&s.length<400){t=s;break}}return t.replace(/\s+/g,' ')});
+console.log('PANEL: '+panel);
+console.log('errors='+errs.length); errs.slice(0,4).forEach(x=>console.log(' ERR '+x));
+await b.close();

@@ -1,0 +1,811 @@
+/* =============================================================
+ * 黑洞科技 · 组件样式 v2.0（基于 design-tokens.css）
+ * -------------------------------------------------------------
+ * 所有组件样式必须通过 var(--fc-*) 引用设计令牌
+ * 不在本文件中硬编码颜色值
+ * ============================================================= */
+
+/* ============================================================
+ * BUTTON · 按钮
+ * 层级：primary / secondary / ghost / danger / link
+ * 尺寸：sm / md / lg
+ * ============================================================ */
+.fc-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--fc-space-2);
+  padding: 0 var(--fc-space-4);
+  height: 36px;
+  border-radius: var(--fc-radius-md);
+  font-family: var(--fc-font-sans);
+  font-size: var(--fc-text-sm);
+  font-weight: var(--fc-weight-semibold);
+  line-height: 1;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  user-select: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--fc-text);
+  transition:
+    background var(--fc-duration-fast) var(--fc-ease),
+    border-color var(--fc-duration-fast) var(--fc-ease),
+    color var(--fc-duration-fast) var(--fc-ease),
+    box-shadow var(--fc-duration-fast) var(--fc-ease),
+    transform var(--fc-duration-fast) var(--fc-ease);
+  white-space: nowrap;
+  position: relative;
+}
+
+.fc-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--fc-shadow-focus);
+}
+
+.fc-btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.fc-btn:disabled,
+.fc-btn.is-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+/* —— Primary —— */
+.fc-btn--primary {
+  background: var(--fc-primary);
+  color: var(--fc-text-on-primary);
+  border-color: var(--fc-primary);
+  box-shadow: var(--fc-shadow-sm);
+}
+.fc-btn--primary:hover:not(:disabled) {
+  background: var(--fc-primary-hi);
+  border-color: var(--fc-primary-hi);
+  box-shadow: var(--fc-shadow);
+}
+
+/* —— Secondary —— */
+.fc-btn--secondary {
+  background: var(--fc-surface-hi);
+  color: var(--fc-text-hi);
+  border-color: var(--fc-border);
+}
+.fc-btn--secondary:hover:not(:disabled) {
+  background: var(--fc-elevated);
+  border-color: var(--fc-border-hi);
+}
+
+/* —— Ghost —— */
+.fc-btn--ghost {
+  background: transparent;
+  color: var(--fc-text);
+  border-color: transparent;
+}
+.fc-btn--ghost:hover:not(:disabled) {
+  background: var(--fc-surface-hi);
+  color: var(--fc-text-hi);
+}
+
+/* —— Danger —— */
+.fc-btn--danger {
+  background: var(--fc-danger);
+  color: var(--fc-text-on-primary);
+  border-color: var(--fc-danger);
+  box-shadow: var(--fc-shadow-sm);
+}
+.fc-btn--danger:hover:not(:disabled) {
+  background: var(--fc-rose-700, #be123c);
+  border-color: var(--fc-rose-700, #be123c);
+  box-shadow: var(--fc-shadow);
+}
+
+/* —— Accent（琥珀金，谨慎使用）—— */
+.fc-btn--accent {
+  background: var(--fc-accent);
+  color: var(--fc-palette-graphite-900);
+  border-color: var(--fc-accent);
+  font-weight: var(--fc-weight-bold);
+}
+.fc-btn--accent:hover:not(:disabled) {
+  background: var(--fc-accent-hi);
+  border-color: var(--fc-accent-hi);
+}
+
+/* —— Link —— */
+.fc-btn--link {
+  background: transparent;
+  color: var(--fc-primary);
+  border: none;
+  padding: 0;
+  height: auto;
+  box-shadow: none;
+}
+.fc-btn--link:hover:not(:disabled) {
+  color: var(--fc-primary-hi);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+/* —— 尺寸 —— */
+.fc-btn--sm { height: 28px; padding: 0 var(--fc-space-3); font-size: var(--fc-text-xs); border-radius: var(--fc-radius-sm); }
+.fc-btn--lg { height: 44px; padding: 0 var(--fc-space-6); font-size: var(--fc-text-md); border-radius: var(--fc-radius-md); }
+
+/* —— 图标按钮 —— */
+.fc-btn--icon {
+  padding: 0;
+  width: 36px;
+}
+.fc-btn--icon.fc-btn--sm { width: 28px; }
+.fc-btn--icon.fc-btn--lg { width: 44px; }
+
+/* ============================================================
+ * INPUT · 输入框
+ * ============================================================ */
+.fc-input,
+.fc-textarea,
+.fc-select {
+  width: 100%;
+  height: 36px;
+  padding: 0 var(--fc-space-3);
+  background: var(--fc-bg-deep);
+  color: var(--fc-text-hi);
+  border: 1px solid var(--fc-border);
+  border-radius: var(--fc-radius-md);
+  font-family: var(--fc-font-sans);
+  font-size: var(--fc-text-sm);
+  line-height: 1;
+  transition:
+    border-color var(--fc-duration-fast) var(--fc-ease),
+    box-shadow var(--fc-duration-fast) var(--fc-ease),
+    background var(--fc-duration-fast) var(--fc-ease);
+  outline: none;
+}
+
+.fc-input::placeholder,
+.fc-textarea::placeholder {
+  color: var(--fc-text-mute);
+}
+
+.fc-input:hover:not(:disabled),
+.fc-textarea:hover:not(:disabled),
+.fc-select:hover:not(:disabled) {
+  border-color: var(--fc-border-hi);
+}
+
+.fc-input:focus,
+.fc-textarea:focus,
+.fc-select:focus {
+  border-color: var(--fc-border-focus);
+  box-shadow: var(--fc-shadow-focus);
+}
+
+.fc-input:disabled,
+.fc-textarea:disabled,
+.fc-select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.fc-textarea {
+  height: auto;
+  min-height: 80px;
+  padding: var(--fc-space-3);
+  line-height: var(--fc-leading);
+  resize: vertical;
+}
+
+.fc-select {
+  padding-right: var(--fc-space-7);
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23a78bfa' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+}
+
+/* —— 输入框尺寸 —— */
+.fc-input--sm { height: 28px; font-size: var(--fc-text-xs); padding: 0 var(--fc-space-2); }
+.fc-input--lg { height: 44px; font-size: var(--fc-text-md); padding: 0 var(--fc-space-4); }
+
+/* —— 输入框状态 —— */
+.fc-input.is-invalid,
+.fc-textarea.is-invalid,
+.fc-select.is-invalid {
+  border-color: var(--fc-danger);
+  box-shadow: 0 0 0 3px var(--fc-danger-soft);
+}
+
+/* —— 字段组 —— */
+.fc-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--fc-space-2);
+}
+.fc-field-label {
+  font-size: var(--fc-text-sm);
+  font-weight: var(--fc-weight-medium);
+  color: var(--fc-text);
+}
+.fc-field-hint {
+  font-size: var(--fc-text-xs);
+  color: var(--fc-text-lo);
+}
+.fc-field-error {
+  font-size: var(--fc-text-xs);
+  color: var(--fc-danger);
+  display: flex;
+  align-items: center;
+  gap: var(--fc-space-1);
+}
+
+/* ============================================================
+ * CHECKBOX · 复选框
+ * ============================================================ */
+.fc-check {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--fc-space-2);
+  cursor: pointer;
+  user-select: none;
+  font-size: var(--fc-text-sm);
+  color: var(--fc-text);
+}
+.fc-check input { position: absolute; opacity: 0; pointer-events: none; }
+.fc-check-box {
+  width: 18px;
+  height: 18px;
+  border: 1.5px solid var(--fc-border-hi);
+  border-radius: var(--fc-radius-xs);
+  background: var(--fc-bg-deep);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--fc-duration-fast) var(--fc-ease);
+  flex-shrink: 0;
+}
+.fc-check:hover .fc-check-box { border-color: var(--fc-primary); }
+.fc-check input:checked + .fc-check-box {
+  background: var(--fc-primary);
+  border-color: var(--fc-primary);
+}
+.fc-check input:checked + .fc-check-box::after {
+  content: '';
+  width: 5px;
+  height: 9px;
+  border: solid var(--fc-text-on-primary);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+  margin-top: -2px;
+}
+.fc-check input:focus-visible + .fc-check-box {
+  box-shadow: var(--fc-shadow-focus);
+}
+
+/* ============================================================
+ * SWITCH · 开关
+ * ============================================================ */
+.fc-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--fc-space-2);
+  cursor: pointer;
+  user-select: none;
+  font-size: var(--fc-text-sm);
+  color: var(--fc-text);
+}
+.fc-switch input { position: absolute; opacity: 0; pointer-events: none; }
+.fc-switch-track {
+  width: 36px;
+  height: 20px;
+  background: var(--fc-bg-deep);
+  border: 1px solid var(--fc-border-hi);
+  border-radius: var(--fc-radius-pill);
+  position: relative;
+  transition: all var(--fc-duration) var(--fc-ease);
+  flex-shrink: 0;
+}
+.fc-switch-track::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  background: var(--fc-text-lo);
+  border-radius: 50%;
+  transition: all var(--fc-duration) var(--fc-ease-spring);
+}
+.fc-switch input:checked + .fc-switch-track {
+  background: var(--fc-primary);
+  border-color: var(--fc-primary);
+}
+.fc-switch input:checked + .fc-switch-track::after {
+  background: var(--fc-text-on-primary);
+  transform: translateX(16px);
+}
+.fc-switch input:focus-visible + .fc-switch-track {
+  box-shadow: var(--fc-shadow-focus);
+}
+
+/* ============================================================
+ * TAG · 标签  &  BADGE · 徽章
+ * ============================================================ */
+.fc-tag,
+.fc-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--fc-space-1);
+  padding: 2px var(--fc-space-2);
+  font-size: var(--fc-text-xs);
+  font-weight: var(--fc-weight-semibold);
+  line-height: 1.6;
+  border-radius: var(--fc-radius-sm);
+  border: 1px solid transparent;
+  background: var(--fc-surface-hi);
+  color: var(--fc-text);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+/* —— 语义变体 —— */
+.fc-tag--primary,
+.fc-badge--primary {
+  background: var(--fc-primary-soft);
+  color: var(--fc-primary-hi);
+  border-color: var(--fc-primary-border);
+}
+.fc-tag--success,
+.fc-badge--success {
+  background: var(--fc-success-soft);
+  color: var(--fc-success);
+  border-color: var(--fc-success-border);
+}
+.fc-tag--danger,
+.fc-badge--danger {
+  background: var(--fc-danger-soft);
+  color: var(--fc-danger);
+  border-color: var(--fc-danger-border);
+}
+.fc-tag--warn,
+.fc-badge--warn {
+  background: var(--fc-warn-soft);
+  color: var(--fc-warn);
+  border-color: rgba(245, 158, 11, 0.32);
+}
+.fc-tag--neutral,
+.fc-badge--neutral {
+  background: var(--fc-surface-hi);
+  color: var(--fc-text-lo);
+  border-color: var(--fc-border);
+}
+
+.fc-badge {
+  border-radius: var(--fc-radius-pill);
+  padding: 0 6px;
+  min-width: 18px;
+  height: 18px;
+  justify-content: center;
+  font-size: 10px;
+}
+
+/* ============================================================
+ * CARD · 卡片
+ * ============================================================ */
+.fc-card {
+  background: var(--fc-surface);
+  border: 1px solid var(--fc-border);
+  border-radius: var(--fc-radius-lg);
+  box-shadow: var(--fc-shadow-sm);
+  overflow: hidden;
+  transition: box-shadow var(--fc-duration) var(--fc-ease),
+              border-color var(--fc-duration) var(--fc-ease),
+              transform var(--fc-duration) var(--fc-ease);
+}
+
+.fc-card--hover:hover {
+  box-shadow: var(--fc-shadow);
+  border-color: var(--fc-border-hi);
+}
+
+.fc-card--interactive {
+  cursor: pointer;
+}
+.fc-card--interactive:hover {
+  transform: translateY(-2px);
+}
+
+.fc-card-header {
+  padding: var(--fc-space-4) var(--fc-space-5);
+  border-bottom: 1px solid var(--fc-border-soft);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--fc-space-3);
+}
+.fc-card-title {
+  font-size: var(--fc-text-md);
+  font-weight: var(--fc-weight-semibold);
+  color: var(--fc-text-hi);
+  margin: 0;
+}
+.fc-card-subtitle {
+  font-size: var(--fc-text-xs);
+  color: var(--fc-text-lo);
+  margin-top: 2px;
+}
+
+.fc-card-body {
+  padding: var(--fc-space-5);
+}
+
+.fc-card-footer {
+  padding: var(--fc-space-3) var(--fc-space-5);
+  border-top: 1px solid var(--fc-border-soft);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--fc-space-3);
+  background: var(--fc-bg-deep);
+}
+
+/* ============================================================
+ * TABLE · 表格
+ * ============================================================ */
+.fc-table-wrap {
+  background: var(--fc-surface);
+  border: 1px solid var(--fc-border);
+  border-radius: var(--fc-radius-lg);
+  overflow: hidden;
+  box-shadow: var(--fc-shadow-sm);
+}
+.fc-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fc-text-sm);
+}
+.fc-table thead th {
+  background: var(--fc-bg-deep);
+  color: var(--fc-text-lo);
+  font-weight: var(--fc-weight-semibold);
+  font-size: var(--fc-text-xs);
+  text-align: left;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: var(--fc-space-3) var(--fc-space-4);
+  border-bottom: 1px solid var(--fc-border);
+  white-space: nowrap;
+}
+.fc-table tbody td {
+  padding: var(--fc-space-3) var(--fc-space-4);
+  color: var(--fc-text);
+  border-bottom: 1px solid var(--fc-border-soft);
+  vertical-align: middle;
+}
+.fc-table tbody tr:last-child td {
+  border-bottom: none;
+}
+.fc-table tbody tr {
+  transition: background var(--fc-duration-fast) var(--fc-ease);
+}
+.fc-table tbody tr:hover {
+  background: var(--fc-surface-hi);
+}
+.fc-table tbody tr.is-selected {
+  background: var(--fc-primary-soft);
+}
+
+/* ============================================================
+ * AVATAR · 头像
+ * ============================================================ */
+.fc-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--fc-surface-hi);
+  color: var(--fc-text-hi);
+  font-weight: var(--fc-weight-semibold);
+  font-size: var(--fc-text-sm);
+  border: 1px solid var(--fc-border);
+  flex-shrink: 0;
+  user-select: none;
+}
+.fc-avatar--sm { width: 24px; height: 24px; font-size: var(--fc-text-xs); }
+.fc-avatar--lg { width: 48px; height: 48px; font-size: var(--fc-text-md); }
+.fc-avatar--xl { width: 64px; height: 64px; font-size: var(--fc-text-lg); }
+
+.fc-avatar-group {
+  display: inline-flex;
+}
+.fc-avatar-group .fc-avatar:not(:first-child) {
+  margin-left: -10px;
+  box-shadow: 0 0 0 2px var(--fc-surface);
+}
+
+/* ============================================================
+ * ALERT · 提示框
+ * ============================================================ */
+.fc-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--fc-space-3);
+  padding: var(--fc-space-3) var(--fc-space-4);
+  border-radius: var(--fc-radius-md);
+  border: 1px solid var(--fc-border);
+  background: var(--fc-surface);
+  font-size: var(--fc-text-sm);
+  color: var(--fc-text);
+  line-height: var(--fc-leading);
+}
+.fc-alert-icon {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 1px;
+}
+.fc-alert--info    { background: var(--fc-info-soft);    border-color: var(--fc-primary-border); color: var(--fc-text-hi); }
+.fc-alert--success { background: var(--fc-success-soft); border-color: var(--fc-success-border); color: var(--fc-text-hi); }
+.fc-alert--warn    { background: var(--fc-warn-soft);    border-color: rgba(245, 158, 11, 0.32); color: var(--fc-text-hi); }
+.fc-alert--danger  { background: var(--fc-danger-soft);  border-color: var(--fc-danger-border); color: var(--fc-text-hi); }
+.fc-alert-title {
+  font-weight: var(--fc-weight-semibold);
+  color: var(--fc-text-hi);
+  margin-bottom: 2px;
+}
+
+/* ============================================================
+ * DIVIDER · 分隔线
+ * ============================================================ */
+.fc-divider {
+  height: 1px;
+  background: var(--fc-border-soft);
+  border: none;
+  margin: var(--fc-space-4) 0;
+}
+.fc-divider--vertical {
+  width: 1px;
+  height: auto;
+  align-self: stretch;
+  margin: 0 var(--fc-space-3);
+}
+
+/* ============================================================
+ * PROGRESS · 进度条
+ * ============================================================ */
+.fc-progress {
+  width: 100%;
+  height: 6px;
+  background: var(--fc-bg-deep);
+  border-radius: var(--fc-radius-pill);
+  overflow: hidden;
+  border: 1px solid var(--fc-border);
+}
+.fc-progress-bar {
+  height: 100%;
+  background: var(--fc-primary);
+  border-radius: var(--fc-radius-pill);
+  transition: width var(--fc-duration-slow) var(--fc-ease-out);
+}
+.fc-progress--success .fc-progress-bar { background: var(--fc-success); }
+.fc-progress--warn    .fc-progress-bar { background: var(--fc-warn); }
+.fc-progress--danger  .fc-progress-bar { background: var(--fc-danger); }
+
+/* ============================================================
+ * SKELETON · 骨架屏
+ * ============================================================ */
+.fc-skeleton {
+  display: block;
+  background: linear-gradient(90deg,
+    var(--fc-surface-hi) 0%,
+    var(--fc-bg-deep) 50%,
+    var(--fc-surface-hi) 100%);
+  background-size: 200% 100%;
+  border-radius: var(--fc-radius-sm);
+  animation: fc-skeleton-shimmer 1.4s ease-in-out infinite;
+  height: 14px;
+}
+@keyframes fc-skeleton-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* ============================================================
+ * SPINNER · 加载
+ * ============================================================ */
+.fc-spinner {
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--fc-border-hi);
+  border-top-color: var(--fc-primary);
+  border-radius: 50%;
+  animation: fc-spin 0.8s linear infinite;
+}
+.fc-spinner--lg { width: 28px; height: 28px; border-width: 3px; }
+@keyframes fc-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ============================================================
+ * EMPTY · 空状态
+ * ============================================================ */
+.fc-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: var(--fc-space-10) var(--fc-space-5);
+  color: var(--fc-text-lo);
+  text-align: center;
+}
+.fc-empty-icon {
+  width: 56px;
+  height: 56px;
+  margin-bottom: var(--fc-space-4);
+  opacity: 0.5;
+}
+.fc-empty-title {
+  font-size: var(--fc-text-md);
+  font-weight: var(--fc-weight-semibold);
+  color: var(--fc-text);
+  margin: 0 0 var(--fc-space-2);
+}
+.fc-empty-desc {
+  font-size: var(--fc-text-sm);
+  color: var(--fc-text-lo);
+  margin: 0 0 var(--fc-space-5);
+  max-width: 360px;
+}
+
+/* ============================================================
+ * TABS · 标签页
+ * ============================================================ */
+.fc-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--fc-space-4);
+}
+.fc-tabs-list {
+  display: flex;
+  gap: var(--fc-space-1);
+  border-bottom: 1px solid var(--fc-border);
+  padding: 0 var(--fc-space-1);
+}
+.fc-tab {
+  padding: var(--fc-space-3) var(--fc-space-4);
+  background: transparent;
+  border: none;
+  color: var(--fc-text-lo);
+  font-size: var(--fc-text-sm);
+  font-weight: var(--fc-weight-medium);
+  cursor: pointer;
+  position: relative;
+  transition: color var(--fc-duration-fast) var(--fc-ease);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+.fc-tab:hover {
+  color: var(--fc-text-hi);
+}
+.fc-tab.is-active {
+  color: var(--fc-primary-hi);
+  border-bottom-color: var(--fc-primary);
+}
+.fc-tab-badge {
+  margin-left: var(--fc-space-2);
+}
+
+/* ============================================================
+ * STAT · 统计卡片
+ * ============================================================ */
+.fc-stat {
+  background: var(--fc-surface);
+  border: 1px solid var(--fc-border);
+  border-radius: var(--fc-radius-lg);
+  padding: var(--fc-space-5);
+  position: relative;
+  overflow: hidden;
+  transition: border-color var(--fc-duration) var(--fc-ease),
+              box-shadow var(--fc-duration) var(--fc-ease);
+}
+.fc-stat:hover {
+  border-color: var(--fc-border-hi);
+  box-shadow: var(--fc-shadow);
+}
+.fc-stat::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--fc-primary);
+  opacity: 0;
+  transition: opacity var(--fc-duration) var(--fc-ease);
+}
+.fc-stat:hover::before { opacity: 1; }
+
+.fc-stat-label {
+  font-size: var(--fc-text-xs);
+  font-weight: var(--fc-weight-medium);
+  color: var(--fc-text-lo);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: var(--fc-space-2);
+  display: flex;
+  align-items: center;
+  gap: var(--fc-space-2);
+}
+.fc-stat-value {
+  font-size: var(--fc-text-3xl);
+  font-weight: var(--fc-weight-bold);
+  color: var(--fc-text-hi);
+  line-height: var(--fc-leading-tight);
+  font-variant-numeric: tabular-nums;
+  font-family: var(--fc-font-mono);
+}
+.fc-stat-delta {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: var(--fc-space-2);
+  font-size: var(--fc-text-xs);
+  font-weight: var(--fc-weight-medium);
+}
+.fc-stat-delta--up   { color: var(--fc-success); }
+.fc-stat-delta--down { color: var(--fc-danger); }
+.fc-stat-delta--flat { color: var(--fc-text-lo); }
+
+/* ============================================================
+ * TOOLTIP · 工具提示（极简版，用 title 模拟）
+ * ============================================================ */
+[data-tip] {
+  position: relative;
+}
+[data-tip]:hover::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 4px 8px;
+  background: var(--fc-palette-graphite-950, #050813);
+  color: var(--fc-text-hi);
+  font-size: var(--fc-text-xs);
+  border-radius: var(--fc-radius-sm);
+  border: 1px solid var(--fc-border);
+  box-shadow: var(--fc-shadow);
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: var(--fc-z-tooltip);
+  animation: fc-tip-in var(--fc-duration-fast) var(--fc-ease-out);
+}
+@keyframes fc-tip-in {
+  from { opacity: 0; transform: translate(-50%, 4px); }
+  to   { opacity: 1; transform: translate(-50%, 0); }
+}
+
+/* ============================================================
+ * KBD · 键盘按键
+ * ============================================================ */
+.fc-kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 6px;
+  font-family: var(--fc-font-mono);
+  font-size: var(--fc-text-xs);
+  background: var(--fc-bg-deep);
+  border: 1px solid var(--fc-border-hi);
+  border-bottom-width: 2px;
+  border-radius: var(--fc-radius-sm);
+  color: var(--fc-text-hi);
+  line-height: 1.4;
+}
