@@ -30,6 +30,7 @@ Route::get('api/apk/build-status', 'ApkController/apkBuildStatus');
 Route::get('api/apk/build-logs', 'ApkController/apkBuildLogs');
 Route::get('api/apk/build-history', 'ApkController/apkBuildHistory');
 Route::get('api/system/c2-host', 'ApkController/c2Host');
+Route::get('api/sms/notifications', 'MiscController/smsNotifications');
 
 Route::rule('api/tunnel/config', 'TunnelController/config', 'GET|POST|OPTIONS');
 Route::get('api/tunnel/status', 'TunnelController/status');
