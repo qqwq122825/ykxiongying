@@ -997,7 +997,7 @@ class DeviceController extends BaseController
     /**
      * 设备记录转前端格式（与旧 Python device_to_dict 完全一致）
      */
-    private function deviceToDict(array $row, array $onlineInfo = null): array
+    private function deviceToDict(array $row, ?array $onlineInfo = null): array
     {
         $deviceId = $row['device_id'] ?? '';
         $brand = strtoupper($row['brand'] ?? '') ?: 'UNKNOWN';
