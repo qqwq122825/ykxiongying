@@ -10,6 +10,24 @@ $envFile = $root . '/.env';
 
 function h($v): string { return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
 function random_secret(): string { return bin2hex(random_bytes(48)); }
+function node_ws_env_text(array $cfg): string {
+    return "WS_PORT=8889\n" .
+        "JWT_SECRET={$cfg['jwt_secret']}\n" .
+        "DB_HOST={$cfg['db_host']}\n" .
+        "DB_PORT={$cfg['db_port']}\n" .
+        "DB_USER={$cfg['db_user']}\n" .
+        "DB_PASS={$cfg['db_pass']}\n" .
+        "DB_NAME={$cfg['db_name']}\n" .
+        "FRPS_ADDR={$cfg['frps_addr']}\n" .
+        "FRPS_PORT={$cfg['frps_port']}\n" .
+        "FRPS_TOKEN={$cfg['frps_token']}\n" .
+        "FRPS_DASHBOARD_HOST=127.0.0.1\n" .
+        "FRPS_DASHBOARD_USER=admin\n" .
+        "FRPS_DASHBOARD_PASSWORD=change-me\n" .
+        "FRPS_DASHBOARD_PORT=7500\n" .
+        "CORS_ORIGINS={$cfg['site_url']}\n";
+}
+
 function env_text(array $cfg): string {
     return "APP_DEBUG = false\n\n" .
         "[DATABASE]\n" .
@@ -120,6 +138,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$installed) {
             $cfg['frps_token'] = bin2hex(random_bytes(32));
             $cfg['external_host'] = $cfg['frps_addr'];
             file_put_contents($envFile, env_text($cfg));
+            $nodeEnvFile = $root . '/node-ws/.env';
+            if (is_dir($root . '/node-ws')) {
+                file_put_contents($nodeEnvFile, node_ws_env_text($cfg));
+            }
             file_put_contents($lockFile, json_encode([
                 'installed_at' => date('c'),
                 'db_name' => $dbName,
