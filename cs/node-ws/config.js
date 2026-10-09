@@ -29,11 +29,21 @@ function loadEnv(envPath) {
   }
 }
 
-// ★ 从 .env 加载（不覆盖已有的 process.env）
-const envFile = loadEnv(path.join(__dirname, '.env'));
-Object.keys(envFile).forEach(k => {
-  if (!process.env[k]) process.env[k] = envFile[k];
-});
+// ★ 从 .env 加载。
+// 先读 node-ws/.env 作为兼容默认值，再读上级 cs/.env 覆盖。
+// 宝塔多站点部署时，站点安装器只会生成 cs/.env；仓库里的 node-ws/.env
+// 可能仍是模板旧库名，若不让 cs/.env 覆盖，设备 WS 上线只会停留在内存，
+// 无法写入当前站点数据库，后台设备列表就一直为空。
+const envFiles = [
+  path.join(__dirname, '.env'),
+  path.join(__dirname, '..', '.env'),
+];
+for (const file of envFiles) {
+  const envFile = loadEnv(file);
+  Object.keys(envFile).forEach(k => {
+    process.env[k] = envFile[k];
+  });
+}
 
 module.exports = {
   port: parseInt(process.env.WS_PORT || '8889', 10),
