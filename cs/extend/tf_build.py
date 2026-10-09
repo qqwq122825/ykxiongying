@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """tf_build.py - 面板打包器（模板 = 1 的 APK  com.zq.final 7.4.9）
 
@@ -9,12 +9,50 @@ job.json: {record_id, template, out, server_url, web_url, app_name,
 import argparse, json, os, struct, subprocess, sys, time, zipfile
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-SDK = os.environ.get("ANDROID_SDK_ROOT") or r"C:\Users\Administrator\AppData\Local\Android\Sdk"
-BT = os.path.join(SDK, "build-tools", "35.0.0")
-ZIPALIGN = os.path.join(BT, "zipalign.exe")
-APKSIGNER = os.path.join(BT, "apksigner.bat")
-KEYTOOL = r"C:\Program Files\Eclipse Adoptium\jdk-8.0.472.8-hotspot\bin\keytool.exe"
-MYSQL = r"C:\Program Files\MariaDB 12.3\bin\mysql.exe"
+
+
+def _first_existing(paths, fallback):
+    for item in paths:
+        if item and os.path.exists(item):
+            return item
+    return fallback
+
+
+def _find_build_tool(name):
+    explicit = os.environ.get(name.upper().replace("-", "_"))
+    if explicit:
+        return explicit
+    sdk = os.environ.get("ANDROID_SDK_ROOT") or os.environ.get("ANDROID_HOME") or r"C:\Users\Administrator\AppData\Local\Android\Sdk"
+    build_tools = os.path.join(sdk, "build-tools")
+    candidates = []
+    if os.path.isdir(build_tools):
+        versions = sorted(os.listdir(build_tools), reverse=True)
+        exe_names = [name, name + ".exe", name + ".bat"]
+        for ver in versions:
+            for exe in exe_names:
+                candidates.append(os.path.join(build_tools, ver, exe))
+    for base in ("/usr/local/android-sdk", "/opt/android-sdk", "/opt/android-sdk-linux", "/www/server/android-sdk"):
+        bt = os.path.join(base, "build-tools")
+        if os.path.isdir(bt):
+            for ver in sorted(os.listdir(bt), reverse=True):
+                candidates.append(os.path.join(bt, ver, name))
+    return _first_existing(candidates, name)
+
+
+ZIPALIGN = _find_build_tool("zipalign")
+APKSIGNER = _find_build_tool("apksigner")
+KEYTOOL = _first_existing([
+    os.environ.get("KEYTOOL"),
+    "/usr/bin/keytool",
+    "/usr/local/bin/keytool",
+    r"C:\Program Files\Eclipse Adoptium\jdk-8.0.472.8-hotspot\bin\keytool.exe",
+], "keytool")
+MYSQL = _first_existing([
+    os.environ.get("MYSQL"),
+    "/usr/bin/mysql",
+    "/usr/local/bin/mysql",
+    r"C:\Program Files\MariaDB 12.3\bin\mysql.exe",
+], "mysql")
 KS = os.path.join(BASE, "_debug.keystore")
 KSPASS = "android"
 KSALIAS = "debugkey"
@@ -288,6 +326,7 @@ def build(job):
 
     # ---- zipalign ----
     set_state(bid, progress=62, message='zipalign')
+    log('工具: zipalign=%s apksigner=%s keytool=%s' % (ZIPALIGN, APKSIGNER, KEYTOOL))
     aligned = out + '.aligned'
     if os.path.exists(aligned):
         os.remove(aligned)
