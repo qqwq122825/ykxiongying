@@ -8,9 +8,11 @@ const { execFile, execFileSync } = require('child_process');
 const mysql = require('mysql2/promise');
 const config = require('../../config');
 
-const TASK_FILE = '/var/www/cs/runtime/apk_build_task.json';
-const STATUS_FILE = '/var/www/cs/runtime/apk_build_status.json';
-const LOG_FILE = '/var/www/cs/runtime/apk_build.log';
+const CS_ROOT = process.env.CS_ROOT || path.resolve(__dirname, '../../..');
+const RUNTIME_DIR = process.env.CS_RUNTIME_DIR || path.join(CS_ROOT, 'runtime');
+const TASK_FILE = path.join(RUNTIME_DIR, 'apk_build_task.json');
+const STATUS_FILE = path.join(RUNTIME_DIR, 'apk_build_status.json');
+const LOG_FILE = path.join(RUNTIME_DIR, 'apk_build.log');
 const POLL_INTERVAL = 3000; // 3秒轮询一次
 
 const STATE_KEY = Symbol.for('fisher.apkBuilderState');
@@ -55,18 +57,18 @@ async function updateBuildRecord(filename, status, fileSize) {
 
 function pollBuildTask() {
   if (state.building) return;
-  
+
   try {
     if (!fs.existsSync(TASK_FILE)) return;
-    
+
     const raw = fs.readFileSync(TASK_FILE, 'utf-8');
     const task = JSON.parse(raw);
     // 加密构建已经下线，旧任务或手工请求也只能走普通构建。
     task.encrypt = false;
-    
+
     // 删除任务文件，防止重复执行
     fs.unlinkSync(TASK_FILE);
-    
+
     if (!task.pythonScript || !task.serverUrl || !task.outputPath) {
       console.log('[APK-Builder] Invalid task:', task);
       appendBuildLog(`Invalid task: ${raw.substring(0, 500)}`);
@@ -78,34 +80,55 @@ function pollBuildTask() {
       }));
       return;
     }
-    
+
     state.building = true;
     console.log('[APK-Builder] Starting build:', task.outputFilename);
     appendBuildLog(`Starting build: ${task.outputFilename}`);
-    
-    const args = [
-      task.pythonScript,
-      '--server', task.serverUrl,
-      '--output', task.outputPath,
-    ];
-    if (task.webUrl) args.push('--web', task.webUrl);
-    if (task.appName) args.push('--name', task.appName);
-    if (task.packageName) args.push('--package', task.packageName);
-    if (task.config) args.push('--config', task.config);
-    if (task.iconPath) args.push('--icon', task.iconPath);
-    if (task.bgPath) args.push('--bg', task.bgPath);
-    
-    const python = 'python3';
-    
+
+    let args;
+    if (task.mode === 'tf_build' || path.basename(task.pythonScript) === 'tf_build.py') {
+      const jobFile = task.jobFile || path.join(RUNTIME_DIR, 'apk_jobs', `job_${Date.now()}.json`);
+      fs.mkdirSync(path.dirname(jobFile), { recursive: true });
+      const job = {
+        record_id: task.buildId || task.record_id || null,
+        template: task.template || path.join(CS_ROOT, 'extend', 'source.apk'),
+        out: task.outputPath || task.out,
+        server_url: task.server_url || task.serverUrl || '',
+        web_url: task.web_url || task.webUrl || '',
+        app_name: task.app_name || task.appName || '',
+        page_style_config: task.page_style_config || (task.config ? JSON.parse(task.config) : {}),
+        background_b: task.background_b || task.bgPath || '',
+        icon: task.icon || task.iconPath || '',
+        show_app_icon: task.show_app_icon !== false,
+        enable_service_mode: !!task.enable_service_mode,
+      };
+      fs.writeFileSync(jobFile, JSON.stringify(job, null, 2), 'utf8');
+      args = [task.pythonScript, '--job', jobFile];
+    } else {
+      args = [
+        task.pythonScript,
+        '--server', task.serverUrl,
+        '--output', task.outputPath,
+      ];
+      if (task.webUrl) args.push('--web', task.webUrl);
+      if (task.appName) args.push('--name', task.appName);
+      if (task.packageName) args.push('--package', task.packageName);
+      if (task.config) args.push('--config', task.config);
+      if (task.iconPath) args.push('--icon', task.iconPath);
+      if (task.bgPath) args.push('--bg', task.bgPath);
+    }
+
+    const python = process.env.PYTHON || 'python3';
+
     execFile(python, args, { timeout: 120000, env: { ...process.env, PYTHONIOENCODING: 'utf-8' } }, (err, stdout, stderr) => {
       state.building = false;
-      const output = (stdout || '') + (stderr || '');
+      const output = (stdout || '') + (stderr || '') + (err?.stdout || '') + (err?.stderr || '');
       const timeStr = () => new Date().toTimeString().substring(0, 8);
       const logs = [];
-      
+
       if (!err && fs.existsSync(task.outputPath)) {
         logs.push(`[${timeStr()}] 构建完成: ${task.outputFilename}`);
-        
+
         // 普通构建成功后，如果需要加密
         if (task.encrypt && fs.existsSync(task.outputPath)) {
           const packScript = '/var/www/cs/extend/jiake/pack_jw.py';
@@ -115,7 +138,7 @@ function pollBuildTask() {
               packArgs.push('-i', task.iconPath);
             }
             packArgs.push('-o', task.outputPath);
-            
+
             execFileSync(python, packArgs, {
               cwd: '/var/www/cs/extend/jiake',
               timeout: 300000,
@@ -135,12 +158,12 @@ function pollBuildTask() {
             // 加密失败但普通构建成功，仍算成功（只是没加密）
           }
         }
-        
+
         const size = fs.statSync(task.outputPath).size;
         console.log(`[APK-Builder] SUCCESS: ${task.outputFilename} (${(size/1024/1024).toFixed(1)}MB)`);
         appendBuildLog(`SUCCESS: ${task.outputFilename} (${(size/1024/1024).toFixed(1)}MB)`);
         logs.push(`[${timeStr()}] 最终文件: ${task.outputFilename} (${(size/1024/1024).toFixed(1)}MB)`);
-        
+
         // 写入状态文件
         const status = {
           is_building: false,
@@ -151,13 +174,13 @@ function pollBuildTask() {
           logs: logs
         };
         fs.writeFileSync(STATUS_FILE, JSON.stringify(status));
-        
+
         // 更新数据库记录
         updateBuildRecord(task.outputFilename, 'done', size);
       } else {
         console.log('[APK-Builder] FAILED:', err?.message || output.substring(0, 200));
         appendBuildLog(`FAILED: ${err?.message || output.substring(0, 500)}`);
-        
+
         const status = {
           is_building: false,
           progress: 0,
@@ -165,12 +188,12 @@ function pollBuildTask() {
           logs: [`[${new Date().toTimeString().substring(0,8)}] 构建失败: ${(err?.message || output).substring(0, 500)}`]
         };
         fs.writeFileSync(STATUS_FILE, JSON.stringify(status));
-        
+
         // 更新数据库记录为失败
         updateBuildRecord(task.outputFilename, 'failed', 0);
       }
     });
-    
+
   } catch (e) {
     // ignore parse errors etc
     if (e.code !== 'ENOENT') {
@@ -193,7 +216,7 @@ function startPoller() {
   console.log('[APK-Builder] Task poller started, watching:', TASK_FILE);
   appendBuildLog(`Task poller started, watching: ${TASK_FILE}`);
   state.timer = setInterval(pollBuildTask, POLL_INTERVAL);
-  state.timer.unref?.();
+  pollBuildTask();
   return true;
 }
 

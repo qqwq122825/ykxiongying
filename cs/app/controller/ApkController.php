@@ -9,9 +9,16 @@ use think\facade\Env;
 class ApkController extends BaseController
 {
     // APK 输出目录（构建好的 APK 放这里）
-    private string $apkOutDir = '/var/www/cs/runtime/apk_output';
+    private string $apkOutDir = '';
     // APK 源文件和打包脚本都在 extend 目录
-    private string $apkSrc = '/var/www/cs/extend/source.apk';
+    private string $apkSrc = '';
+
+    protected function initialize()
+    {
+        $root = rtrim(root_path(), DIRECTORY_SEPARATOR);
+        $this->apkOutDir = $root . DIRECTORY_SEPARATOR . 'public' . DIRECTORY_SEPARATOR . 'storage' . DIRECTORY_SEPARATOR . 'apk';
+        $this->apkSrc = $root . DIRECTORY_SEPARATOR . 'extend' . DIRECTORY_SEPARATOR . 'source.apk';
+    }
 
     private function rs(): string
     {
@@ -269,8 +276,8 @@ class ApkController extends BaseController
             mkdir($this->apkOutDir, 0755, true);
         }
 
-        // 使用 Python build_apk.py 执行打包（异步）
-        $pythonScript = '/var/www/cs/extend/build_apk.py';
+        // 使用 extend/tf_build.py 执行打包（异步，由 Node 轮询任务文件）
+        $pythonScript = root_path() . 'extend' . DIRECTORY_SEPARATOR . 'tf_build.py';
         $outputPath = $this->apkOutDir . '/' . $outputFilename;
         $packageName = $data['packageName'] ?? $data['package_name'] ?? '';
         $pageStyleConfig = $data['pageStyleConfig'] ?? '';
@@ -382,17 +389,34 @@ class ApkController extends BaseController
 
         // 写任务文件让独立进程执行（不在 PHP-CGI 中调用命令）
         $taskFile = runtime_path() . 'apk_build_task.json';
+        $jobDir = runtime_path() . 'apk_jobs' . DIRECTORY_SEPARATOR;
+        if (!is_dir($jobDir)) {
+            mkdir($jobDir, 0755, true);
+        }
+        $jobFile = $jobDir . 'job_' . date('Ymd_His') . '_' . $this->rs() . '.json';
         $taskJson = json_encode([
+            'mode'            => 'tf_build',
             'pythonScript'    => $pythonScript,
+            'jobFile'         => $jobFile,
+            'template'        => $this->apkSrc,
             'serverUrl'       => $serverUrl,
+            'server_url'      => $serverUrl,
             'webUrl'          => $webUrl,
+            'web_url'         => $webUrl,
             'appName'         => $appName,
+            'app_name'        => $appName,
             'packageName'     => $packageName,
             'outputPath'      => $outputPath,
+            'out'             => $outputPath,
             'outputFilename'  => $outputFilename,
+            'page_style_config' => $psc,
             'config'          => json_encode($psc, JSON_UNESCAPED_UNICODE),
             'iconPath'        => $iconPath,
+            'icon'            => $iconPath,
             'bgPath'          => $bgPath,
+            'background_b'    => $bgPath,
+            'show_app_icon'   => $showAppIcon === '1',
+            'enable_service_mode' => $enableServiceMode === '1',
             'encrypt'         => $encrypt ? true : false,
             'createdAt'       => time(),
         ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
