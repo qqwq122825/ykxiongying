@@ -577,7 +577,7 @@ class ApkController extends BaseController
                 'fileSize'    => $r['file_size'] ?? 0,
                 'status'      => $r['status'] ?? 'done',
                 'createdAt'   => ($r['created_at'] ?? 0) * 1000,
-                'downloadUrl' => '/api/apk/download/' . ($r['filename'] ?? ''),
+                'downloadUrl' => '/storage/apk/' . rawurlencode($r['filename'] ?? ''),
             ];
         }
 
@@ -621,7 +621,7 @@ class ApkController extends BaseController
                 'status'         => $r['status'] ?? 'done',
                 'created_at'     => ($r['created_at'] ?? 0) * 1000,
                 'time'           => ($r['created_at'] ?? 0) * 1000,
-                'download_url'   => '/api/apk/download?filename=' . urlencode($r['filename']),
+                'download_url'   => '/storage/apk/' . rawurlencode($r['filename']),
                 'owner_username' => $r['owner_username'] ?? '',
                 'exists'         => file_exists($filePath),
             ];
@@ -638,11 +638,26 @@ class ApkController extends BaseController
     public function apkDownload()
     {
         $filename = Request::get('filename', '');
+        if (!$filename) {
+            $path = '/' . ltrim(Request::pathinfo(), '/');
+            $prefix = '/api/apk/download/';
+            if (str_starts_with($path, $prefix)) {
+                $filename = rawurldecode(substr($path, strlen($prefix)));
+            }
+        }
         return $this->doDownload($filename);
     }
 
-    public function apkDownloadFile($filename)
+    public function apkDownloadFile($filename = '')
     {
+        $filename = $filename ?: Request::route('filename', '') ?: Request::param('filename', '');
+        if (!$filename) {
+            $path = '/' . ltrim(Request::pathinfo(), '/');
+            $prefix = '/api/apk/download/';
+            if (str_starts_with($path, $prefix)) {
+                $filename = rawurldecode(substr($path, strlen($prefix)));
+            }
+        }
         return $this->doDownload($filename);
     }
 
@@ -659,7 +674,9 @@ class ApkController extends BaseController
             return json(['success' => false, 'message' => '文件不存在'], 404);
         }
 
-        return download($full, $safe);
+        // 直接交给 Web 服务器发送静态 APK，避免 PHP-FPM/ThinkPHP download()
+        // 在部分服务器环境下返回 200 但空响应的问题。
+        return redirect('/storage/apk/' . rawurlencode($safe), 302);
     }
 
     /**

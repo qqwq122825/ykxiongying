@@ -63,7 +63,7 @@ class Auth
             return $blockedDeviceResponse;
         }
 
-        if (in_array($path, $this->whitelist)) {
+        if (in_array($path, $this->whitelist) || str_starts_with($path, '/api/apk/download/')) {
             return $next($request);
         }
 
