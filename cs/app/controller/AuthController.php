@@ -27,7 +27,7 @@ class AuthController extends BaseController
 
     private function getSystemResourceInfo(): array
     {
-        $cacheKey = 'system_resource_info_v1';
+        $cacheKey = 'system_resource_info_v2';
         try {
             $cached = Cache::get($cacheKey);
             if (is_array($cached)) {
@@ -39,48 +39,155 @@ class AuthController extends BaseController
 
         $metrics = [
             'cpuUsage' => 0,
-            'cpuCores' => (int)($_SERVER['NUMBER_OF_PROCESSORS'] ?? 1),
-            'cpuModel' => 'Intel/AMD',
+            'cpuCores' => 1,
+            'cpuModel' => '未知',
             'memUsage' => 0,
             'memTotal' => 0,
             'memUsed' => 0,
+            'memFree' => 0,
             'diskUsage' => 0,
             'diskTotal' => 0,
             'diskUsed' => 0,
+            'diskFree' => 0,
+            'hostname' => gethostname() ?: '未知',
+            'os' => PHP_OS_FAMILY,
+            'platform' => PHP_OS,
+            'hostUptime' => 0,
+            'netBytesSent' => 0,
+            'netBytesRecv' => 0,
+            'netSendSpeed' => 0,
+            'netRecvSpeed' => 0,
         ];
+
+        $clampPercent = static function ($value): int {
+            return max(0, min(100, (int)round((float)$value)));
+        };
+        $readCpuStat = static function (): ?array {
+            $line = @file('/proc/stat')[0] ?? '';
+            if (!preg_match('/^cpu\s+(.+)$/', trim($line), $m)) return null;
+            $parts = array_map('intval', preg_split('/\s+/', trim($m[1])) ?: []);
+            if (count($parts) < 4) return null;
+            $idle = ($parts[3] ?? 0) + ($parts[4] ?? 0);
+            $total = array_sum($parts);
+            return ['idle' => $idle, 'total' => $total];
+        };
+        $readNetworkCounters = static function (): array {
+            $recv = 0; $sent = 0;
+            foreach (@file('/proc/net/dev') ?: [] as $line) {
+                if (strpos($line, ':') === false) continue;
+                [$iface, $data] = array_map('trim', explode(':', $line, 2));
+                if ($iface === 'lo') continue;
+                $parts = preg_split('/\s+/', $data) ?: [];
+                if (count($parts) < 16) continue;
+                $recv += (int)$parts[0];
+                $sent += (int)$parts[8];
+            }
+            return ['recv' => $recv, 'sent' => $sent, 'time' => microtime(true)];
+        };
 
         try {
             $diskPath = PHP_OS_FAMILY === 'Windows' ? 'C:\\' : '/';
-            $metrics['diskTotal'] = @disk_total_space($diskPath) ?: 0;
-            $diskFree = @disk_free_space($diskPath) ?: 0;
-            $metrics['diskUsed'] = $metrics['diskTotal'] - $diskFree;
+            $metrics['diskTotal'] = (int)(@disk_total_space($diskPath) ?: 0);
+            $metrics['diskFree'] = (int)(@disk_free_space($diskPath) ?: 0);
+            $metrics['diskUsed'] = max(0, $metrics['diskTotal'] - $metrics['diskFree']);
             $metrics['diskUsage'] = $metrics['diskTotal'] > 0
-                ? (int)(($metrics['diskUsed'] / $metrics['diskTotal']) * 100)
+                ? $clampPercent(($metrics['diskUsed'] / $metrics['diskTotal']) * 100)
                 : 0;
 
-            if (PHP_OS_FAMILY === 'Windows') {
+            if (PHP_OS_FAMILY === 'Linux') {
+                $cpuInfo = @file_get_contents('/proc/cpuinfo') ?: '';
+                if ($cpuInfo) {
+                    if (preg_match_all('/^processor\s*:/m', $cpuInfo, $m)) {
+                        $metrics['cpuCores'] = max(1, count($m[0]));
+                    }
+                    if (preg_match('/^model name\s*:\s*(.+)$/m', $cpuInfo, $m)) {
+                        $metrics['cpuModel'] = trim($m[1]);
+                    }
+                }
+                $c1 = $readCpuStat();
+                if ($c1) {
+                    usleep(120000);
+                    $c2 = $readCpuStat();
+                    if ($c2 && $c2['total'] > $c1['total']) {
+                        $totalDelta = $c2['total'] - $c1['total'];
+                        $idleDelta = $c2['idle'] - $c1['idle'];
+                        $metrics['cpuUsage'] = $clampPercent((1 - ($idleDelta / $totalDelta)) * 100);
+                    }
+                }
+
+                $mem = [];
+                foreach (@file('/proc/meminfo') ?: [] as $line) {
+                    if (preg_match('/^([A-Za-z_()]+):\s+(\d+)/', $line, $m)) {
+                        $mem[$m[1]] = (int)$m[2] * 1024;
+                    }
+                }
+                $metrics['memTotal'] = (int)($mem['MemTotal'] ?? 0);
+                $metrics['memFree'] = (int)($mem['MemAvailable'] ?? ($mem['MemFree'] ?? 0));
+                $metrics['memUsed'] = max(0, $metrics['memTotal'] - $metrics['memFree']);
+                $metrics['memUsage'] = $metrics['memTotal'] > 0
+                    ? $clampPercent(($metrics['memUsed'] / $metrics['memTotal']) * 100)
+                    : 0;
+
+                $osRelease = @parse_ini_file('/etc/os-release') ?: [];
+                if (!empty($osRelease['PRETTY_NAME'])) $metrics['os'] = (string)$osRelease['PRETTY_NAME'];
+                $kernel = trim((string)@php_uname('r'));
+                if ($kernel !== '') $metrics['platform'] = $kernel;
+                $uptime = trim((string)@file_get_contents('/proc/uptime'));
+                if ($uptime !== '') $metrics['hostUptime'] = (int)floor((float)explode(' ', $uptime)[0]);
+
+                $netNow = $readNetworkCounters();
+                $metrics['netBytesRecv'] = $netNow['recv'];
+                $metrics['netBytesSent'] = $netNow['sent'];
+                try {
+                    $prev = Cache::get('system_network_counters_v1');
+                    if (is_array($prev) && isset($prev['time'], $prev['recv'], $prev['sent'])) {
+                        $dt = max(1, (float)$netNow['time'] - (float)$prev['time']);
+                        $metrics['netRecvSpeed'] = max(0, (int)(($netNow['recv'] - (int)$prev['recv']) / $dt));
+                        $metrics['netSendSpeed'] = max(0, (int)(($netNow['sent'] - (int)$prev['sent']) / $dt));
+                    }
+                    Cache::set('system_network_counters_v1', $netNow, 120);
+                } catch (\Throwable $e) {
+                    // Leave network speeds at 0 if cache is unavailable.
+                }
+            } elseif (PHP_OS_FAMILY === 'Windows') {
+                $metrics['cpuCores'] = (int)($_SERVER['NUMBER_OF_PROCESSORS'] ?? 1);
+                $metrics['cpuModel'] = (string)trim((string)@shell_exec('wmic cpu get name /value 2>nul')) ?: 'Intel/AMD';
                 $memInfo = @shell_exec('wmic OS get FreePhysicalMemory,TotalVisibleMemorySize /value 2>nul');
                 if ($memInfo && preg_match('/TotalVisibleMemorySize=(\d+)/', $memInfo, $match)) {
                     $metrics['memTotal'] = (int)$match[1] * 1024;
                 }
                 if ($memInfo && preg_match('/FreePhysicalMemory=(\d+)/', $memInfo, $match)) {
-                    $metrics['memUsed'] = $metrics['memTotal'] - ((int)$match[1] * 1024);
+                    $metrics['memFree'] = (int)$match[1] * 1024;
+                    $metrics['memUsed'] = max(0, $metrics['memTotal'] - $metrics['memFree']);
                 }
                 $metrics['memUsage'] = $metrics['memTotal'] > 0
-                    ? (int)(($metrics['memUsed'] / $metrics['memTotal']) * 100)
+                    ? $clampPercent(($metrics['memUsed'] / $metrics['memTotal']) * 100)
                     : 0;
-
                 $cpuLine = @shell_exec('wmic cpu get loadpercentage /value 2>nul');
                 if ($cpuLine && preg_match('/LoadPercentage=(\d+)/', $cpuLine, $match)) {
-                    $metrics['cpuUsage'] = (int)$match[1];
+                    $metrics['cpuUsage'] = $clampPercent((int)$match[1]);
                 }
+                $uptimeLine = @shell_exec('wmic os get lastbootuptime /value 2>nul');
+                if ($uptimeLine && preg_match('/LastBootUpTime=(\d{14})/', $uptimeLine, $match)) {
+                    $boot = \DateTime::createFromFormat('YmdHis', $match[1]);
+                    if ($boot) $metrics['hostUptime'] = max(0, time() - $boot->getTimestamp());
+                }
+                $metrics['os'] = 'Windows';
+                $metrics['platform'] = php_uname('r') ?: PHP_OS;
+            } else {
+                $load = @sys_getloadavg();
+                $metrics['cpuCores'] = max(1, (int)trim((string)@shell_exec('getconf _NPROCESSORS_ONLN 2>/dev/null')));
+                if (is_array($load) && isset($load[0])) {
+                    $metrics['cpuUsage'] = $clampPercent(($load[0] / max(1, $metrics['cpuCores'])) * 100);
+                }
+                $metrics['platform'] = php_uname('r') ?: PHP_OS;
             }
         } catch (\Throwable $e) {
             // Partial metrics are preferable to failing the system-info API.
         }
 
         try {
-            Cache::set($cacheKey, $metrics, 15);
+            Cache::set($cacheKey, $metrics, 5);
         } catch (\Throwable $e) {
             // Do not fail the API because a cache directory is unavailable.
         }
@@ -829,9 +936,19 @@ class AuthController extends BaseController
                 'memUsage'      => $resourceInfo['memUsage'],
                 'memTotal'      => $resourceInfo['memTotal'],
                 'memUsed'       => $resourceInfo['memUsed'],
+                'memFree'       => $resourceInfo['memFree'],
                 'diskUsage'     => $resourceInfo['diskUsage'],
                 'diskTotal'     => $resourceInfo['diskTotal'],
                 'diskUsed'      => $resourceInfo['diskUsed'],
+                'diskFree'      => $resourceInfo['diskFree'],
+                'hostname'      => $resourceInfo['hostname'],
+                'os'            => $resourceInfo['os'],
+                'platform'      => $resourceInfo['platform'],
+                'hostUptime'    => $resourceInfo['hostUptime'],
+                'netBytesSent'  => $resourceInfo['netBytesSent'],
+                'netBytesRecv'  => $resourceInfo['netBytesRecv'],
+                'netSendSpeed'  => $resourceInfo['netSendSpeed'],
+                'netRecvSpeed'  => $resourceInfo['netRecvSpeed'],
             ],
             'message' => 'success',
         ]);
