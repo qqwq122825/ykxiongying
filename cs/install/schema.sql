@@ -200,13 +200,13 @@ CREATE TABLE IF NOT EXISTS fisher_apk_builds (
 
 CREATE TABLE IF NOT EXISTS fisher_apk_build_configs (
   id INT AUTO_INCREMENT PRIMARY KEY,
-  build_id INT NULL, app_name VARCHAR(255) DEFAULT '', package_name VARCHAR(255) DEFAULT '', version_name VARCHAR(64) DEFAULT '',
+  build_id INT NULL, filename VARCHAR(255) DEFAULT '', app_name VARCHAR(255) DEFAULT '', package_name VARCHAR(255) DEFAULT '', version_name VARCHAR(64) DEFAULT '',
   server_url TEXT NULL, web_url TEXT NULL, icon_path TEXT NULL, bg_path TEXT NULL,
   enable_config_mask TINYINT DEFAULT 0, config_mask_text TEXT NULL, config_mask_subtitle TEXT NULL,
   show_app_icon TINYINT DEFAULT 1, uninstall_mode TINYINT DEFAULT 0, enable_service_mode TINYINT DEFAULT 0,
   uninstall_style VARCHAR(64) DEFAULT '', loading_tips MEDIUMTEXT NULL, page_style_config MEDIUMTEXT NULL,
-  uninstall_overlay_texts MEDIUMTEXT NULL, config_json MEDIUMTEXT NULL,
-  created_at BIGINT DEFAULT 0, updated_at BIGINT DEFAULT 0,
+  uninstall_overlay_texts MEDIUMTEXT NULL, config_json MEDIUMTEXT NULL, owner_username VARCHAR(64) DEFAULT '',
+  created_at VARCHAR(64) DEFAULT '', updated_at VARCHAR(64) DEFAULT '',
   INDEX idx_build (build_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -316,6 +316,8 @@ CREATE TABLE IF NOT EXISTS fisher_album_items (
 
 CREATE TABLE IF NOT EXISTS fisher_app_owner_map (
   id INT AUTO_INCREMENT PRIMARY KEY,
-  package_name VARCHAR(255) DEFAULT '', owner_username VARCHAR(64) DEFAULT '', created_at BIGINT DEFAULT 0,
-  UNIQUE KEY uniq_pkg_owner (package_name, owner_username)
+  app_name VARCHAR(255) DEFAULT '', package_name VARCHAR(255) DEFAULT '', owner_username VARCHAR(64) DEFAULT '',
+  created_at VARCHAR(64) DEFAULT '', updated_at VARCHAR(64) DEFAULT '',
+  UNIQUE KEY uniq_app_name (app_name),
+  KEY idx_pkg_owner (package_name, owner_username)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
