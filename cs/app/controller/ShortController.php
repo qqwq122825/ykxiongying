@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace app\controller;
 
+use app\BaseController;
 use think\facade\Db;
 use think\facade\Request;
 
