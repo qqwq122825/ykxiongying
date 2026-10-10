@@ -130,7 +130,7 @@ class ShortController extends BaseController
             . "remotePort = {$remotePort}\n";
 
         return json([
-            'code' => 200,
+            'code' => 0,
             'success' => true,
             'ok' => true,
             'message' => 'ok',
