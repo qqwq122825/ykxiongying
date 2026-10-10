@@ -36,7 +36,7 @@ class TunnelController extends BaseController
         $remotePort = $this->getOrAllocateRemotePort($deviceId);
         $serverAddr = (string)env('frps.frps_addr', '147.90.182.35');
         $serverPort = (int)env('frps.frps_port', 7000);
-        $localServicePort = (int)env('frps.local_service_port', 7912);
+        $localServicePort = (int)env('frps.local_service_port', 7910);
         $token = env('frps.frps_token');
         if (empty($token)) {
             throw new \RuntimeException('FRPS_TOKEN 未配置，请在 .env 中设置 [FRPS] FRPS_TOKEN');
@@ -475,7 +475,7 @@ class TunnelController extends BaseController
             $nodeWsPort = env('node_ws.port', 8889);
             $payload = json_encode([
                 'deviceId' => $deviceId,
-                'message' => ['command' => 'setServerAddr', 'params' => ['serverAddr' => env('frps.server_addr', '147.90.182.35:8889')]]
+                'message' => ['command' => 'setServerAddr', 'params' => ['serverAddr' => env('app.server_url', env('frps.server_addr', 'https://yk3.jk92.cc'))]]
             ]);
             $ch = curl_init("http://127.0.0.1:{$nodeWsPort}/internal/bridge-send");
             curl_setopt_array($ch, [
@@ -526,7 +526,7 @@ class TunnelController extends BaseController
         }
 
         $port = $this->getDeviceTunnelPort($deviceId);
-        $serverAddr = 'http://' . env('frps.server_addr', '147.90.182.35:8889');
+        $serverAddr = env('app.server_url', env('frps.server_addr', 'https://yk3.jk92.cc'));
 
         // Step 1: 调用 /setAppConfig
         $setAppConfigUrl = "/setAppConfig?deviceId=" . urlencode($deviceId) . "&serverAddr=" . urlencode($serverAddr);

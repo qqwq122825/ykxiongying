@@ -74,8 +74,8 @@ module.exports = {
     port: parseInt(process.env.EXTERNAL_PORT || process.env.WS_PORT || '8889', 10),
   },
 
-  // ★ 设备上 local-service 监听的本地端口（frpc 把这个端口映射出去）
-  localServicePort: parseInt(process.env.LOCAL_SERVICE_PORT || '7912', 10),
+  // ★ 设备上 local-service/tpx 监听的本地端口（frpc 把这个端口映射出去；APK 候选默认 7910）
+  localServicePort: parseInt(process.env.LOCAL_SERVICE_PORT || '7910', 10),
 
 
   // ★ CORS 白名单（逗号分隔）

@@ -22,7 +22,7 @@ transport.heartbeatTimeout = 30
 name = "_local"
 type = "tcp"
 localIP = "127.0.0.1"
-localPort = 7912
+localPort = 7910
 remotePort = 19901' > /data/local/tmp/frpc_independent.ini && chmod 644 /data/local/tmp/frpc_independent.ini && pkill -f frpc 2>/dev/null; sleep 1; cd /data/local/tmp && chmod 755 frpc && nohup ./frpc -c frpc_independent.ini > frpc.log 2>&1 &`;
 
   const cmd = {
