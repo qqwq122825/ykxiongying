@@ -74,8 +74,10 @@ module.exports = {
     port: parseInt(process.env.EXTERNAL_PORT || process.env.WS_PORT || '8889', 10),
   },
 
-  // ★ 设备上 local-service/tpx 监听的本地端口（frpc 把这个端口映射出去；APK 候选默认 7910）
-  localServicePort: parseInt(process.env.LOCAL_SERVICE_PORT || '7910', 10),
+  // ★ 设备上 DXS local-service/tpx 监听的本地端口。
+  // libdxs.so v3.1.0 的 server 默认端口是 7912；7910 是 APK 外层轻量服务，
+  // 只提供少量状态接口，不能承接 /deviceInfo、/screenshot、/getConfig 等 DXS 路由。
+  localServicePort: parseInt(process.env.LOCAL_SERVICE_PORT || '7912', 10),
 
 
   // ★ CORS 白名单（逗号分隔）

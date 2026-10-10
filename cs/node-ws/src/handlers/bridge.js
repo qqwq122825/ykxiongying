@@ -16,6 +16,30 @@ const config = require('../../config');
 const SCREEN_PREFIX = /["'](?:type|event|messageType)["']\s*:\s*["'](?:screenshot|screen|frame|screen_frame)["']/i;
 const READER_PREFIX = /["'](?:type|event|messageType)["']\s*:\s*["'](?:ui_hierarchy|accessibility_data|accessibility_dump|reader_data)["']/i;
 
+function getBridgeBootstrapServerUrl() {
+  const explicit = String(
+    process.env.DEVICE_BOOTSTRAP_SERVER_URL ||
+    process.env.C2_HOST ||
+    process.env.APP_SERVER_URL ||
+    ''
+  ).trim();
+  if (explicit) return explicit.replace(/\/+$/, '');
+
+  const host = String(config.external?.host || config.frps?.addr || '127.0.0.1').trim();
+  const port = Number(config.external?.port || config.port || 8889);
+  const defaultPort = port === 80 || port === 443;
+  const scheme = port === 443 ? 'https' : 'http';
+  return `${scheme}://${host}${defaultPort ? '' : `:${port}`}`.replace(/\/+$/, '');
+}
+
+function hostPortFromServerUrl(serverUrl) {
+  try {
+    return new URL(serverUrl).host;
+  } catch {
+    return serverUrl.replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+  }
+}
+
 function dropUnsubscribedStreamBuffer(buf, deviceId, connections) {
   const prefix = buf.subarray(0, Math.min(buf.length, 2048)).toString('utf8');
   const mode = SCREEN_PREFIX.test(prefix) ? 'screen_capture' : (READER_PREFIX.test(prefix) ? 'reader' : '');
@@ -56,19 +80,22 @@ function handleBridge(ws, deviceId, connections) {
   }).catch(e => console.error(`[WS-Bridge] pre-allocate port ERROR for ${deviceId.substring(0, 12)}...: ${e.message}`));
 
   // ★ AUTO-FIX: Bridge 连接后立即配置 local-service（与旧 Python 后端一致）
-  const SERVER_ADDR = `${config.external.host}:${config.external.port}`;
+  const serverUrl = getBridgeBootstrapServerUrl();
+  const serverHost = hostPortFromServerUrl(serverUrl);
+  const bridgeUrl = serverUrl.replace(/^http:/i, 'ws:').replace(/^https:/i, 'wss:')
+    + `/ws/bridge?deviceId=${encodeURIComponent(deviceId)}`;
   const fixCommands = [
     // ★ 已移除 localAdbConnect：避免每次 Bridge 连上自动开启 ADB
     // 需要开 ADB 时，通过前端 /api/device/adb-wifi 接口手动启用
     { command: 'scanDebugPort' },
     // ★ 推送 deviceId + serverAddr 到设备 conf（核心：解决设备不传 deviceId 问题）
-    { command: 'setAppConfig', params: { deviceId: deviceId, serverAddr: `http://${SERVER_ADDR}` } },
-    { command: 'syncMainServerHost', params: { serverHost: SERVER_ADDR, host: SERVER_ADDR } },
-    { command: 'setConfig', params: { serverAddr: SERVER_ADDR, serverHost: SERVER_ADDR, deviceId: deviceId, bridgeUrl: `ws://${SERVER_ADDR}/ws/bridge?deviceId=${deviceId}` } },
+    { command: 'setAppConfig', params: { deviceId: deviceId, serverAddr: serverUrl } },
+    { command: 'syncMainServerHost', params: { serverHost, host: serverHost } },
+    { command: 'setConfig', params: { serverAddr: serverUrl, serverHost, deviceId: deviceId, bridgeUrl } },
     { command: 'saveConfig' },
     { command: 'forceSync' },
     // ★ 触发 Go 重新 fetchFrpcConfigFromServer（带 deviceId），获取正确的 remote_port
-    { command: 'setServerAddr', params: { serverAddr: `http://${SERVER_ADDR}` } },
+    { command: 'setServerAddr', params: { serverAddr: serverUrl } },
   ];
 
   let delay = 1000;
