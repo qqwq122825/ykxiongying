@@ -728,6 +728,41 @@ class ApkController extends BaseController
         return redirect('/storage/apk/' . rawurlencode($safe), 302);
     }
 
+    private function deleteApkByFilename(string $filename, array $user): array
+    {
+        $safe = basename($filename);
+        if ($safe === '' || $safe !== $filename) {
+            return ['success' => false, 'filename' => $filename, 'message' => '文件名无效'];
+        }
+
+        $record = Db::table('fisher_apk_builds')->where('filename', $safe)->find();
+        $role = $user['role'] ?? '';
+        $username = $user['username'] ?? '';
+        if ($role !== 'superadmin' && $role !== 'super-admin' && $username) {
+            if ($record && ($record['owner_username'] ?? '') !== $username) {
+                return ['success' => false, 'filename' => $safe, 'message' => '无权删除此记录'];
+            }
+        }
+        if ($record && in_array((string)($record['status'] ?? ''), ['queued', 'building'], true)) {
+            return ['success' => false, 'filename' => $safe, 'message' => '构建中/排队中的任务不能删除'];
+        }
+
+        Db::table('fisher_apk_builds')->where('filename', $safe)->delete();
+        Db::table('fisher_apk_build_configs')->where('filename', $safe)->delete();
+
+        $deletedFiles = 0;
+        $filePath = $this->apkOutDir . '/' . $safe;
+        if (file_exists($filePath) && @unlink($filePath)) {
+            $deletedFiles++;
+        }
+        $idsig = $filePath . '.idsig';
+        if (file_exists($idsig) && @unlink($idsig)) {
+            $deletedFiles++;
+        }
+
+        return ['success' => true, 'filename' => $safe, 'deleted_files' => $deletedFiles];
+    }
+
     /**
      * DELETE /api/apk/delete
      * 删除 APK
@@ -739,29 +774,50 @@ class ApkController extends BaseController
             return json(['success' => false, 'message' => 'filename required'], 400);
         }
 
-        // 权限检查：普通账号只能删除自己的 APK
-        $user = request()->user ?? [];
-        $role = $user['role'] ?? '';
-        $username = $user['username'] ?? '';
-        if ($role !== 'superadmin' && $role !== 'super-admin' && $username) {
-            $record = Db::table('fisher_apk_builds')->where('filename', $filename)->find();
-            if ($record && ($record['owner_username'] ?? '') !== $username) {
-                return json(['success' => false, 'message' => '无权删除此记录'], 403);
-            }
+        $result = $this->deleteApkByFilename((string)$filename, request()->user ?? []);
+        if (!$result['success']) {
+            $status = ($result['message'] ?? '') === '无权删除此记录' ? 403 : 400;
+            return json(['success' => false, 'message' => $result['message']], $status);
         }
 
-        Db::table('fisher_apk_builds')->where('filename', $filename)->delete();
+        return json(['success' => true, 'data' => $result, 'message' => 'deleted']);
+    }
 
-        $filePath = $this->apkOutDir . '/' . basename($filename);
-        if (file_exists($filePath)) {
-            @unlink($filePath);
+    /**
+     * POST /api/apk/bulk-delete
+     * 批量删除 APK
+     */
+    public function apkBulkDelete()
+    {
+        $payload = Request::post();
+        $filenames = $payload['filenames'] ?? [];
+        if (is_string($filenames)) {
+            $decoded = json_decode($filenames, true);
+            $filenames = is_array($decoded) ? $decoded : array_filter(array_map('trim', explode(',', $filenames)));
         }
-        $idsig = $filePath . '.idsig';
-        if (file_exists($idsig)) {
-            @unlink($idsig);
+        if (!is_array($filenames) || empty($filenames)) {
+            return json(['success' => false, 'message' => '请选择要删除的 APK'], 400);
         }
 
-        return json(['success' => true, 'data' => null, 'message' => 'deleted']);
+        $filenames = array_values(array_unique(array_filter(array_map('strval', $filenames), 'strlen')));
+        $results = [];
+        $deleted = 0;
+        $failed = 0;
+        foreach ($filenames as $filename) {
+            $r = $this->deleteApkByFilename($filename, request()->user ?? []);
+            $results[] = $r;
+            if ($r['success'] ?? false) $deleted++; else $failed++;
+        }
+
+        return json([
+            'success' => $deleted > 0,
+            'data' => [
+                'deleted' => $deleted,
+                'failed' => $failed,
+                'results' => $results,
+            ],
+            'message' => $failed > 0 ? "已删除 {$deleted} 个，失败 {$failed} 个" : "已删除 {$deleted} 个 APK",
+        ], $deleted > 0 ? 200 : 400);
     }
 
     // ==================== 部署测试 ====================

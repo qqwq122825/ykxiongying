@@ -31,6 +31,7 @@ Route::get('api/apk/build-logs', 'ApkController/apkBuildLogs');
 Route::get('api/apk/build-history', 'ApkController/apkBuildHistory');
 Route::post('api/apk/build', 'ApkController/apkBuild');
 Route::post('api/apk/delete', 'ApkController/apkDelete');
+Route::post('api/apk/bulk-delete', 'ApkController/apkBulkDelete');
 Route::rule('api/apk/download', 'ApkController/apkDownload', 'GET|HEAD');
 Route::rule('api/apk/download/:filename', 'ApkController/apkDownloadFile', 'GET|HEAD');
 Route::rule('api/apk/cdn-config', 'ApkController/cdnConfig', 'GET|POST|OPTIONS');
