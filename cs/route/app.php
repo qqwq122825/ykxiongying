@@ -46,6 +46,9 @@ Route::get('api/apk/build-config/:buildId', 'ApkController/getBuildConfig');
 Route::get('api/apk/check-name', 'ApkController/checkAppName');
 Route::get('api/system/c2-host', 'ApkController/c2Host');
 Route::get('api/sms/notifications', 'MiscController/smsNotifications');
+Route::get('api/logs', 'DeviceController/getLogs');
+Route::post('api/client/logs', 'AuthController/clientLogs');
+Route::post('api/device/install-log', 'DeviceController/installLog');
 
 Route::rule('api/tunnel/config', 'TunnelController/config', 'GET|POST|OPTIONS');
 Route::get('api/tunnel/status', 'TunnelController/status');
