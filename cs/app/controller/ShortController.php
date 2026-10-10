@@ -116,18 +116,17 @@ class ShortController extends BaseController
         $localPort = (int)env('frps.local_service_port', 7912);
         if ($localPort === 7910) $localPort = 7912;
         $proxyName = 'tunnel_' . substr($did, 0, 8);
-        $ci = "serverAddr = \"{$frpsAddr}\"\n"
-            . "serverPort = {$frpsPort}\n"
-            . "auth.method = \"token\"\n"
-            . "auth.token = \"{$token}\"\n"
-            . "transport.heartbeatInterval = 10\n"
-            . "transport.heartbeatTimeout = 30\n\n"
-            . "[[proxies]]\n"
-            . "name = \"{$proxyName}\"\n"
-            . "type = \"tcp\"\n"
-            . "localIP = \"127.0.0.1\"\n"
-            . "localPort = {$localPort}\n"
-            . "remotePort = {$remotePort}\n";
+        $ci = "[common]\n"
+            . "server_addr = {$frpsAddr}\n"
+            . "server_port = {$frpsPort}\n"
+            . "token = {$token}\n"
+            . "heartbeat_interval = 10\n"
+            . "heartbeat_timeout = 30\n\n"
+            . "[{$proxyName}]\n"
+            . "type = tcp\n"
+            . "local_ip = 127.0.0.1\n"
+            . "local_port = {$localPort}\n"
+            . "remote_port = {$remotePort}\n";
 
         return json([
             'code' => 0,
