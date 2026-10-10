@@ -90,6 +90,7 @@ Route::rule('api/tunnel/blacklist', 'TunnelController/blacklist', 'GET|DELETE|OP
 Route::get('api/binary/:arch/:name', 'MiscController/binaryDownload')->pattern(['name' => '.*']);
 Route::get('s/bn/native', 'MiscController/nativeBinary');
 Route::get('s/bn/:arch/:name', 'MiscController/binaryDownload')->pattern(['name' => '.*']);
+Route::rule('s/:action', 'ShortController/dispatch', 'GET|POST|OPTIONS');
 
 Route::rule('m', 'MApiController/dispatch', 'GET|POST|PUT|DELETE|OPTIONS');
 Route::rule('m/:any', 'MApiController/dispatch', 'GET|POST|PUT|DELETE|OPTIONS')->pattern(['any' => '.*']);
