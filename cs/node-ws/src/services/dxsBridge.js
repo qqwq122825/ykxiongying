@@ -25,9 +25,12 @@
 
 const http = require('http');
 const WebSocket = require('ws');
+const { getPool } = require('./commandPoller');
 
 const DXS_HOST = process.env.DXS_HOST || '127.0.0.1';
 const DXS_PORT = Number(process.env.DXS_PORT || 17912);
+const REMOTE_PORT_MIN = Number(process.env.DXS_REMOTE_PORT_MIN || 19902);
+const REMOTE_PORT_MAX = Number(process.env.DXS_REMOTE_PORT_MAX || 29999);
 const ENABLED = String(process.env.DXS_BRIDGE_DISABLED || '0') !== '1';
 const IDLE_CLOSE_MS = Number(process.env.DXS_IDLE_CLOSE_MS || 20000);
 const POLL_MS = Number(process.env.DXS_POLL_MS || 2000);
@@ -36,16 +39,43 @@ let frameForwarder = null;   // (deviceId, frameBuffer, connections) => delivere
 let connectionsRef = null;
 let pollTimer = null;
 const streams = new Map();   // deviceId -> { ws, retryTimer, idleTimer, frames, bytes, startedAt }
+const endpointCache = new Map(); // deviceId -> { at, host, port }
+const ENDPOINT_TTL_MS = Number(process.env.DXS_ENDPOINT_TTL_MS || 5000);
 
 function log(...args) { console.log('[DXS-Bridge]', ...args); }
 
-function request(method, path, body) {
+async function endpointForDevice(deviceId) {
+  const fallback = { host: DXS_HOST, port: DXS_PORT };
+  if (!deviceId) return fallback;
+  const cached = endpointCache.get(deviceId);
+  if (cached && Date.now() - cached.at < ENDPOINT_TTL_MS) {
+    return { host: cached.host, port: cached.port };
+  }
+  try {
+    const [rows] = await getPool().query(
+      'SELECT remote_port FROM fisher_devices WHERE device_id = ? LIMIT 1',
+      [deviceId]
+    );
+    const port = Number(rows?.[0]?.remote_port || 0);
+    if (port >= REMOTE_PORT_MIN && port <= REMOTE_PORT_MAX) {
+      const endpoint = { at: Date.now(), host: DXS_HOST, port };
+      endpointCache.set(deviceId, endpoint);
+      return { host: endpoint.host, port: endpoint.port };
+    }
+  } catch (err) {
+    log(`endpoint lookup failed device=${deviceId} err=${err.message}`);
+  }
+  return fallback;
+}
+
+async function request(method, path, body, deviceId) {
+  const endpoint = await endpointForDevice(deviceId);
   return new Promise((resolve) => {
     const payload = body === undefined ? null
       : (typeof body === 'string' ? body : JSON.stringify(body));
     const req = http.request({
-      host: DXS_HOST,
-      port: DXS_PORT,
+      host: endpoint.host,
+      port: endpoint.port,
       method,
       path,
       headers: payload
@@ -66,8 +96,8 @@ function request(method, path, body) {
   });
 }
 
-async function getJson(path) {
-  const r = await request('GET', path);
+async function getJson(path, deviceId) {
+  const r = await request('GET', path, undefined, deviceId);
   try {
     return JSON.parse(r.buffer.toString('utf8'));
   } catch {
@@ -99,18 +129,19 @@ function closeStream(deviceId, reason) {
   log(`frames closed device=${deviceId} reason=${reason} frames=${entry.frames} bytes=${entry.bytes}`);
 }
 
-function openStream(deviceId) {
+async function openStream(deviceId) {
   if (streams.has(deviceId)) return;
 
   // Make sure dxs is capturing in screencap fallback mode before we attach.
-  getJson('/minicap/start').catch(() => {});
+  getJson('/minicap/start', deviceId).catch(() => {});
+  const endpoint = await endpointForDevice(deviceId);
 
   const entry = { ws: null, retryTimer: null, idleTimer: null, frames: 0, bytes: 0, startedAt: Date.now() };
   streams.set(deviceId, entry);
 
   let ws;
   try {
-    ws = new WebSocket(`ws://${DXS_HOST}:${DXS_PORT}/minicap`);
+    ws = new WebSocket(`ws://${endpoint.host}:${endpoint.port}/minicap`);
   } catch (err) {
     streams.delete(deviceId);
     log(`ws construct failed device=${deviceId} err=${err.message}`);
@@ -118,7 +149,7 @@ function openStream(deviceId) {
   }
   entry.ws = ws;
 
-  ws.on('open', () => log(`frames open device=${deviceId}`));
+  ws.on('open', () => log(`frames open device=${deviceId} endpoint=${endpoint.host}:${endpoint.port}`));
   ws.on('message', (data, isBinary) => {
     const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
     if (!isBinary && !isJpeg(buf)) return;       // "welcome to ..." banner
@@ -138,7 +169,7 @@ function openStream(deviceId) {
     streams.delete(deviceId);
     log(`frames closed device=${deviceId} (peer) frames=${entry.frames}`);
     if (hasConsumers(deviceId)) {
-      entry.retryTimer = setTimeout(() => openStream(deviceId), 2000);
+      entry.retryTimer = setTimeout(() => openStream(deviceId).catch((err) => log(`retry failed device=${deviceId} err=${err.message}`)), 2000);
       entry.retryTimer.unref?.();
     }
   });
@@ -151,7 +182,7 @@ function ensureStreams() {
 
   for (const deviceId of devices) {
     if (hasConsumers(deviceId)) {
-      if (!streams.has(deviceId)) openStream(deviceId);
+      if (!streams.has(deviceId)) openStream(deviceId).catch((err) => log(`open failed device=${deviceId} err=${err.message}`));
       const entry = streams.get(deviceId);
       if (entry) {
         if (entry.idleTimer) { clearTimeout(entry.idleTimer); entry.idleTimer = null; }
@@ -220,7 +251,7 @@ let uiLogAt = 0;
 async function pushUiHierarchy(deviceId) {
   const subs = adminSubscribers(deviceId);
   if (!subs.length) return 0;
-  const res = await getJson('/dumpUI');
+  const res = await getJson('/dumpUI', deviceId);
   const xml = res && res.data && typeof res.data.xml === 'string' ? res.data.xml : '';
   if (!xml || xml.indexOf('<hierarchy') < 0) return 0;
   const payload = JSON.stringify({
@@ -277,7 +308,7 @@ function start(connections, forwarder) {
     uiTimer = setInterval(uiTick, UI_PUSH_MS);
     uiTimer.unref?.();
   }
-  log(`armed host=${DXS_HOST}:${DXS_PORT} poll=${POLL_MS}ms idleClose=${IDLE_CLOSE_MS}ms`);
+  log(`armed host=${DXS_HOST} fallbackPort=${DXS_PORT} poll=${POLL_MS}ms idleClose=${IDLE_CLOSE_MS}ms`);
 }
 
 function stats() {

