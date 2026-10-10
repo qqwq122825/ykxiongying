@@ -10,7 +10,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 
 const BASE_SRC = (deviceId) =>
-  `${window.location.protocol}//${window.location.hostname}/api/tunnel/minicap-stream?deviceId=${encodeURIComponent(deviceId)}`;
+  `${window.location.origin}/api/tunnel/minicap-stream?deviceId=${encodeURIComponent(deviceId)}`;
 
 const STATUS_TEXT = {
   connecting: '连接中…',

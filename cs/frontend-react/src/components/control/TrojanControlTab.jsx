@@ -110,6 +110,16 @@ export default function TrojanControlTab({
   }, [screenSrc])
   const screenTimerRef = useRef(null)
   const httpDragRef = useRef(null)
+  const apiBase = window.location.origin
+  const parseJsonResponse = useCallback(async (res) => {
+    const text = await res.text()
+    try {
+      return text ? JSON.parse(text) : {}
+    } catch {
+      const brief = text.replace(/\s+/g, ' ').slice(0, 120)
+      return { success: false, error: `接口返回非JSON(${res.status})：${brief || res.statusText}` }
+    }
+  }, [])
 
   // ★ sendTunnelInput 内部直接调用 bumpPolling 逻辑（避免 useCallback 循环依赖）
   const sendTunnelInput = useCallback(async (action, params) => {
@@ -117,16 +127,16 @@ export default function TrojanControlTab({
     if (bumpPollingRef.current) bumpPollingRef.current()
     try {
       const token = localStorage.getItem('token') || ''
-      const res = await fetch(`${window.location.protocol}//${window.location.hostname}/api/tunnel/input`, {
+      const res = await fetch(`${apiBase}/api/tunnel/input`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ action, params, deviceId: resolvedDeviceId })
       })
-      return await res.json()
+      return await parseJsonResponse(res)
     } catch (e) {
       return { success: false, error: e.message }
     }
-  }, [resolvedDeviceId])
+  }, [resolvedDeviceId, parseJsonResponse, apiBase])
   // ★ 转发 ref：sendTunnelInput 可调用 bumpPolling（不产生循环依赖）
   const bumpPollingRef = useRef(null)
 
@@ -177,7 +187,7 @@ export default function TrojanControlTab({
     screenshotInFlightRef.current = true
     try {
       const token = localStorage.getItem('token') || ''
-      const res = await fetch(`${window.location.protocol}//${window.location.hostname}/api/tunnel/screenshot?deviceId=${encodeURIComponent(resolvedDeviceId)}&t=${Date.now()}`, {
+      const res = await fetch(`${apiBase}/api/tunnel/screenshot?deviceId=${encodeURIComponent(resolvedDeviceId)}&t=${Date.now()}`, {
         headers: { Authorization: `Bearer ${token}` },
         signal: AbortSignal.timeout(5000)
       })
@@ -199,12 +209,12 @@ export default function TrojanControlTab({
     readerInFlightRef.current = true
     try {
       const token = localStorage.getItem('token') || ''
-      const res = await fetch(`${window.location.protocol}//${window.location.hostname}/api/tunnel/shell`, {
+      const res = await fetch(`${apiBase}/api/tunnel/shell`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ cmd: 'uiautomator dump /dev/stdout', deviceId: resolvedDeviceId })
       })
-      const result = await res.json()
+      const result = await parseJsonResponse(res)
       const output = result?.data?.output || result?.output || result?.stdout || result?.result || ''
       if (output && output.includes('<')) {
         const xmlStart = output.indexOf('<?xml')
@@ -218,7 +228,7 @@ export default function TrojanControlTab({
     } finally {
       readerInFlightRef.current = false
     }
-  }, [resolvedDeviceId, addLog])
+  }, [resolvedDeviceId, addLog, parseJsonResponse, apiBase])
 
   const fetchReaderAfterAction = useCallback(() => {
     fetchReaderData()
@@ -227,16 +237,16 @@ export default function TrojanControlTab({
   const sendTunnelShell = useCallback(async (cmd) => {
     try {
       const token = localStorage.getItem('token') || ''
-      const res = await fetch(`${window.location.protocol}//${window.location.hostname}/api/tunnel/shell`, {
+      const res = await fetch(`${apiBase}/api/tunnel/shell`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ cmd, deviceId: resolvedDeviceId })
       })
-      return await res.json()
+      return await parseJsonResponse(res)
     } catch (e) {
       return { success: false, error: e.message }
     }
-  }, [resolvedDeviceId])
+  }, [resolvedDeviceId, parseJsonResponse, apiBase])
 
   // ★ 智能轮询参数：空闲 1500ms，操作后 500ms 持续 1.5 秒（避免频繁点击导致请求堆积卡死）
   const POLL_IDLE = 1000   // 没点击 1 秒轮询
@@ -453,7 +463,7 @@ export default function TrojanControlTab({
           <div style={{ marginLeft: 8, display: 'flex', alignItems: 'center', gap: 6, padding: '4px 12px', borderRadius: 6, background: tunnelAlive ? 'rgba(82,196,26,.15)' : tunnelAlive === false ? 'rgba(255,77,79,.15)' : 'rgba(255,255,255,.06)', border: `1px solid ${tunnelAlive ? 'rgba(82,196,26,.3)' : tunnelAlive === false ? 'rgba(255,77,79,.3)' : 'rgba(255,255,255,.1)'}` }}>
             <span style={{ width: 8, height: 8, borderRadius: '50%', background: tunnelAlive ? '#52c41a' : tunnelAlive === false ? '#ff4d4f' : '#666' }} />
             <span style={{ fontSize: 12, color: tunnelAlive ? '#52c41a' : tunnelAlive === false ? '#ff4d4f' : '#888', fontWeight: 600 }}>隧道：{tunnelAlive ? ('在线 ' + (tunnelPort > 0 ? `端口 ${tunnelPort}` : '')) : tunnelAlive === false ? ('离线' + (tunnelPort > 0 ? ` 已分 ${tunnelPort}` : '')) : '检测中...'}</span>
-            <button onClick={async () => { setTunnelAlive(null); try { const token = localStorage.getItem('token') || ''; const res = await fetch(`${window.location.protocol}//${window.location.hostname}/api/tunnel/screenshot?deviceId=${encodeURIComponent(resolvedDeviceId || '')}&t=${Date.now()}`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(5000) }); setTunnelAlive(res.ok) } catch { setTunnelAlive(false) } }} style={{ marginLeft: 4, padding: '2px 6px', fontSize: 10, borderRadius: 4, border: 'none', background: 'rgba(255,255,255,.1)', color: '#aaa', cursor: 'pointer' }}>🔄</button>
+            <button onClick={async () => { setTunnelAlive(null); try { const token = localStorage.getItem('token') || ''; const res = await fetch(`${apiBase}/api/tunnel/screenshot?deviceId=${encodeURIComponent(resolvedDeviceId || '')}&t=${Date.now()}`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(5000) }); setTunnelAlive(res.ok) } catch { setTunnelAlive(false) } }} style={{ marginLeft: 4, padding: '2px 6px', fontSize: 10, borderRadius: 4, border: 'none', background: 'rgba(255,255,255,.1)', color: '#aaa', cursor: 'pointer' }}>🔄</button>
           </div>
         )}
         <div style={{ marginLeft: 6, display: 'flex', alignItems: 'center', gap: 6, padding: '4px 12px', borderRadius: 6, background: device?.bridge_connected ? 'rgba(82,196,26,.15)' : 'rgba(255,77,79,.15)', border: `1px solid ${device?.bridge_connected ? 'rgba(82,196,26,.3)' : 'rgba(255,77,79,.3)'}` }}>
