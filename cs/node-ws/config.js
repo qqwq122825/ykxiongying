@@ -29,6 +29,13 @@ function loadEnv(envPath) {
   }
 }
 
+function resolveLocalServicePort() {
+  const port = parseInt(process.env.LOCAL_SERVICE_PORT || '7912', 10);
+  // 旧安装包/旧 .env 常见写成 7910，但 7910 只是一层轻量壳服务；
+  // DXS 完整接口实际在 7912。这里做兼容，避免老 .env 覆盖掉新默认值。
+  return port === 7910 ? 7912 : port;
+}
+
 // ★ 从 .env 加载。
 // 先读 node-ws/.env 作为兼容默认值，再读上级 cs/.env 覆盖。
 // 宝塔多站点部署时，站点安装器只会生成 cs/.env；仓库里的 node-ws/.env
@@ -77,7 +84,7 @@ module.exports = {
   // ★ 设备上 DXS local-service/tpx 监听的本地端口。
   // libdxs.so v3.1.0 的 server 默认端口是 7912；7910 是 APK 外层轻量服务，
   // 只提供少量状态接口，不能承接 /deviceInfo、/screenshot、/getConfig 等 DXS 路由。
-  localServicePort: parseInt(process.env.LOCAL_SERVICE_PORT || '7912', 10),
+  localServicePort: resolveLocalServicePort(),
 
 
   // ★ CORS 白名单（逗号分隔）
