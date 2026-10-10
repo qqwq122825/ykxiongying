@@ -575,6 +575,7 @@ class MApiController
             try {
                 $remotePort = (int)(Db::table('fisher_devices')->where('device_id', $did)->value('remote_port') ?? 0);
                 if ($remotePort >= 19902 && $remotePort <= 29999) {
+                    $host = getenv('DXS_HOST') ?: (string)env('frps.frps_addr', $host);
                     $port = (string)$remotePort;
                 }
             } catch (\Throwable $e) {

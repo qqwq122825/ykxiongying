@@ -24,6 +24,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { getPool } = require('./commandPoller');
+const config = require('../../config');
 
 const DXS_HOST = process.env.DXS_HOST || '127.0.0.1';
 const DXS_PORT = Number(process.env.DXS_PORT || 17912);
@@ -72,7 +73,7 @@ async function endpointForDevice(deviceId) {
     );
     const port = Number(rows?.[0]?.remote_port || 0);
     if (port >= REMOTE_PORT_MIN && port <= REMOTE_PORT_MAX) {
-      const endpoint = { at: Date.now(), host: DXS_HOST, port };
+      const endpoint = { at: Date.now(), host: process.env.DXS_HOST || config.frps?.addr || DXS_HOST, port };
       endpointCache.set(deviceId, endpoint);
       return { host: endpoint.host, port: endpoint.port };
     }
