@@ -4,7 +4,8 @@ import { api } from "../api/client"
 function bs(s){if(!s)return"0 秒";const d=Math.floor(s/86400);s%=86400;const h=Math.floor(s/3600);s%=3600;const m=Math.floor(s/60);const se=Math.floor(s%60);let r="";if(d)r+=d+"天";if(h)r+=h+"小时";if(m)r+=m+"分";r+=se+"秒";return r}
 function vs(b){if(!b||b===0)return"0 B";const u=["B","KB","MB","GB","TB"],i=Math.floor(Math.log(b)/Math.log(1024));return(b/Math.pow(1024,i)).toFixed(1)+" "+u[i]}
 function ks(p){if(p<50)return"#52c41a";if(p<80)return"#faad14";return"#ff4d4f"}
-function sp(p){return Math.min(100,Math.max(0,Math.round(p||0)))}
+function sp(p){const n=Number(p||0);return Math.min(100,Math.max(0,Math.round(n*10)/10))}
+function pp(p){const n=sp(p);return n>0&&n<1?"<1":String(Math.round(n))}
 
 function Donut({pct,size=100,stroke=8}){
   const r=36,nr=15.9155,circ=nr*2*Math.PI,offset=circ-(circ*sp(pct)/100)
@@ -17,7 +18,7 @@ function MeterCard({title,pct,icon,items}){
     <div style={{textAlign:"center",padding:"8px 0"}}>
       <div style={{position:"relative",width:100,height:100,margin:"0 auto 10px",display:"flex",alignItems:"center",justifyContent:"center"}}>
         <Donut pct={pct}/>
-        <div style={{position:"absolute",fontSize:22,fontWeight:700,color:ks(pct)}}>{sp(pct)}%</div>
+        <div style={{position:"absolute",fontSize:22,fontWeight:700,color:ks(pct)}}>{pp(pct)}%</div>
       </div>
     </div>
     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"4px 12px",fontSize:13,color:"#8870a0",marginTop:"auto"}}>
@@ -75,7 +76,7 @@ export default function NodePage(){
       </div>
 
       <div className="rc-stats node-stats-4" style={{gridTemplateColumns:"repeat(4,1fr)",marginBottom:24}}>
-        <MeterCard title="CPU 使用率" pct={data.cpuUsage} icon="⚡" items={[{l:"核心数",v:data.cpuCores+" 核"},{l:"型号",v:data.cpuModel||"未知"}]}/>
+        <MeterCard title="CPU 使用率" pct={data.cpuUsageRaw??data.cpuUsage} icon="⚡" items={[{l:"核心数",v:data.cpuCores+" 核"},{l:"负载",v:Array.isArray(data.loadAverage)?data.loadAverage.join(" / "):"-"},{l:"型号",v:data.cpuModel||"未知"}]}/>
         <MeterCard title="内存使用" pct={data.memUsage} icon="🧠" items={[{l:"总内存",v:vs(data.memTotal)},{l:"已使用",v:vs(data.memUsed)},{l:"可用",v:vs(data.memFree)}]}/>
         <MeterCard title="硬盘使用" pct={data.diskUsage} icon="💾" items={[{l:"总容量",v:vs(data.diskTotal)},{l:"已使用",v:vs(data.diskUsed)},{l:"可用",v:vs(data.diskFree)}]}/>
         <MeterCard title="网络流量" pct={0} icon="🌐" items={[{l:"上传速度",v:vs(data.netSendSpeed||0)+"/s"},{l:"下载速度",v:vs(data.netRecvSpeed||0)+"/s"},{l:"总上传",v:vs(data.netBytesSent||0)},{l:"总下载",v:vs(data.netBytesRecv||0)}]}/>

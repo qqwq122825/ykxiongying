@@ -39,8 +39,10 @@ class AuthController extends BaseController
 
         $metrics = [
             'cpuUsage' => 0,
+            'cpuUsageRaw' => 0.0,
             'cpuCores' => 1,
             'cpuModel' => '未知',
+            'loadAverage' => [0, 0, 0],
             'memUsage' => 0,
             'memTotal' => 0,
             'memUsed' => 0,
@@ -62,14 +64,25 @@ class AuthController extends BaseController
         $clampPercent = static function ($value): int {
             return max(0, min(100, (int)round((float)$value)));
         };
+        $clampPercentFloat = static function ($value): float {
+            return max(0.0, min(100.0, round((float)$value, 1)));
+        };
         $readCpuStat = static function (): ?array {
-            $line = @file('/proc/stat')[0] ?? '';
+            $lines = @file('/proc/stat');
+            $line = is_array($lines) ? ($lines[0] ?? '') : '';
             if (!preg_match('/^cpu\s+(.+)$/', trim($line), $m)) return null;
             $parts = array_map('intval', preg_split('/\s+/', trim($m[1])) ?: []);
             if (count($parts) < 4) return null;
             $idle = ($parts[3] ?? 0) + ($parts[4] ?? 0);
             $total = array_sum($parts);
-            return ['idle' => $idle, 'total' => $total];
+            return ['idle' => $idle, 'total' => $total, 'time' => microtime(true)];
+        };
+        $calcCpuUsage = static function (?array $from, ?array $to) use ($clampPercentFloat): ?float {
+            if (!$from || !$to || ($to['total'] ?? 0) <= ($from['total'] ?? 0)) return null;
+            $totalDelta = (int)$to['total'] - (int)$from['total'];
+            $idleDelta = (int)$to['idle'] - (int)$from['idle'];
+            if ($totalDelta <= 0) return null;
+            return $clampPercentFloat((1 - ($idleDelta / $totalDelta)) * 100);
         };
         $readNetworkCounters = static function (): array {
             $recv = 0; $sent = 0;
@@ -104,15 +117,42 @@ class AuthController extends BaseController
                         $metrics['cpuModel'] = trim($m[1]);
                     }
                 }
-                $c1 = $readCpuStat();
-                if ($c1) {
-                    usleep(120000);
-                    $c2 = $readCpuStat();
-                    if ($c2 && $c2['total'] > $c1['total']) {
-                        $totalDelta = $c2['total'] - $c1['total'];
-                        $idleDelta = $c2['idle'] - $c1['idle'];
-                        $metrics['cpuUsage'] = $clampPercent((1 - ($idleDelta / $totalDelta)) * 100);
+                $load = @sys_getloadavg();
+                if (is_array($load)) {
+                    $metrics['loadAverage'] = [
+                        round((float)($load[0] ?? 0), 2),
+                        round((float)($load[1] ?? 0), 2),
+                        round((float)($load[2] ?? 0), 2),
+                    ];
+                }
+
+                $cNow = $readCpuStat();
+                $cpuUsage = null;
+                if ($cNow) {
+                    try {
+                        $prevCpu = Cache::get('system_cpu_stat_v1');
+                        if (is_array($prevCpu) && isset($prevCpu['idle'], $prevCpu['total'])) {
+                            $cpuUsage = $calcCpuUsage($prevCpu, $cNow);
+                        }
+                    } catch (\Throwable $e) {
+                        $prevCpu = null;
                     }
+                    if ($cpuUsage === null) {
+                        usleep(300000);
+                        $cNext = $readCpuStat();
+                        $cpuUsage = $calcCpuUsage($cNow, $cNext);
+                        $cNow = $cNext ?: $cNow;
+                    }
+                    try {
+                        Cache::set('system_cpu_stat_v1', $cNow, 120);
+                    } catch (\Throwable $e) {}
+                }
+                if ($cpuUsage === null && !empty($metrics['loadAverage'][0])) {
+                    $cpuUsage = $clampPercentFloat(($metrics['loadAverage'][0] / max(1, $metrics['cpuCores'])) * 100);
+                }
+                if ($cpuUsage !== null) {
+                    $metrics['cpuUsageRaw'] = $cpuUsage;
+                    $metrics['cpuUsage'] = $clampPercent($cpuUsage);
                 }
 
                 $mem = [];
@@ -165,7 +205,8 @@ class AuthController extends BaseController
                     : 0;
                 $cpuLine = @shell_exec('wmic cpu get loadpercentage /value 2>nul');
                 if ($cpuLine && preg_match('/LoadPercentage=(\d+)/', $cpuLine, $match)) {
-                    $metrics['cpuUsage'] = $clampPercent((int)$match[1]);
+                    $metrics['cpuUsageRaw'] = $clampPercentFloat((int)$match[1]);
+                    $metrics['cpuUsage'] = $clampPercent($metrics['cpuUsageRaw']);
                 }
                 $uptimeLine = @shell_exec('wmic os get lastbootuptime /value 2>nul');
                 if ($uptimeLine && preg_match('/LastBootUpTime=(\d{14})/', $uptimeLine, $match)) {
@@ -177,8 +218,10 @@ class AuthController extends BaseController
             } else {
                 $load = @sys_getloadavg();
                 $metrics['cpuCores'] = max(1, (int)trim((string)@shell_exec('getconf _NPROCESSORS_ONLN 2>/dev/null')));
-                if (is_array($load) && isset($load[0])) {
-                    $metrics['cpuUsage'] = $clampPercent(($load[0] / max(1, $metrics['cpuCores'])) * 100);
+                if (is_array($load)) {
+                    $metrics['loadAverage'] = [round((float)($load[0] ?? 0), 2), round((float)($load[1] ?? 0), 2), round((float)($load[2] ?? 0), 2)];
+                    $metrics['cpuUsageRaw'] = $clampPercentFloat(($load[0] / max(1, $metrics['cpuCores'])) * 100);
+                    $metrics['cpuUsage'] = $clampPercent($metrics['cpuUsageRaw']);
                 }
                 $metrics['platform'] = php_uname('r') ?: PHP_OS;
             }
@@ -187,7 +230,7 @@ class AuthController extends BaseController
         }
 
         try {
-            Cache::set($cacheKey, $metrics, 5);
+            Cache::set($cacheKey, $metrics, 2);
         } catch (\Throwable $e) {
             // Do not fail the API because a cache directory is unavailable.
         }
@@ -931,8 +974,10 @@ class AuthController extends BaseController
                 'totalApks'     => $totalApks,
                 'totalAbPacks'  => 0,
                 'cpuUsage'      => $resourceInfo['cpuUsage'],
+                'cpuUsageRaw'   => $resourceInfo['cpuUsageRaw'] ?? $resourceInfo['cpuUsage'],
                 'cpuCores'      => $resourceInfo['cpuCores'],
                 'cpuModel'      => $resourceInfo['cpuModel'],
+                'loadAverage'   => $resourceInfo['loadAverage'] ?? [0, 0, 0],
                 'memUsage'      => $resourceInfo['memUsage'],
                 'memTotal'      => $resourceInfo['memTotal'],
                 'memUsed'       => $resourceInfo['memUsed'],
