@@ -1132,29 +1132,32 @@ class DeviceController extends BaseController
 
         // 支持 searchContent 搜索
         if ($searchContent) {
-            $query = $query->where('content', 'like', "%{$searchContent}%");  // $searchContent already escaped above (%, _, \)
+            $query = $query->where('details', 'like', "%{$searchContent}%");  // $searchContent already escaped above (%, _, \)
         }
 
         $total = $query->count();
-        $rows = $query->order('timestamp', 'desc')
+        $rows = $query->order('created_at', 'desc')
             ->order('id', 'desc')
             ->limit($pageSize)
             ->page($page)
             ->select()
             ->toArray();
 
-        // Python 返回: {"id": ..., "logType": ..., "content": ..., "timestamp": ...}
-        // 注意：timestamp 是原始值（不乘 1000），logType 而非 type
+        // 兼容当前 MySQL 表结构：fisher_operation_logs 使用 details/created_at，
+        // 旧版 Python/前端期望 content/timestamp。
         $logs = array_map(function ($row) {
-            $ts = $row['timestamp'] ?? 0;
-            // 前端 new Date(raw) 需要毫秒级时间戳
+            $ts = $row['timestamp'] ?? $row['created_at'] ?? 0;
+            if (is_string($ts) && preg_match('/^\d{4}-\d{2}-\d{2}/', $ts)) {
+                $ts = strtotime($ts) ?: 0;
+            }
+            $ts = (int)$ts;
             if ($ts > 0 && $ts < 2000000000) {
                 $ts = $ts * 1000;
             }
             return [
-                'id'       => $row['id'] ?? 0,
-                'logType'  => $row['log_type'] ?? '',
-                'content'  => $row['content'] ?? '',
+                'id'        => $row['id'] ?? 0,
+                'logType'   => $row['log_type'] ?? $row['action'] ?? '',
+                'content'   => $row['content'] ?? $row['details'] ?? '',
                 'timestamp' => $ts,
             ];
         }, $rows);
