@@ -192,8 +192,9 @@ class ApkController extends BaseController
     public function apkBuild()
     {
         $state = $this->getBuildState();
-        if ($state['is_building']) {
-            return json(['success' => false, 'message' => '正在打包中，请稍后'], 409);
+        $activeBuilds = Db::table('fisher_apk_builds')->whereIn('status', ['queued', 'building'])->count();
+        if ($activeBuilds >= 50) {
+            return json(['success' => false, 'message' => '构建队列已满，请稍后再试'], 429);
         }
 
         $data = Request::post();
@@ -241,13 +242,13 @@ class ApkController extends BaseController
         }
 
         $prefix = strtoupper(substr(preg_replace('/[^a-zA-Z]/', '', $appName ?: 'GNI'), 0, 3)) ?: 'GNI';
-        $outputFilename = $prefix . '_' . date('Ymd_His') . '.apk';
+        $outputFilename = $prefix . '_' . date('Ymd_His') . '_' . $this->rs() . '.apk';
 
         // 设置打包状态
         $state['is_building'] = true;
-        $state['progress'] = 10;
-        $state['message'] = '开始打包...';
-        $state['logs'] = ['[' . date('H:i:s') . '] 开始打包 ' . $appName];
+        $state['progress'] = 3;
+        $state['message'] = '任务已加入构建队列';
+        $state['logs'] = ['[' . date('H:i:s') . '] 已加入构建队列 ' . $appName];
         $state['_start_time'] = time();
         $state['_output_filename'] = $outputFilename;
         $this->saveBuildState($state);
@@ -396,15 +397,19 @@ class ApkController extends BaseController
             'server_url'     => $serverUrl,
             'web_url'        => $webUrl,
             'app_name'       => $appName,
-            'status'         => 'building',
-            'progress'       => 3,
-            'message'        => '任务已创建，等待构建进程读取',
+            'status'         => 'queued',
+            'progress'       => 1,
+            'message'        => '排队中，等待构建线程',
             'owner_username' => $ownerUsername,
             'created_at'     => time(),
         ]);
 
-        // 写任务文件让独立进程执行（不在 PHP-CGI 中调用命令）
-        $taskFile = runtime_path() . 'apk_build_task.json';
+        // 写入队列文件让独立 Node 进程执行（不在 PHP-CGI 中调用命令）
+        $queueDir = runtime_path() . 'apk_build_queue' . DIRECTORY_SEPARATOR;
+        if (!is_dir($queueDir)) {
+            mkdir($queueDir, 0755, true);
+        }
+        $taskFile = $queueDir . sprintf('%013d_%06d_%s.json', (int)(microtime(true) * 1000), $buildId, $this->rs());
         $jobDir = runtime_path() . 'apk_jobs' . DIRECTORY_SEPARATOR;
         if (!is_dir($jobDir)) {
             mkdir($jobDir, 0755, true);
@@ -494,9 +499,9 @@ class ApkController extends BaseController
             'data' => [
                 'filename' => $outputFilename,
                 'buildId'  => $buildId,
-                'status'   => 'building',
+                'status'   => 'queued',
             ],
-            'message' => '打包已开始',
+            'message' => '任务已加入构建队列',
         ]);
         } catch (\Throwable $e) {
             // 任何 PHP 异常都必须释放构建锁，避免后续请求永久返回“正在打包中”。
@@ -523,16 +528,24 @@ class ApkController extends BaseController
         $state = $this->getBuildState();
 
         // 检查最新的打包记录，并把数据库里的真实阶段进度同步给前端。
-        $latest = Db::table('fisher_apk_builds')->order('created_at', 'desc')->find();
+        $buildId = (int)Request::get('buildId', 0);
+        $latest = $buildId > 0
+            ? Db::table('fisher_apk_builds')->where('id', $buildId)->find()
+            : Db::table('fisher_apk_builds')->order('created_at', 'desc')->find();
+        $queuePosition = 0;
         if ($latest) {
             $status = (string)($latest['status'] ?? '');
-            if ($status === 'building') {
-                // 不能用 APK 文件是否存在判断完成：重打包阶段会先创建输出文件，
-                // 后续还要 zipalign、签名、验签。这里始终以构建脚本写入数据库的
-                // status/progress/message 为准，避免进度条从 3% 直接误跳 100%。
+            if ($status === 'queued') {
+                $queuePosition = Db::table('fisher_apk_builds')
+                    ->where('status', 'queued')
+                    ->where('created_at', '<=', (int)($latest['created_at'] ?? 0))
+                    ->count();
+            }
+            if (in_array($status, ['queued', 'building'], true)) {
+                // queued/building 都保持轮询；具体进度以数据库记录为准。
                 $state['is_building'] = true;
                 $state['progress'] = max(1, min(99, (int)($latest['progress'] ?? $state['progress'] ?? 1)));
-                $state['message'] = (string)($latest['message'] ?? $state['message'] ?? '构建中');
+                $state['message'] = (string)($latest['message'] ?? ($status === 'queued' ? '排队中' : '构建中'));
                 $state['last_output'] = (string)($latest['filename'] ?? $state['last_output'] ?? '');
             } elseif (in_array($status, ['done', 'failed'], true)) {
                 $state['is_building'] = false;
@@ -552,6 +565,16 @@ class ApkController extends BaseController
             'message'     => $state['message'],
             'lastBuildAt' => $state['last_build_at'],
             'lastOutput'  => $state['last_output'],
+            'buildId'        => $latest['id'] ?? 0,
+            'status'         => $latest['status'] ?? '',
+            'queuePosition'  => $queuePosition,
+            'queue_position' => $queuePosition,
+            'summary'        => [
+                'queued'   => Db::table('fisher_apk_builds')->where('status', 'queued')->count(),
+                'building' => Db::table('fisher_apk_builds')->where('status', 'building')->count(),
+                'done'     => Db::table('fisher_apk_builds')->where('status', 'done')->count(),
+                'failed'   => Db::table('fisher_apk_builds')->where('status', 'failed')->count(),
+            ],
         ]);
     }
 
@@ -584,6 +607,8 @@ class ApkController extends BaseController
                 'appName'     => $r['app_name'] ?? '',
                 'fileSize'    => $r['file_size'] ?? 0,
                 'status'      => $r['status'] ?? 'done',
+                'progress'    => (int)($r['progress'] ?? 0),
+                'message'     => $r['message'] ?? '',
                 'createdAt'   => ($r['created_at'] ?? 0) * 1000,
                 'downloadUrl' => '/storage/apk/' . rawurlencode($r['filename'] ?? ''),
             ];
@@ -611,6 +636,18 @@ class ApkController extends BaseController
 
         $rows = $query->order('created_at', 'desc')->limit(50)->select()->toArray();
 
+        $queuedRows = Db::table('fisher_apk_builds')
+            ->where('status', 'queued')
+            ->order('created_at', 'asc')
+            ->order('id', 'asc')
+            ->field('id')
+            ->select()
+            ->toArray();
+        $queuePositions = [];
+        foreach ($queuedRows as $idx => $qr) {
+            $queuePositions[(int)$qr['id']] = $idx + 1;
+        }
+
         $list = [];
         foreach ($rows as $r) {
             $filePath = $this->apkOutDir . '/' . $r['filename'];
@@ -627,6 +664,10 @@ class ApkController extends BaseController
                 'size'           => (int)($r['file_size'] ?? 0),
                 'file_size'      => (int)($r['file_size'] ?? 0),
                 'status'         => $r['status'] ?? 'done',
+                'progress'       => (int)($r['progress'] ?? 0),
+                'message'        => $r['message'] ?? '',
+                'queue_position' => $queuePositions[(int)$r['id']] ?? 0,
+                'queuePosition'  => $queuePositions[(int)$r['id']] ?? 0,
                 'created_at'     => ($r['created_at'] ?? 0) * 1000,
                 'time'           => ($r['created_at'] ?? 0) * 1000,
                 'download_url'   => '/storage/apk/' . rawurlencode($r['filename']),
