@@ -2,6 +2,11 @@
 
 > 生成时间：2026-10-09 · 目标：让 `stST\2` 那套源码在局域网跑起来，界面和 `stST\1`（雄鹰安卓远程管理）一模一样。
 
+## Linux / 宝塔部署
+
+服务器部署、安装锁、Nginx WebSocket 代理、runtime 权限、APK 构建队列、Cloudflare 与 FRPS 避坑清单见：[`DEPLOYMENT.md`](DEPLOYMENT.md)。
+
+
 ## 一、怎么启动
 
 ```powershell
