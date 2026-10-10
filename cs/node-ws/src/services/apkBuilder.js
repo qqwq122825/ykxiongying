@@ -13,7 +13,7 @@ const RUNTIME_DIR = process.env.CS_RUNTIME_DIR || path.join(CS_ROOT, 'runtime');
 const TASK_FILE = path.join(RUNTIME_DIR, 'apk_build_task.json');
 const STATUS_FILE = path.join(RUNTIME_DIR, 'apk_build_status.json');
 const LOG_FILE = path.join(RUNTIME_DIR, 'apk_build.log');
-const POLL_INTERVAL = 3000; // 3秒轮询一次
+const POLL_INTERVAL = 1000; // 1秒轮询一次，让 APK 构建进度更接近实时
 
 const STATE_KEY = Symbol.for('fisher.apkBuilderState');
 const state = globalThis[STATE_KEY] || (globalThis[STATE_KEY] = {

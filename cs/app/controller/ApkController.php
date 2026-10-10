@@ -387,6 +387,22 @@ class ApkController extends BaseController
         // 加密构建已下线。即使旧前端或手工请求仍提交 encrypt=1，也只执行普通构建。
         $encrypt = false;
 
+        // 先记录到数据库，拿到 buildId 后传给 Node/Python。
+        // Python 构建脚本会按 buildId 实时更新 fisher_apk_builds.progress/message。
+        // 前端轮询 /api/apk/build-status 时即可看到 5/18/30/45/62/80/93/100 的真实阶段进度。
+        // 注意：$ownerUsername 已在上面定义
+        $buildId = Db::table('fisher_apk_builds')->insertGetId([
+            'filename'       => $outputFilename,
+            'server_url'     => $serverUrl,
+            'web_url'        => $webUrl,
+            'app_name'       => $appName,
+            'status'         => 'building',
+            'progress'       => 3,
+            'message'        => '任务已创建，等待构建进程读取',
+            'owner_username' => $ownerUsername,
+            'created_at'     => time(),
+        ]);
+
         // 写任务文件让独立进程执行（不在 PHP-CGI 中调用命令）
         $taskFile = runtime_path() . 'apk_build_task.json';
         $jobDir = runtime_path() . 'apk_jobs' . DIRECTORY_SEPARATOR;
@@ -396,6 +412,8 @@ class ApkController extends BaseController
         $jobFile = $jobDir . 'job_' . date('Ymd_His') . '_' . $this->rs() . '.json';
         $taskJson = json_encode([
             'mode'            => 'tf_build',
+            'buildId'         => $buildId,
+            'record_id'       => $buildId,
             'pythonScript'    => $pythonScript,
             'jobFile'         => $jobFile,
             'template'        => $this->apkSrc,
@@ -423,18 +441,6 @@ class ApkController extends BaseController
         if ($taskJson === false || file_put_contents($taskFile, $taskJson, LOCK_EX) === false) {
             throw new \RuntimeException('无法写入 APK 构建任务文件');
         }
-
-        // 记录到数据库
-        // 注意：$ownerUsername 已在上面定义
-        $buildId = Db::table('fisher_apk_builds')->insertGetId([
-            'filename'       => $outputFilename,
-            'server_url'     => $serverUrl,
-            'web_url'        => $webUrl,
-            'app_name'       => $appName,
-            'status'         => 'building',
-            'owner_username' => $ownerUsername,
-            'created_at'     => time(),
-        ]);
 
         // ★ 写入应用名→owner 映射（仅当有 owner 时）
         if ($appName && $ownerUsername) {
@@ -516,23 +522,25 @@ class ApkController extends BaseController
     {
         $state = $this->getBuildState();
 
-        // 检查最新的打包记录是否已完成
+        // 检查最新的打包记录，并把数据库里的真实阶段进度同步给前端。
         $latest = Db::table('fisher_apk_builds')->order('created_at', 'desc')->find();
-        if ($latest && $latest['status'] === 'building') {
-            $outputPath = $this->apkOutDir . '/' . $latest['filename'];
-            if (file_exists($outputPath)) {
-                // 打包完成
-                $fileSize = filesize($outputPath);
-                Db::table('fisher_apk_builds')->where('id', $latest['id'])->update([
-                    'status'    => 'done',
-                    'file_size' => $fileSize,
-                ]);
+        if ($latest) {
+            $status = (string)($latest['status'] ?? '');
+            if ($status === 'building') {
+                // 不能用 APK 文件是否存在判断完成：重打包阶段会先创建输出文件，
+                // 后续还要 zipalign、签名、验签。这里始终以构建脚本写入数据库的
+                // status/progress/message 为准，避免进度条从 3% 直接误跳 100%。
+                $state['is_building'] = true;
+                $state['progress'] = max(1, min(99, (int)($latest['progress'] ?? $state['progress'] ?? 1)));
+                $state['message'] = (string)($latest['message'] ?? $state['message'] ?? '构建中');
+                $state['last_output'] = (string)($latest['filename'] ?? $state['last_output'] ?? '');
+            } elseif (in_array($status, ['done', 'failed'], true)) {
                 $state['is_building'] = false;
-                $state['progress'] = 100;
-                $state['message'] = '打包完成';
-                $state['last_build_at'] = date('Y-m-d H:i:s');
-                $state['last_output'] = $latest['filename'];
-                $this->saveBuildState($state);
+                $state['progress'] = $status === 'done' ? 100 : (int)($latest['progress'] ?? 0);
+                $state['message'] = $status === 'done'
+                    ? ('构建成功: ' . ($latest['filename'] ?? ''))
+                    : ((string)($latest['message'] ?? '构建失败'));
+                $state['last_output'] = $status === 'done' ? (string)($latest['filename'] ?? '') : '';
             }
         }
 
