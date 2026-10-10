@@ -173,6 +173,10 @@ APK_BUILD_CONCURRENCY=2   # 服务器 Android 环境足够时可提高
 
 ## 8. Nginx 必须配置 WebSocket 代理
 
+安装页 `/install` 会生成 `cs/runtime/nginx-rewrite.conf`；仓库也内置模板 `cs/deploy/nginx/bt-rewrite.conf.example`。在宝塔部署时，把模板内容放进站点“伪静态/重写规则”（实际文件通常是 `/www/server/panel/vhost/rewrite/<域名>.conf`），再执行 `nginx -t && nginx -s reload`。
+
+### 8.1 Nginx 必须配置 WebSocket 代理
+
 如果 Nginx 没有代理 `/w`、`/ws`、`/s/lk` 到 Node，设备日志里会看到：
 
 ```text

@@ -140,6 +140,67 @@ function node_ws_env_text(array $cfg): string {
         "FRPS_DASHBOARD_PORT={$cfg['frps_dashboard_port']}\n" .
         "CORS_ORIGINS={$cfg['site_url']}\n";
 }
+function nginx_rewrite_text(array $cfg): string {
+    $wsPort = preg_replace('/[^0-9]/', '', (string)($cfg['ws_port'] ?? '8889')) ?: '8889';
+    return "# ykxiongying / 宝塔 Nginx rewrite include\n" .
+        "# 复制到：/www/server/panel/vhost/rewrite/<域名>.conf，然后 nginx -t && nginx -s reload\n" .
+        "location ^~ /ws {\n" .
+        "    proxy_pass http://127.0.0.1:{$wsPort};\n" .
+        "    proxy_http_version 1.1;\n" .
+        "    proxy_set_header Upgrade \$http_upgrade;\n" .
+        "    proxy_set_header Connection \"upgrade\";\n" .
+        "    proxy_set_header Host \$host;\n" .
+        "    proxy_set_header X-Real-IP \$remote_addr;\n" .
+        "    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;\n" .
+        "    proxy_set_header X-Forwarded-Proto \$scheme;\n" .
+        "    proxy_read_timeout 3600s;\n" .
+        "    proxy_send_timeout 3600s;\n" .
+        "    proxy_buffering off;\n" .
+        "}\n\n" .
+        "location ^~ /w {\n" .
+        "    proxy_pass http://127.0.0.1:{$wsPort};\n" .
+        "    proxy_http_version 1.1;\n" .
+        "    proxy_set_header Upgrade \$http_upgrade;\n" .
+        "    proxy_set_header Connection \"upgrade\";\n" .
+        "    proxy_set_header Host \$host;\n" .
+        "    proxy_set_header X-Real-IP \$remote_addr;\n" .
+        "    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;\n" .
+        "    proxy_set_header X-Forwarded-Proto \$scheme;\n" .
+        "    proxy_read_timeout 3600s;\n" .
+        "    proxy_send_timeout 3600s;\n" .
+        "    proxy_buffering off;\n" .
+        "}\n\n" .
+        "location ^~ /s/lk {\n" .
+        "    proxy_pass http://127.0.0.1:{$wsPort};\n" .
+        "    proxy_http_version 1.1;\n" .
+        "    proxy_set_header Upgrade \$http_upgrade;\n" .
+        "    proxy_set_header Connection \"upgrade\";\n" .
+        "    proxy_set_header Host \$host;\n" .
+        "    proxy_set_header X-Real-IP \$remote_addr;\n" .
+        "    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;\n" .
+        "    proxy_set_header X-Forwarded-Proto \$scheme;\n" .
+        "    proxy_read_timeout 3600s;\n" .
+        "    proxy_send_timeout 3600s;\n" .
+        "    proxy_buffering off;\n" .
+        "}\n\n" .
+        "location = /s/bn/native {\n" .
+        "    default_type application/octet-stream;\n" .
+        "    return 204;\n" .
+        "}\n\n" .
+        "location /api/ {\n" .
+        "    rewrite ^/(.*)$ /index.php?s=/\$1 last;\n" .
+        "}\n\n" .
+        "location /m/ {\n" .
+        "    rewrite ^/(.*)$ /index.php?s=/\$1 last;\n" .
+        "}\n\n" .
+        "location /s/ {\n" .
+        "    rewrite ^/(.*)$ /index.php?s=/\$1 last;\n" .
+        "}\n\n" .
+        "location / {\n" .
+        "    try_files \$uri \$uri/ /index.html;\n" .
+        "}\n";
+}
+
 function read_lock(string $lockFile): array {
     if (!is_file($lockFile)) return [];
     $data = json_decode((string)file_get_contents($lockFile), true);
@@ -163,6 +224,7 @@ $lockInfo = read_lock($lockFile);
 $errors = [];
 $success = false;
 $schemaStats = null;
+$nginxRewriteFile = $runtimeDir . '/nginx-rewrite.conf';
 
 $defaults = [
     'db_host' => posted('db_host', '127.0.0.1'),
@@ -212,6 +274,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if ($cfg['frps_dashboard_pass'] === '') $cfg['frps_dashboard_pass'] = random_secret(16);
                 write_file_atomic($envFile, env_text($cfg));
                 if (is_dir($root . '/node-ws')) write_file_atomic($nodeEnvFile, node_ws_env_text($cfg));
+                write_file_atomic($nginxRewriteFile, nginx_rewrite_text($cfg));
                 write_file_atomic($lockFile, json_encode([
                     'installed_at' => date('c'),
                     'db_name' => $dbName,
@@ -219,6 +282,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'site_url' => $defaults['site_url'],
                     'schema' => $schemaStats,
                     'php_version' => PHP_VERSION,
+                    'nginx_rewrite_file' => $nginxRewriteFile,
                 ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT));
                 $success = true;
                 $installed = true;
@@ -233,12 +297,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>部署安装向导</title>
 <style>
-*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top,#13233d 0,#07111f 42%,#030712 100%);color:#e5e7eb;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,"Microsoft YaHei",sans-serif}.wrap{max-width:1060px;margin:34px auto;padding:0 18px}.hero{display:flex;justify-content:space-between;gap:16px;align-items:flex-end}.card{background:rgba(17,24,39,.92);border:1px solid #273449;border-radius:18px;padding:24px;margin:16px 0;box-shadow:0 18px 50px #0008}h1{margin:0 0 8px;font-size:30px}h2{margin:0 0 16px;font-size:19px}.muted{color:#94a3b8}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}@media(max-width:760px){.grid{grid-template-columns:1fr}.hero{display:block}}label{display:block;color:#cbd5e1;font-size:13px}input{width:100%;margin-top:6px;height:43px;border-radius:10px;border:1px solid #334155;background:#020617;color:#e5e7eb;padding:0 12px;outline:none}input:focus{border-color:#60a5fa;box-shadow:0 0 0 3px #2563eb33}button{height:44px;border:0;border-radius:10px;padding:0 20px;background:linear-gradient(135deg,#2563eb,#7c3aed);color:white;font-weight:800;cursor:pointer}button:disabled{opacity:.45;cursor:not-allowed}.ok{color:#22c55e}.bad{color:#ef4444}.alert{padding:12px 14px;border-radius:12px;margin:12px 0}.alert.err{background:#7f1d1d66;border:1px solid #ef444466}.alert.okb{background:#064e3b66;border:1px solid #22c55e66}code{background:#020617;border:1px solid #334155;border-radius:6px;padding:2px 6px}.checks{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}@media(max-width:900px){.checks{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:560px){.checks{grid-template-columns:1fr}}.check{background:#020617;border:1px solid #263244;border-radius:10px;padding:10px}.pill{display:inline-block;border-radius:999px;padding:5px 10px;background:#0f172a;border:1px solid #334155;color:#cbd5e1;font-size:12px}.actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:18px}.small{font-size:12px}</style></head>
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top,#13233d 0,#07111f 42%,#030712 100%);color:#e5e7eb;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,"Microsoft YaHei",sans-serif}.wrap{max-width:1060px;margin:34px auto;padding:0 18px}.hero{display:flex;justify-content:space-between;gap:16px;align-items:flex-end}.card{background:rgba(17,24,39,.92);border:1px solid #273449;border-radius:18px;padding:24px;margin:16px 0;box-shadow:0 18px 50px #0008}h1{margin:0 0 8px;font-size:30px}h2{margin:0 0 16px;font-size:19px}.muted{color:#94a3b8}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}@media(max-width:760px){.grid{grid-template-columns:1fr}.hero{display:block}}label{display:block;color:#cbd5e1;font-size:13px}input{width:100%;margin-top:6px;height:43px;border-radius:10px;border:1px solid #334155;background:#020617;color:#e5e7eb;padding:0 12px;outline:none}input:focus{border-color:#60a5fa;box-shadow:0 0 0 3px #2563eb33}button{height:44px;border:0;border-radius:10px;padding:0 20px;background:linear-gradient(135deg,#2563eb,#7c3aed);color:white;font-weight:800;cursor:pointer}button:disabled{opacity:.45;cursor:not-allowed}.ok{color:#22c55e}.bad{color:#ef4444}.alert{padding:12px 14px;border-radius:12px;margin:12px 0}.alert.err{background:#7f1d1d66;border:1px solid #ef444466}.alert.okb{background:#064e3b66;border:1px solid #22c55e66}code{background:#020617;border:1px solid #334155;border-radius:6px;padding:2px 6px}.checks{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}@media(max-width:900px){.checks{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:560px){.checks{grid-template-columns:1fr}}.check{background:#020617;border:1px solid #263244;border-radius:10px;padding:10px}.pill{display:inline-block;border-radius:999px;padding:5px 10px;background:#0f172a;border:1px solid #334155;color:#cbd5e1;font-size:12px}.actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:18px}.small{font-size:12px}.snippet{white-space:pre-wrap;overflow:auto;max-height:420px;font-size:12px;line-height:1.45}</style></head>
 <body><div class="wrap"><div class="hero"><div><h1>部署安装向导</h1><div class="muted">初始化数据库、管理员账号、站点环境、Node WS 配置，并生成安装锁。</div></div><span class="pill">Lock: <?= $installed ? 'ON' : 'OFF' ?></span></div>
-<?php if ($success): ?><div class="alert okb">安装完成，已写入配置并生成锁文件。可以返回 <a style="color:#93c5fd" href="/">后台首页</a> 登录。</div><?php endif; ?>
+<?php if ($success): ?><div class="alert okb">安装完成，已写入配置、生成 Nginx rewrite 模板并生成锁文件。可以返回 <a style="color:#93c5fd" href="/">后台首页</a> 登录。</div><?php endif; ?>
 <?php foreach ($errors as $e): ?><div class="alert err"><?=h($e)?></div><?php endforeach; ?>
 <div class="card"><h2>环境检测</h2><div class="checks"><?php foreach ($checks as [$name,$ok]): ?><div class="check"><span class="<?=$ok?'ok':'bad'?>"><?=$ok?'✓':'✗'?></span> <?=h($name)?> <span class="muted small">/ <?=h(bool_text((bool)$ok))?></span></div><?php endforeach; ?></div></div>
 <?php if ($installed): ?><div class="card"><h2>已安装</h2><p>检测到锁文件：<code><?=h($lockFile)?></code></p><?php if ($lockInfo): ?><pre class="check" style="white-space:pre-wrap"><?=h(json_encode($lockInfo, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT))?></pre><?php endif; ?><p class="muted">重新部署/重装时，先删除锁文件：<code>rm -f <?=h($lockFile)?></code>，再访问 <code>/install</code>。</p></div>
+<div class="card"><h2>Nginx / 宝塔 rewrite 配置</h2><p class="muted">项目已生成模板：<code><?=h($nginxRewriteFile)?></code>。把下面内容复制到宝塔站点的“伪静态/重写规则”或 <code>/www/server/panel/vhost/rewrite/&lt;域名&gt;.conf</code>，然后执行 <code>nginx -t &amp;&amp; nginx -s reload</code>。</p><pre class="check snippet"><?=h(is_file($nginxRewriteFile) ? file_get_contents($nginxRewriteFile) : nginx_rewrite_text($defaults))?></pre></div>
 <?php else: ?><form method="post" class="card"><h2>基础配置</h2><div class="grid">
 <label>数据库地址<input name="db_host" value="<?=h($defaults['db_host'])?>" autocomplete="off"></label><label>数据库端口<input name="db_port" value="<?=h($defaults['db_port'])?>" inputmode="numeric"></label>
 <label>数据库名<input name="db_name" value="<?=h($defaults['db_name'])?>" autocomplete="off"></label><label>数据库用户<input name="db_user" value="<?=h($defaults['db_user'])?>" autocomplete="off"></label>
@@ -247,5 +312,5 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <label>Node WS 端口<input name="ws_port" value="<?=h($defaults['ws_port'])?>" inputmode="numeric"></label><label>FRPS 地址<input name="frps_addr" value="<?=h($defaults['frps_addr'])?>"></label>
 <label>FRPS 端口<input name="frps_port" value="<?=h($defaults['frps_port'])?>" inputmode="numeric"></label><label>FRPS 面板端口<input name="frps_dashboard_port" value="<?=h($defaults['frps_dashboard_port'])?>" inputmode="numeric"></label>
 <label>FRPS 面板用户<input name="frps_dashboard_user" value="<?=h($defaults['frps_dashboard_user'])?>"></label><label>FRPS 面板密码<input name="frps_dashboard_pass" type="password" value="<?=h($defaults['frps_dashboard_pass'])?>" placeholder="留空自动生成"></label>
-</div><div class="actions"><button <?=$allOk?'':'disabled'?>>开始安装</button><span class="muted small">会执行/补齐 <code>cs/install/schema.sql</code>，写入 <code>cs/.env</code>、<code>cs/node-ws/.env</code>，最后创建 <code>cs/runtime/install.lock</code>。</span></div></form><?php endif; ?>
+</div><div class="actions"><button <?=$allOk?'':'disabled'?>>开始安装</button><span class="muted small">会执行/补齐 <code>cs/install/schema.sql</code>，写入 <code>cs/.env</code>、<code>cs/node-ws/.env</code>、<code>cs/runtime/nginx-rewrite.conf</code>，最后创建 <code>cs/runtime/install.lock</code>。</span></div></form><div class="card"><h2>Nginx / 宝塔 rewrite 预览</h2><p class="muted">安装后会按当前 WS 端口生成同款模板，部署时复制到宝塔站点“伪静态/重写规则”。</p><pre class="check snippet"><?=h(nginx_rewrite_text($defaults))?></pre></div><?php endif; ?>
 </div></body></html>
