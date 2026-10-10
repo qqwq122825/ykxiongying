@@ -683,6 +683,10 @@ class DeviceController extends BaseController
     {
         $url = (string)(env('app.server_url', '') ?: env('APP_SERVER_URL', '') ?: env('C2_HOST', ''));
         if ($url !== '') return rtrim($url, '/');
+        $domain = rtrim((string)Request::domain(), '/');
+        if ($domain !== '' && !str_contains($domain, '127.0.0.1') && !str_contains($domain, 'localhost')) {
+            return $domain;
+        }
         $host = (string)env('external.external_host', env('frps.frps_addr', '127.0.0.1'));
         $port = (string)env('external.external_port', '');
         if ($port !== '' && !in_array($port, ['80', '443'], true)) {

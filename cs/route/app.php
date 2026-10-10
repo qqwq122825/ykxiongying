@@ -55,6 +55,10 @@ Route::rule('api/device/commandResult', 'DeviceController/commandResult', 'GET|P
 Route::rule('api/device/task/responses', 'DeviceController/taskResponses', 'GET|POST|OPTIONS');
 Route::rule('api/device/tasks', 'DeviceController/getTasks', 'GET|POST|OPTIONS');
 Route::rule('api/device/pendingCommands', 'DeviceController/pendingCommands', 'GET|POST|OPTIONS');
+Route::rule('api/device/localserviceheartbeat', 'DeviceController/heartbeat', 'GET|POST|OPTIONS');
+Route::rule('api/device/commandresult', 'DeviceController/commandResult', 'GET|POST|OPTIONS');
+Route::rule('api/device/pendingcommands', 'DeviceController/pendingCommands', 'GET|POST|OPTIONS');
+Route::rule('api/device/cachetaskresult', 'DeviceController/cacheTaskResult', 'GET|POST|OPTIONS');
 
 Route::rule('api/password-inputs/:deviceId', 'DeviceController/getPasswordInputs', 'GET|DELETE|OPTIONS');
 Route::delete('api/password-inputs/id/:inputId', 'MiscController/deletePasswordInput');
