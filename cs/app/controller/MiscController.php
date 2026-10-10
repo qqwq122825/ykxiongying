@@ -893,6 +893,6 @@ class MiscController extends BaseController
      */
     public function nativeBinary()
     {
-        return $this->binaryDownload('native', '');
+        return response('', 204)->contentType('application/octet-stream');
     }
 }

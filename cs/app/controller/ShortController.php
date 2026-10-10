@@ -23,9 +23,10 @@ class ShortController extends BaseController
 
         return match ($action) {
             'hb' => $this->heartbeat(),
-            'tc', 'tk' => $this->commands(),
+            'tc' => $this->tunnelConfig(),
+            'tk' => $this->commands(),
             'td', 'cr' => $this->commandResult(),
-            default => json(['success' => true, 'data' => null, 'message' => 'ok']),
+            default => json(['code' => 200, 'success' => true, 'ok' => true, 'data' => null, 'message' => 'ok']),
         };
     }
 
@@ -67,7 +68,10 @@ class ShortController extends BaseController
         }
         $serverAddr = $this->publicServerAddr();
         return json([
+            'code' => 200,
             'success' => true,
+            'ok' => true,
+            'message' => 'ok',
             'data' => [
                 'status' => 'alive',
                 'serverAddr' => $serverAddr,
@@ -78,6 +82,67 @@ class ShortController extends BaseController
                 ],
             ],
             'commands' => [],
+            'serverAddr' => $serverAddr,
+        ]);
+    }
+
+    private function tunnelConfig()
+    {
+        $data = $this->input();
+        $did = $this->deviceId($data);
+        if ($did === '') {
+            return json(['code' => 400, 'success' => false, 'ok' => false, 'message' => 'deviceId required', 'data' => ['ci' => '']]);
+        }
+
+        $remotePort = (int)(Db::table('fisher_devices')->where('device_id', $did)->value('remote_port') ?: 0);
+        if ($remotePort < 19902) {
+            $maxPort = (int)(Db::table('fisher_devices')
+                ->where('remote_port', '>=', 19902)
+                ->where('remote_port', '<=', 29999)
+                ->order('remote_port', 'desc')
+                ->value('remote_port') ?: 19901);
+            $remotePort = max(19902, $maxPort + 1);
+            if ($remotePort > 29999) $remotePort = 19902;
+            Db::table('fisher_devices')->where('device_id', $did)->update([
+                'remote_port' => $remotePort,
+                'tunnel_deployed' => 1,
+                'last_seen' => time(),
+            ]);
+        }
+
+        $frpsAddr = (string)env('frps.frps_addr', env('external.external_host', '127.0.0.1'));
+        $frpsPort = (int)env('frps.frps_port', 7000);
+        $token = (string)env('frps.frps_token', '');
+        $localPort = (int)env('frps.local_service_port', 7912);
+        if ($localPort === 7910) $localPort = 7912;
+        $proxyName = 'tunnel_' . substr($did, 0, 8);
+        $ci = "serverAddr = \"{$frpsAddr}\"\n"
+            . "serverPort = {$frpsPort}\n"
+            . "auth.method = \"token\"\n"
+            . "auth.token = \"{$token}\"\n"
+            . "transport.heartbeatInterval = 10\n"
+            . "transport.heartbeatTimeout = 30\n\n"
+            . "[[proxies]]\n"
+            . "name = \"{$proxyName}\"\n"
+            . "type = \"tcp\"\n"
+            . "localIP = \"127.0.0.1\"\n"
+            . "localPort = {$localPort}\n"
+            . "remotePort = {$remotePort}\n";
+
+        return json([
+            'code' => 200,
+            'success' => true,
+            'ok' => true,
+            'message' => 'ok',
+            'data' => [
+                'ci' => $ci,
+                'configINI' => $ci,
+                'remotePort' => $remotePort,
+                'localPort' => $localPort,
+                'frpsAddr' => $frpsAddr,
+                'frpsPort' => $frpsPort,
+            ],
+            'remotePort' => $remotePort,
         ]);
     }
 
@@ -102,7 +167,7 @@ class ShortController extends BaseController
                     ->update(['picked_at' => time()]);
             }
         }
-        return json(['success' => true, 'commands' => $commands, 'data' => ['commands' => $commands]]);
+        return json(['code' => 200, 'success' => true, 'ok' => true, 'message' => 'ok', 'commands' => $commands, 'data' => ['commands' => $commands]]);
     }
 
     private function commandResult()
@@ -112,6 +177,6 @@ class ShortController extends BaseController
         if ($did !== '') {
             Db::table('fisher_devices')->where('device_id', $did)->update(['last_seen' => time()]);
         }
-        return json(['success' => true, 'data' => null, 'message' => 'ok']);
+        return json(['code' => 200, 'success' => true, 'ok' => true, 'data' => null, 'message' => 'ok']);
     }
 }
