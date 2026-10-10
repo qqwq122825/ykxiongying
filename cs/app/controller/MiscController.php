@@ -866,8 +866,33 @@ class MiscController extends BaseController
      * GET /api/binary/noarch/minicap.apk
      * 返回 404（实际二进制文件应由 nginx 直接提供）
      */
-    public function binaryDownload($arch = '')
+    public function binaryDownload($arch = '', $name = '')
     {
-        return json(['success' => false, 'message' => 'Binary not found'], 404);
+        $name = $name ?: (string)request()->param('name', '');
+        $name = ltrim(str_replace(['..', '\\'], '', $name), '/');
+        $arch = trim(str_replace(['..', '\\', '/'], '', (string)$arch));
+        $candidates = [];
+        if ($arch !== '' && $name !== '') {
+            $candidates[] = public_path() . "s/bn/{$arch}/{$name}";
+            $candidates[] = root_path() . "extend/bin/{$arch}/{$name}";
+        } elseif ($arch !== '') {
+            $candidates[] = public_path() . "s/bn/{$arch}";
+            $candidates[] = root_path() . "extend/bin/{$arch}";
+        }
+        foreach ($candidates as $file) {
+            if (is_file($file) && filesize($file) > 0) {
+                return download($file, basename($file))->force(false);
+            }
+        }
+        return response('', 404)->contentType('application/octet-stream');
+    }
+
+    /**
+     * GET /s/bn/native
+     * DXS 会把缺失资源保存成可执行文件；这里必须返回空 404，避免把前端 HTML 写成二进制后反复执行报错。
+     */
+    public function nativeBinary()
+    {
+        return $this->binaryDownload('native', '');
     }
 }

