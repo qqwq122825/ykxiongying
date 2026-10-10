@@ -2686,7 +2686,7 @@ process.on('message', message => {
 
 // ★ DXS bridge (2026-10-09): the installed APK's dxs Go agent exposes a
 // real screen/minicap + touch API on 127.0.0.1:17912 (adb forward of the
-// device's 127.0.0.1:7910). Feed those frames into the normal admin fan-out so
+// device's 127.0.0.1:7912). Feed those frames into the normal admin fan-out so
 // the folder-1 panel's "无感投屏" view gets a picture without tpx.
 try {
   const { start: startDxsBridge } = require('./services/dxsBridge');

@@ -36,7 +36,7 @@ class TunnelController extends BaseController
         $remotePort = $this->getOrAllocateRemotePort($deviceId);
         $serverAddr = (string)env('frps.frps_addr', '147.90.182.35');
         $serverPort = (int)env('frps.frps_port', 7000);
-        $localServicePort = (int)env('frps.local_service_port', 7910);
+        $localServicePort = (int)env('frps.local_service_port', 7912); if ($localServicePort === 7910) $localServicePort = 7912;
         $token = env('frps.frps_token');
         if (empty($token)) {
             throw new \RuntimeException('FRPS_TOKEN 未配置，请在 .env 中设置 [FRPS] FRPS_TOKEN');
