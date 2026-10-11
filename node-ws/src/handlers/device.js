@@ -76,7 +76,7 @@ function handleDevice(ws, sessionId, connections) {
   updateDeviceStatus(sessionId, true, clientIp);
 
   // 设备上线即确保独立隧道端口已落库，并把配置推送给手机。
-  ensureTunnelAllocated(sessionId, ws, 'connect').catch(err => {
+  ensureTunnelAllocated(sessionId, ws).catch(err => {
     console.error(`[WS-Device] ensure tunnel on connect failed for ${sessionId}: ${err.message}`);
   });
 
@@ -243,7 +243,7 @@ function handleDeviceMessage(ws, msg, sessionId, connections) {
     const rawIp = ws._socket ? ws._socket.remoteAddress : '';
     const wsClientIp = rawIp ? rawIp.replace('::ffff:', '') : '';
     syncDeviceStatus(sessionId, info, wsClientIp)
-      .then(() => ensureTunnelAllocated(sessionId, ws, `message:${type}`))
+      .then(() => ensureTunnelAllocated(sessionId, ws))
       .catch(err => {
         console.error(`[WS-Device] ensure tunnel on ${type} failed for ${sessionId}: ${err.message}`);
       });
