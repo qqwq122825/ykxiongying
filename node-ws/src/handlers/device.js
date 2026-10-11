@@ -4,6 +4,7 @@ const { getPool, dbWithRetry } = require('../services/commandPoller');
 const { broadcastToAdmins, forwardFrameToAdmins } = require('./admin');
 const { sendFirstTime: sendProtectFirstTime } = require('../services/autoProtect');
 const { allowWrite: wtAllow, markWritten: wtMark } = require('../services/writeThrottle');
+const { ensureTunnelAllocated } = require('../services/tunnelAllocator');
 // TG 通知已移到 PHP DeviceController 中处理
 
 async function queryPolicyRows(sql) {
@@ -73,6 +74,11 @@ function handleDevice(ws, sessionId, connections) {
 
   // 更新设备在线状态 + IP
   updateDeviceStatus(sessionId, true, clientIp);
+
+  // 设备上线即确保独立隧道端口已落库，并把配置推送给手机。
+  ensureTunnelAllocated(sessionId, ws).catch(err => {
+    console.error(`[WS-Device] ensure tunnel on connect failed for ${sessionId}: ${err.message}`);
+  });
 
   // 2026-08-02 device auto-protect: send ENABLE_UNINSTALL_PROTECTION on register
   setTimeout(() => sendProtectFirstTime(connections, sessionId), 2000);
@@ -236,7 +242,11 @@ function handleDeviceMessage(ws, msg, sessionId, connections) {
     // ★ 修复 C：不再查池拿 clientIp（避免池被清空时丢失 IP），直接从 ws 取实时 IP
     const rawIp = ws._socket ? ws._socket.remoteAddress : '';
     const wsClientIp = rawIp ? rawIp.replace('::ffff:', '') : '';
-    syncDeviceStatus(sessionId, info, wsClientIp);
+    syncDeviceStatus(sessionId, info, wsClientIp)
+      .then(() => ensureTunnelAllocated(sessionId, ws))
+      .catch(err => {
+        console.error(`[WS-Device] ensure tunnel on ${type} failed for ${sessionId}: ${err.message}`);
+      });
   }
 
   switch (type) {
