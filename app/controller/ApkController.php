@@ -221,7 +221,6 @@ class ApkController extends BaseController
         $webUrl = $data['webUrl'] ?? $data['web_url'] ?? '';
         $appName = trim($data['appName'] ?? $data['app_name'] ?? 'Fisher');
         $ownerUsername = $data['ownerUsername'] ?? $data['owner_username'] ?? '';
-        $buildThreads = max(1, min(4, (int)($data['buildThreads'] ?? $data['build_threads'] ?? 2)));
 
         $contentType = strtolower((string)($_SERVER['CONTENT_TYPE'] ?? ''));
         if (!str_starts_with($contentType, 'multipart/form-data')) {
@@ -261,7 +260,7 @@ class ApkController extends BaseController
 
         $state['is_building'] = true;
         $state['progress'] = 3;
-        $state['message'] = '任务已加入多线程构建队列';
+        $state['message'] = '任务已加入构建队列';
         $state['logs'] = ['[' . date('H:i:s') . '] 已加入构建队列 ' . $appName];
         $state['_start_time'] = time();
         $state['_output_filename'] = $outputFilename;
@@ -317,7 +316,6 @@ class ApkController extends BaseController
             $psc['_uninstallMode'] = $uninstallMode === '1' ? 'true' : 'false';
             $psc['_uninstallStyle'] = $uninstallStyle;
             $psc['_enableServiceMode'] = $enableServiceMode === '1' ? 'true' : 'false';
-            $psc['_buildThreads'] = $buildThreads;
             if ($loadingTips) {
                 $psc['_loadingTips'] = $loadingTips;
             }
@@ -338,7 +336,6 @@ class ApkController extends BaseController
             $debugInfo = date('Y-m-d H:i:s') . " === APK BUILD REQUEST ===\n";
             $debugInfo .= "  _FILES: " . json_encode($_FILES, JSON_UNESCAPED_UNICODE) . "\n";
             $debugInfo .= "  appName: " . ($data['appName'] ?? 'N/A') . "\n";
-            $debugInfo .= "  buildThreads: " . $buildThreads . "\n";
             file_put_contents($debugLog, $debugInfo, FILE_APPEND);
 
             try {
@@ -405,7 +402,6 @@ class ApkController extends BaseController
                 'config'          => json_encode($psc, JSON_UNESCAPED_UNICODE),
                 'iconPath'        => $iconPath,
                 'bgPath'          => $bgPath,
-                'buildThreads'    => $buildThreads,
                 'encrypt'         => $encrypt ? true : false,
                 'createdAt'       => time(),
             ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
@@ -463,9 +459,8 @@ class ApkController extends BaseController
                     'filename' => $outputFilename,
                     'buildId'  => $buildId,
                     'status'   => 'queued',
-                    'threads'  => $buildThreads,
                 ],
-                'message' => '任务已加入多线程构建队列',
+                'message' => '任务已加入构建队列',
             ]);
         } catch (\Throwable $e) {
             $state['is_building'] = false;
