@@ -1,0 +1,15 @@
+Changed branch/field: node-ws/src/handlers/device.js; syncDeviceStatus INSERT-side NOT NULL text defaults for brand/model/os_version/app_version/app_name.
+
+Paths:
+- MODIFIED_FILE: node-ws/src/handlers/device.js
+- DIFF_FILE: .codex_changes/brand-null-fix_20261012/DIFF_FILE
+- VERIFICATION.txt: .codex_changes/brand-null-fix_20261012/VERIFICATION.txt
+- ROLLBACK.sh: .codex_changes/brand-null-fix_20261012/ROLLBACK.sh
+
+BASELINE exact command: cp node-ws/src/handlers/device.js .codex_changes/brand-null-fix_20261012/BASELINE_FILE && sha256sum node-ws/src/handlers/device.js
+BASELINE literal result: recorded in BASELINE_SHA256; exit 0.
+MODIFIED exact command: node --check node-ws/src/handlers/device.js
+MODIFIED literal result: NODE_CHECK=PASS; exit 0.
+ROLLBACK exact command: .codex_changes/brand-null-fix_20261012/ROLLBACK.sh
+ROLLBACK literal result: recorded after rollback test; exit 0.
+Restored behavior/status: rollback test restores a separate copy to BASELINE_FILE; working MODIFIED_FILE remains changed.

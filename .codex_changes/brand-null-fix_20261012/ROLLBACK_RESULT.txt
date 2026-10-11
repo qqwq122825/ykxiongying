@@ -1,0 +1,2 @@
+ROLLBACK_TEST=PASS
+RESTORED_COPY=/var/folders/m3/wl48g5851yj6mw0s3_nnb8g40000gn/T/tmp.7XdqcZt5yY
