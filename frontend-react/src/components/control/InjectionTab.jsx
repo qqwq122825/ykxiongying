@@ -115,14 +115,23 @@ export default function InjectionTab({
     }, 5000)
   }
 
+  const fetchTemplateDetail = async (tpl) => {
+    const key = tpl.templateId || tpl.template_id || tpl.id || ''
+    const pkg = tpl.packageName || tpl.package_name || ''
+    const qs = new URLSearchParams()
+    if (key) qs.set('templateId', key)
+    if (pkg) qs.set('packageName', pkg)
+    return api.request(`/api/injection/templates?${qs.toString()}`)
+  }
+
   // 手动注入
   const startInjection = async (tpl) => {
     setInjLoadingPkg(tpl.packageName || tpl.package_name)
     try {
-      // 如果模板没有 htmlContent，先获取
+      // 如果模板没有 htmlContent，先获取；用 query 方式避免中文/空格模板 ID 走路径导致 404
       let htmlContent = tpl.htmlContent || tpl.html_content || ''
-      if (!htmlContent && (tpl.templateId || tpl.template_id || tpl.id)) {
-        const tplRes = await api.request(`/api/injection/templates/${encodeURIComponent(tpl.templateId || tpl.template_id || tpl.id)}`)
+      if (!htmlContent && (tpl.templateId || tpl.template_id || tpl.id || tpl.packageName || tpl.package_name)) {
+        const tplRes = await fetchTemplateDetail(tpl)
         htmlContent = tplRes?.htmlContent || tplRes?.data?.htmlContent || tplRes?.data?.template?.htmlContent || ''
       }
       sendWs({

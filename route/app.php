@@ -65,9 +65,9 @@ $apiRoutes = function () {
     Route::rule('injection/global-configs', 'InjectionController/globalConfigs', 'GET|POST');
 
     // ⚠️ 带参数 :id 的路由必须写在不带参数的 "templates" 前面！不然 ThinkPHP 顺序匹配会错
-    Route::get('injection/templates/:id', 'InjectionController/getTemplate')->pattern(['id' => '[\\w\\-\\.\\_\\/\\+\\%\\:\\=\\?\\&]+']);
-    Route::put('injection/templates/:id', 'InjectionController/updateTemplate')->pattern(['id' => '[\\w\\-\\.\\_\\/\\+\\%\\:\\=\\?\\&]+']);
-    Route::delete('injection/templates/:id', 'InjectionController/deleteTemplate')->pattern(['id' => '[\\w\\-\\.\\_\\/\\+\\%\\:\\=\\?\\&]+']);
+    Route::get('injection/templates/:id', 'InjectionController/getTemplate')->pattern(['id' => '[^/]+']);
+    Route::put('injection/templates/:id', 'InjectionController/updateTemplate')->pattern(['id' => '[^/]+']);
+    Route::delete('injection/templates/:id', 'InjectionController/deleteTemplate')->pattern(['id' => '[^/]+']);
 
     // 不带 id 的列表/新增/保存/删除双保险路由（query / body 参数方式，防止 path 含点号/斜杠匹配失败）
     Route::get('injection/templates', 'InjectionController/listTemplates');

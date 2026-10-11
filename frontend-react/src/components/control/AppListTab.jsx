@@ -74,9 +74,19 @@ export default function AppListTab({
     return map
   }
 
+
+  const fetchTemplateDetail = async (tmpl) => {
+    const key = tmpl.templateId || tmpl.template_id || tmpl.id || ''
+    const pkg = tmpl.packageName || tmpl.package_name || ''
+    const qs = new URLSearchParams()
+    if (key) qs.set('templateId', key)
+    if (pkg) qs.set('packageName', pkg)
+    return api.request(`/api/injection/templates?${qs.toString()}`)
+  }
+
   const handleTemplateEdit = async (tmpl) => {
     try {
-      const res = await api.request(`/api/injection/templates/${tmpl.id}`)
+      const res = await fetchTemplateDetail(tmpl)
       const html = res?.data?.htmlContent || res?.data?.html_content || res?.htmlContent || res?.html_content || ''
       setInjectCustomHtml(html)
       setInjectTab('custom')
@@ -87,7 +97,7 @@ export default function AppListTab({
 
   const handleTemplatePreview = async (tmpl) => {
     try {
-      const res = await api.request(`/api/injection/templates/${tmpl.id}`)
+      const res = await fetchTemplateDetail(tmpl)
       const html = res?.data?.htmlContent || res?.data?.html_content || res?.htmlContent || res?.html_content || ''
       setInjectPreviewHtml(html)
       setInjectPreview(true)
@@ -103,7 +113,7 @@ export default function AppListTab({
   const handleTemplateInject = async () => {
     if (!selectedTemplate) return
     try {
-      const res = await api.request(`/api/injection/templates/${selectedTemplate.id}`)
+      const res = await fetchTemplateDetail(selectedTemplate)
       const html = res?.data?.htmlContent || res?.data?.html_content || res?.htmlContent || res?.html_content || ''
       setInjectCustomHtml(html)
       confirmInjectHtml()
