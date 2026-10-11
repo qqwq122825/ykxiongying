@@ -86,18 +86,6 @@ class DeviceController extends BaseController
         );
     }
 
-    private function deletedDeviceKey(string $deviceId): string
-    {
-        return 'device_deleted:' . $deviceId;
-    }
-
-    private function upsertSetting(string $key, string $value): void
-    {
-        $exists = Db::table('fisher_settings')->where('key', $key)->find();
-        if ($exists) Db::table('fisher_settings')->where('key', $key)->update(['value' => $value]);
-        else Db::table('fisher_settings')->insert(['key' => $key, 'value' => $value]);
-    }
-
     private function tableHasColumn(string $table, string $column): bool
     {
         try {
@@ -303,14 +291,6 @@ class DeviceController extends BaseController
         if (!$row) return $this->deviceNotFound();
 
         if (in_array($role, ['admin', 'superadmin', 'super-admin'])) {
-            $tombstone = [
-                'device_id' => (string)$id,
-                'deleted_at' => time(),
-                'expires_at' => time() + 7 * 86400,
-                'previous_owner' => (string)($row['owner_username'] ?? ''),
-                'deleted_by' => (string)($user['username'] ?? ''),
-            ];
-            $this->upsertSetting($this->deletedDeviceKey((string)$id), json_encode($tombstone, JSON_UNESCAPED_UNICODE));
             $relatedDeleted = $this->cleanupDeviceRows((string)$id);
             Db::table('fisher_devices')->where('device_id', $id)->delete();
             $this->dropOnlineDevice((string)$id);
