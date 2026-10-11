@@ -18,8 +18,10 @@ export default function AssignModal({ device, onClose, onSuccess }) {
       .then((res) => {
         if (cancelled) return
         const list = res.data || res.result || res || []
-        setUsers(list)
-        setUsername(currentOwner || list[0]?.username || '')
+        const userList = Array.isArray(list) ? list : []
+        setUsers(userList)
+        const currentOwnerExists = userList.some((u) => u.username === currentOwner)
+        setUsername(currentOwnerExists ? currentOwner : (userList[0]?.username || ''))
       })
       .catch((err) => {
         if (!cancelled) setError(err.message || '加载失败')
@@ -61,6 +63,7 @@ export default function AssignModal({ device, onClose, onSuccess }) {
                 <span className="modal-label">当前归属</span>
                 <span className={currentOwner ? 'modal-owner' : 'modal-muted'}>
                   {currentOwner || '无'}
+                  {currentOwner && users.length > 0 && !users.some((u) => u.username === currentOwner) ? '（账号不存在）' : ''}
                 </span>
               </div>
               <label className="modal-field">
