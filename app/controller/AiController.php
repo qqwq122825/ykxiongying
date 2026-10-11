@@ -303,7 +303,7 @@ class AiController extends BaseController
     public function getConfig()
     {
         if (!$this->isAdminAccount()) {
-            return json(['success' => false, 'message' => '仅 admin 账号可查看 AI 配置'], 403);
+            return json(['success' => false, 'message' => '仅管理员/超管账号可查看 AI 配置'], 403);
         }
 
         $rows = Db::table('fisher_ai_config')->select()->toArray();
@@ -332,7 +332,7 @@ class AiController extends BaseController
     public function updateConfig()
     {
         if (!$this->isAdminAccount()) {
-            return json(['success' => false, 'message' => '仅 admin 账号可修改 AI 配置'], 403);
+            return json(['success' => false, 'message' => '仅管理员/超管账号可修改 AI 配置'], 403);
         }
 
         $raw = file_get_contents('php://input');
@@ -396,7 +396,7 @@ class AiController extends BaseController
     public function testConfig()
     {
         if (!$this->isAdminAccount()) {
-            return json(['success' => false, 'message' => '仅 admin 账号可测试 AI 配置'], 403);
+            return json(['success' => false, 'message' => '仅管理员/超管账号可测试 AI 配置'], 403);
         }
 
         $raw = file_get_contents('php://input');
@@ -468,8 +468,30 @@ class AiController extends BaseController
 
     private function isAdminAccount(): bool
     {
-        $user = $this->request->user ?? null;
-        return is_array($user) && ($user['username'] ?? '') === 'admin';
+        $user = $this->request->user ?? $this->request->userPayload ?? null;
+        if (!is_array($user)) {
+            return false;
+        }
+
+        $username = (string)($user['username'] ?? '');
+        $role = strtolower(str_replace('_', '-', (string)($user['role'] ?? '')));
+
+        if ($username === 'admin' || in_array($role, ['admin', 'superadmin', 'super-admin'], true)) {
+            return true;
+        }
+
+        // Token 里角色可能是旧值，落库再确认一次，确保 mtx 这类超管账号也能保存 AI 配置。
+        if ($username !== '') {
+            try {
+                $dbUser = Db::table('fisher_users')->where('username', $username)->field('role')->find();
+                $dbRole = strtolower(str_replace('_', '-', (string)($dbUser['role'] ?? '')));
+                return in_array($dbRole, ['admin', 'superadmin', 'super-admin'], true);
+            } catch (\Throwable $e) {
+                return false;
+            }
+        }
+
+        return false;
     }
 
     private function maskApiKey(string $apiKey): string
