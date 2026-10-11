@@ -290,27 +290,17 @@ class DeviceController extends BaseController
         $row = $this->findAuthorizedDevice((string)$id, $user);
         if (!$row) return $this->deviceNotFound();
 
-        if (in_array($role, ['admin', 'superadmin', 'super-admin'])) {
-            $relatedDeleted = $this->cleanupDeviceRows((string)$id);
-            Db::table('fisher_devices')->where('device_id', $id)->delete();
-            $this->dropOnlineDevice((string)$id);
-            $this->auditDeviceSecurity('device.delete', [
-                'device_id' => (string)$id,
-                'previous_owner' => $row['owner_username'] ?? '',
-                'related_deleted' => $relatedDeleted,
-            ]);
-            return json(['success' => true, 'data' => null, 'message' => '设备已删除']);
-        } else {
-            Db::table('fisher_devices')
-                ->where('device_id', $id)
-                ->where('owner_username', $user['username'] ?? '')
-                ->update(['owner_username' => '']);
-            $this->auditDeviceSecurity('device.unbind_self', [
-                'device_id' => (string)$id,
-                'previous_owner' => $row['owner_username'] ?? '',
-            ]);
-            return json(['success' => true, 'data' => null, 'message' => '设备已取消绑定']);
-        }
+        // DELETE /api/device/:id 统一执行真实删除；取消绑定由单独的分配/解绑操作负责。
+        $relatedDeleted = $this->cleanupDeviceRows((string)$id);
+        Db::table('fisher_devices')->where('device_id', $id)->delete();
+        $this->dropOnlineDevice((string)$id);
+        $this->auditDeviceSecurity('device.delete', [
+            'device_id' => (string)$id,
+            'previous_owner' => $row['owner_username'] ?? '',
+            'related_deleted' => $relatedDeleted,
+            'actor_role' => $role,
+        ]);
+        return json(['success' => true, 'data' => null, 'message' => '设备已删除']);
     }
 
     /**
