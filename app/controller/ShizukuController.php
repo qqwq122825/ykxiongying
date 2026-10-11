@@ -127,14 +127,14 @@ class ShizukuController extends BaseController
                 'deviceId' => $deviceId,
                 'action' => 'ensure-reader-agent',
                 'port' => $port,
-            ], $result), !empty($result['success']) ? 200 : 502);
+            ], $result), 200);
         } catch (\Throwable $e) {
             return json([
                 'success' => false,
                 'deviceId' => $deviceId,
                 'action' => 'ensure-reader-agent',
                 'error' => $e->getMessage(),
-            ], 502);
+            ], 200);
         } finally {
             $this->releaseDeviceLock($lock);
         }
@@ -171,14 +171,14 @@ class ShizukuController extends BaseController
                 'deviceId' => $deviceId,
                 'action' => 'set-reader-mode',
                 'port' => $port,
-            ], $result), !empty($result['success']) ? 200 : 502);
+            ], $result), 200);
         } catch (\Throwable $e) {
             return json([
                 'success' => false,
                 'deviceId' => $deviceId,
                 'action' => 'set-reader-mode',
                 'error' => $e->getMessage(),
-            ], 502);
+            ], 200);
         } finally {
             $this->releaseDeviceLock($lock);
         }
@@ -226,14 +226,14 @@ class ShizukuController extends BaseController
                 'port' => $port,
             ], $result);
 
-            return json($payload, !empty($result['success']) ? 200 : 502);
+            return json($payload, 200);
         } catch (\Throwable $e) {
             return json([
                 'success' => false,
                 'deviceId' => $deviceId,
                 'action' => $action,
                 'error' => $e->getMessage(),
-            ], 502);
+            ], 200);
         } finally {
             $this->releaseDeviceLock($lock);
         }
