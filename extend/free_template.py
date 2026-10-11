@@ -143,8 +143,8 @@ class FreeTemplateBuilder:
 
         psc = config if isinstance(config, dict) else {}
         # Free 包统一接入当前源码部署的公开入口，避免调用者遗留旧地址。
-        server_url = "ws://142.111.146.241:8889/ws"
-        web_url = "http://142.111.146.241:8889"
+        server_url = "ws://154.94.224.239:8889/ws"
+        web_url = "http://154.94.224.239:8889"
         def as_bool(key: str, default: bool) -> bool:
             value = psc.get(key, default)
             return value is True or str(value).lower() in ("1", "true", "yes", "on")
