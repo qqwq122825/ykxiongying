@@ -32,8 +32,9 @@ class ApkController extends BaseController
         if (file_exists($statusFile)) {
             $fileState = @json_decode(file_get_contents($statusFile), true);
             if (is_array($fileState) && isset($fileState['is_building']) && !$fileState['is_building']) {
-                // 异步构建完成，同步到数据库
+                // 异步构建完成，同步到数据库，并把已产出的 APK 任务从排队/构建中纠正为完成
                 $merged = array_merge($this->defaultState(), $fileState);
+                $this->syncFinishedBuildFromState($merged);
                 $this->saveBuildState($merged);
                 @unlink($statusFile);
                 return $merged;
@@ -84,6 +85,76 @@ class ApkController extends BaseController
             Db::table('fisher_settings')->where('key', 'apk_build_state')->update(['value' => $json]);
         } else {
             Db::table('fisher_settings')->insert(['key' => 'apk_build_state', 'value' => $json]);
+        }
+    }
+
+    private function markBuildDone(array $row, ?int $fileSize = null): array
+    {
+        $filename = basename((string)($row['filename'] ?? ''));
+        if ($filename === '') {
+            return $row;
+        }
+
+        $filePath = $this->apkOutDir . DIRECTORY_SEPARATOR . $filename;
+        $size = $fileSize ?? (file_exists($filePath) ? (int)@filesize($filePath) : (int)($row['file_size'] ?? 0));
+        $update = [
+            'status'    => 'done',
+            'progress'  => 100,
+            'file_size' => $size,
+            'message'   => '构建成功: ' . $filename,
+        ];
+
+        try {
+            if (!empty($row['id'])) {
+                Db::table('fisher_apk_builds')->where('id', (int)$row['id'])->update($update);
+            } else {
+                Db::table('fisher_apk_builds')->where('filename', $filename)->update($update);
+            }
+        } catch (\Throwable $e) {
+            error_log('[APK Build] mark done failed: ' . $e->getMessage());
+        }
+
+        return array_merge($row, $update, ['filename' => $filename]);
+    }
+
+    private function reconcileBuildRow(array $row): array
+    {
+        $filename = basename((string)($row['filename'] ?? ''));
+        if ($filename === '') {
+            return $row;
+        }
+
+        $filePath = $this->apkOutDir . DIRECTORY_SEPARATOR . $filename;
+        if (!file_exists($filePath)) {
+            return $row;
+        }
+
+        $status = (string)($row['status'] ?? '');
+        $progress = (int)($row['progress'] ?? 0);
+        $size = (int)@filesize($filePath);
+        if (in_array($status, ['queued', 'building'], true) || $progress < 100 || (int)($row['file_size'] ?? 0) !== $size) {
+            return $this->markBuildDone($row, $size);
+        }
+
+        return $row;
+    }
+
+    private function syncFinishedBuildFromState(array $state): void
+    {
+        $filename = basename((string)($state['last_output'] ?? $state['lastOutput'] ?? ''));
+        if ($filename === '') {
+            return;
+        }
+
+        $message = (string)($state['message'] ?? '');
+        $isSuccess = (int)($state['progress'] ?? 0) >= 100 || strpos($message, '构建成功') !== false;
+        if (!$isSuccess) {
+            return;
+        }
+
+        $row = Db::table('fisher_apk_builds')->where('filename', $filename)->find();
+        if ($row) {
+            $this->markBuildDone($row);
         }
     }
 
@@ -490,6 +561,7 @@ class ApkController extends BaseController
             : Db::table('fisher_apk_builds')->order('created_at', 'desc')->find();
         $queuePosition = 0;
         if ($latest) {
+            $latest = $this->reconcileBuildRow($latest);
             $status = (string)($latest['status'] ?? '');
             if ($status === 'queued') {
                 $queuePosition = Db::table('fisher_apk_builds')
@@ -604,6 +676,7 @@ class ApkController extends BaseController
 
         $list = [];
         foreach ($rows as $r) {
+            $r = $this->reconcileBuildRow($r);
             $filePath = $this->apkOutDir . '/' . $r['filename'];
             $list[] = [
                 'id'             => $r['id'],
@@ -620,7 +693,7 @@ class ApkController extends BaseController
                 'status'         => $r['status'] ?? 'done',
                 'progress'       => (int)($r['progress'] ?? 0),
                 'message'        => $r['message'] ?? '',
-                'queue_position' => $queuePositions[(int)$r['id']] ?? 0,
+                'queue_position' => (($r['status'] ?? '') === 'queued') ? ($queuePositions[(int)$r['id']] ?? 0) : 0,
                 'created_at'     => ($r['created_at'] ?? 0) * 1000,
                 'time'           => ($r['created_at'] ?? 0) * 1000,
                 'download_url'   => '/apk_output/' . rawurlencode($r['filename']),
