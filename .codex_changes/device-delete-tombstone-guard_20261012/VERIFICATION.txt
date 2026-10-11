@@ -1,0 +1,25 @@
+Changed branch/field: node-ws device deletion guard. WS connections with an active device_deleted tombstone are rejected; status sync checks the tombstone before INSERT ... ON DUPLICATE KEY UPDATE, sends device_deleted status, and closes with code 4003. Expired tombstones are removed.
+Artifacts:
+- .codex_changes/device-delete-tombstone-guard_20261012/MODIFIED_FILE
+- .codex_changes/device-delete-tombstone-guard_20261012/DIFF_FILE
+- .codex_changes/device-delete-tombstone-guard_20261012/VERIFICATION.txt
+- .codex_changes/device-delete-tombstone-guard_20261012/ROLLBACK.sh
+
+BASELINE exact command: git show HEAD:node-ws/src/handlers/device.js > .codex_changes/device-delete-tombstone-guard_20261012/BASELINE_FILE
+BASELINE literal output/result: baseline handler captured before deletion guard
+BASELINE exit status: 0
+
+MODIFIED exact command: node --check node-ws/src/handlers/device.js && php -l app/controller/DeviceController.php && php -l app/controller/AuthController.php && php -l app/controller/SyncController.php
+MODIFIED literal output/result: Node check passed; all three PHP files reported No syntax errors detected
+MODIFIED exit status: 0
+
+ROLLBACK exact command: .codex_changes/device-delete-tombstone-guard_20261012/ROLLBACK.sh
+ROLLBACK literal output/result: ROLLBACK_OK
+ROLLBACK exit status: 0
+
+Restored behavior/status: rollback copy restores the pre-change handler; live MODIFIED_FILE retains the deletion guard.
+
+FOLLOW-UP PATCH
+- Changed branch/field: WS device_deleted.data.reRegister=true; POST /internal/drop-device notifies connected device and closes with 4003; /api/client/register accepts reRegister/forceReRegister to clear the deletion tombstone and register again.
+- Validation commands: node --check node-ws/src/index.js; node --check node-ws/src/handlers/device.js; php -l app/controller/AuthController.php
+- Result: all syntax checks passed.

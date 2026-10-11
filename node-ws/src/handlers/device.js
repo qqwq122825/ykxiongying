@@ -87,7 +87,7 @@ async function handleDevice(ws, sessionId, connections) {
         type: 'device_deleted',
         sessionId,
         deviceId: sessionId,
-        data: { status: 'deleted', registered: false, reRegister: false },
+        data: { status: 'deleted', registered: false, reRegister: true },
       }));
     } catch {}
     try { ws.close(4003, 'device deleted'); } catch {}
