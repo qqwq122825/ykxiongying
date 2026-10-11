@@ -63,13 +63,10 @@ class AuthController extends BaseController
         }
 
         $telegram = $this->getTelegramLoginConfig($user);
-        // 默认安装/未配置机器人时不启用 Telegram 二次验证，账号密码正确即可登录。
-        // 只有配置了 Bot Token 后，才强制当前账号绑定 Chat ID 并发送验证码。
-        if (empty($telegram['bot_token'])) {
-            return $this->issueLoginTokenResponse($user, '未配置 Telegram 机器人，已使用密码登录');
-        }
-        if (empty($telegram['chat_id'])) {
-            return json(['success' => false, 'message' => '该账号未绑定 Telegram Chat ID，请联系管理员'], 403);
+        // 默认安装/未完成机器人测试时不启用 Telegram 二次验证，账号密码正确即可登录。
+        // 只有 Bot Token + Chat ID 已通过“发送测试”验证后，才启动登录验证码。
+        if (empty($telegram['bot_token']) || empty($telegram['chat_id']) || empty($telegram['verified'])) {
+            return $this->issueLoginTokenResponse($user, 'Telegram 机器人未完成测试，已使用密码登录');
         }
 
         $this->cleanupExpiredLoginChallenges();
@@ -794,17 +791,19 @@ class AuthController extends BaseController
 
         $botToken = '';
         $apiProxy = '';
+        $verified = false;
         $current = $user;
         $visited = [];
         while (!empty($current['id']) && !isset($visited[$current['id']])) {
             $visited[$current['id']] = true;
             $prefix = 'tg_' . (int)$current['id'] . '_';
             $rows = Db::table('fisher_settings')
-                ->whereIn('key', [$prefix . 'bot_token', $prefix . 'api_proxy'])
+                ->whereIn('key', [$prefix . 'bot_token', $prefix . 'api_proxy', $prefix . 'verified'])
                 ->select()->toArray();
             foreach ($rows as $row) {
                 if ($row['key'] === $prefix . 'bot_token' && !$botToken) $botToken = trim((string)$row['value']);
                 if ($row['key'] === $prefix . 'api_proxy' && !$apiProxy) $apiProxy = trim((string)$row['value']);
+                if ($row['key'] === $prefix . 'verified') $verified = in_array((string)$row['value'], ['1', 'true', 'yes'], true);
             }
             if ($botToken) break;
 
@@ -817,9 +816,10 @@ class AuthController extends BaseController
         if ($botToken === '' && in_array(($user['role'] ?? ''), ['admin', 'superadmin', 'super-admin'], true)) {
             $botToken = trim((string)Db::table('fisher_settings')->where('key', 'bot_token')->value('value'));
             $apiProxy = $apiProxy ?: trim((string)Db::table('fisher_settings')->where('key', 'api_proxy')->value('value'));
+            $verified = in_array((string)Db::table('fisher_settings')->where('key', 'telegram_verified')->value('value'), ['1', 'true', 'yes'], true);
         }
 
-        return ['chat_id' => trim((string)$chatId), 'bot_token' => $botToken, 'api_proxy' => $apiProxy];
+        return ['chat_id' => trim((string)$chatId), 'bot_token' => $botToken, 'api_proxy' => $apiProxy, 'verified' => $verified];
     }
 
     /** Delete expired one-time login challenges from the settings store. */

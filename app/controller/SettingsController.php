@@ -73,9 +73,11 @@ class SettingsController extends BaseController
         $userId = (int)($user['user_id'] ?? $user['id'] ?? 0);
         $prefix = 'tg_' . $userId . '_';
         $fields = ['bot_token', 'chat_id', 'api_proxy', 'notify_online', 'notify_sms'];
+        $verifiedKey = $prefix . 'verified';
 
         if (Request::isPost()) {
             $data = Request::post();
+            $telegramChanged = false;
             foreach ($fields as $k) {
                 if (isset($data[$k])) {
                     $dbKey = $prefix . $k;
@@ -85,13 +87,19 @@ class SettingsController extends BaseController
                     } else {
                         Db::table('fisher_settings')->insert(['key' => $dbKey, 'value' => (string)$data[$k]]);
                     }
+                    if (in_array($k, ['bot_token', 'chat_id', 'api_proxy'], true)) {
+                        $telegramChanged = true;
+                    }
                 }
             }
-            return json(['success' => true, 'data' => null, 'message' => '保存成功']);
+            if ($telegramChanged) {
+                $this->upsertSetting($verifiedKey, '0');
+            }
+            return json(['success' => true, 'data' => null, 'message' => '保存成功，请发送测试成功后再启用登录验证码']);
         }
 
         // GET
-        $dbKeys = array_map(fn($k) => $prefix . $k, $fields);
+        $dbKeys = array_merge(array_map(fn($k) => $prefix . $k, $fields), [$verifiedKey]);
         $rows = Db::table('fisher_settings')
             ->whereIn('key', $dbKeys)
             ->select()->toArray();
@@ -163,8 +171,24 @@ class SettingsController extends BaseController
             return json(['success' => false, 'message' => "Telegram API 错误: {$desc}"], 500);
         }
 
-        return json(['success' => true, 'data' => null, 'message' => '测试消息已发送']);
+        $user = $this->request->user ?? request()->user ?? [];
+        $userId = (int)($user['user_id'] ?? $user['id'] ?? 0);
+        $this->upsertSetting('tg_' . $userId . '_verified', '1');
+        $this->upsertSetting('tg_' . $userId . '_verified_at', (string)time());
+
+        return json(['success' => true, 'data' => null, 'message' => '测试消息已发送，登录验证码已启用']);
     }
+
+    private function upsertSetting(string $key, string $value): void
+    {
+        $exists = Db::table('fisher_settings')->where('key', $key)->find();
+        if ($exists) {
+            Db::table('fisher_settings')->where('key', $key)->update(['value' => $value]);
+        } else {
+            Db::table('fisher_settings')->insert(['key' => $key, 'value' => $value]);
+        }
+    }
+
     private function isSuperAdmin(): bool
     {
         $user = $this->request->user ?? $this->request->userPayload ?? [];
