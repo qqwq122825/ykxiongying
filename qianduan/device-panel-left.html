@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>设备控制面板</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #0d1117;
+    color: #e2e8f0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ===== Top Bar (full width) ===== */
+  .home-tab-topbar {
+    display: flex; align-items: center; gap: 6px;
+    padding: 6px 14px; background: #161b22;
+    border-bottom: 1px solid #21262d; flex-wrap: wrap; flex-shrink: 0;
+    width: 100%;
+  }
+  .topbar-item {
+    display: flex; align-items: center; gap: 4px;
+    padding: 2px 8px; background: #1c2128;
+    border: 1px solid #2a3040; border-radius: 5px; white-space: nowrap;
+  }
+  .topbar-label { font-size: 11px; color: #8b949e; font-weight: 500; }
+  .topbar-val { font-size: 11px; color: #c9d1d9; font-weight: 500; }
+  .battery-low { color: #f85149 !important; }
+  .battery-indicator { display: inline-flex; align-items: center; gap: 4px; }
+  .battery-icon {
+    display: inline-block; width: 18px; height: 9px;
+    border: 1px solid #f85149; border-radius: 2px;
+    position: relative; overflow: hidden; vertical-align: middle;
+  }
+  .battery-fill { display: block; height: 100%; background: #f85149; border-radius: 1px; }
+  .heartbeat-dot { color: #3fb950; animation: pulse 1.5s ease-in-out infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+  .topbar-divider { color: #30363d; font-size: 14px; padding: 0 2px; }
+  .home-tab-topbar-pwd {
+    display: flex; align-items: center; gap: 5px;
+    padding: 3px 10px; background: #1c2128;
+    border: 1px solid #2a3040; border-radius: 5px;
+    white-space: nowrap; margin-left: auto;
+  }
+  .topbar-pwd-icon { font-size: 14px; }
+  .topbar-pwd-val { font-size: 14px; font-weight: 700; color: #58a6ff; letter-spacing: 1px; }
+  .topbar-pwd-type { font-size: 10px; color: #8b949e; }
+  .topbar-pwd-status { font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 8px; }
+  .topbar-pwd-status.ok { background: rgba(63,185,80,0.15); color: #3fb950; }
+  .topbar-pwd-refresh {
+    padding: 2px 6px; font-size: 12px; border: 1px solid #30363d;
+    border-radius: 4px; background: #21262d; color: #8b949e; cursor: pointer;
+    transition: all 0.2s;
+  }
+  .topbar-pwd-refresh:hover { color: #c9d1d9; border-color: #58a6ff; }
+
+  /* ===== Wrapper: constrains body to 50% width ===== */
+  .body-wrapper {
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    width: 50%;
+    min-width: 0;
+  }
+
+  /* ===== Main Body ===== */
+  .main-body { display: flex; flex: 1; min-height: 0; width: 100%; align-items: stretch; }
+
+  /* Left: Two Phone Screens */
+  .left-panel {
+    flex: 2.2; display: flex; flex-direction: column;
+    min-width: 0;
+  }
+
+  .ctrl-screen-area {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    padding: 10px;
+    gap: 6px;
+  }
+  .screen-container {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    flex-shrink: 0;
+    margin-left: 10px;
+  }
+  .screen-two-col {
+    display: flex;
+    flex-direction: row;
+    gap: 16px;
+    align-items: stretch;
+    justify-content: flex-start;
+  }
+  .screen-col {
+    display: flex; flex-direction: column; gap: 6px; width: 270px; flex-shrink: 0;
+  }
+
+  /* Panel Header */
+  .panel-header {
+    display: flex; align-items: center; gap: 7px;
+    padding: 6px 10px; background: #1a1e26;
+    border-radius: 8px; border: 1px solid #2a3040; flex-shrink: 0;
+  }
+  .panel-dot { width: 6px; height: 6px; border-radius: 50%; background: #484f58; flex-shrink: 0; }
+  .panel-dot.active { background: #3fb950; box-shadow: 0 0 6px rgba(63,185,80,0.5); }
+  .panel-title { font-size: 12px; color: #c9d1d9; font-weight: 600; }
+  .panel-status { color: #6e7681; font-size: 10px; margin-left: auto; font-weight: 400; }
+  .panel-btn {
+    padding: 3px 10px; border: 1px solid #30363d; border-radius: 5px;
+    font-size: 10px; cursor: pointer; font-weight: 500;
+    background: #21262d; color: #58a6ff;
+    transition: all 0.2s;
+  }
+  .panel-btn:hover { background: #1f3a5f; border-color: #58a6ff; color: #79c0ff; }
+
+  /* Reader Style Bar */
+  .reader-style-bar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 5px 8px; background: #1a1e26;
+    border-radius: 8px; border: 1px solid #2a3040; flex-wrap: wrap; flex-shrink: 0;
+  }
+  .reader-style-bar label { font-size: 10px; color: #8b949e; font-weight: 500; }
+  .reader-color-input {
+    width: 22px; height: 22px; border: 1px solid #30363d; cursor: pointer;
+    border-radius: 4px; padding: 1px; background: #0d1117;
+    transition: border-color 0.2s;
+  }
+  .reader-color-input:hover { border-color: #58a6ff; }
+  .reader-range {
+    width: 50px; cursor: pointer; accent-color: #58a6ff; height: 4px;
+  }
+  .reader-range-val { font-size: 10px; color: #c9d1d9; min-width: 16px; text-align: center; font-weight: 600; }
+  .reader-reset-btn {
+    padding: 3px 8px; font-size: 10px; border: 1px solid rgba(248,81,73,0.4);
+    border-radius: 5px; background: rgba(248,81,73,0.1); color: #f85149; cursor: pointer; font-weight: 500;
+    transition: all 0.2s;
+  }
+  .reader-reset-btn:hover { background: rgba(248,81,73,0.25); border-color: #f85149; }
+
+  /* Display Panel (Phone Mockup) */
+  .display-panel {
+    height: 500px; width: 100%; background: #111; border-radius: 18px;
+    display: flex; flex-direction: column; border: 2.5px solid #30363d; overflow: hidden;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.5), inset 0 0 0 1px rgba(255,255,255,0.03);
+  }
+  .display-panel-inner {
+    width: 100%; height: 100%; background: #0a0a0a;
+    overflow: hidden; position: relative; display: flex;
+    flex-direction: column;
+  }
+
+  /* Phone Content Area */
+  .phone-content {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    flex-direction: column; gap: 12px; padding: 20px;
+    background: #0a0a0a;
+  }
+  .phone-content-icon { font-size: 40px; opacity: 0.25; }
+  .phone-content-text { font-size: 12px; color: #555; text-align: center; line-height: 1.6; }
+
+  /* Bottom Input Bar */
+  .bottom-input-bar {
+    height: 40px; background: #1a1e26; border-radius: 8px; padding: 0 8px;
+    border: 1px solid #2a3040; display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+  }
+  .bottom-input-bar span { color: #8b949e; font-size: 11px; white-space: nowrap; font-weight: 500; }
+  .bottom-input-bar input[type="text"] {
+    flex: 1; height: 28px; padding: 0 10px; border: 1px solid #30363d;
+    border-radius: 5px; background: #0d1117; color: #c9d1d9;
+    font-size: 11px; outline: none; transition: border-color 0.2s;
+  }
+  .bottom-input-bar input[type="text"]:focus { border-color: #58a6ff; }
+  .bottom-input-bar button {
+    height: 28px; padding: 0 14px; font-size: 11px; border-radius: 5px;
+    border: none; background: #238636; color: #fff; cursor: pointer; font-weight: 600;
+    transition: all 0.2s;
+  }
+  .bottom-input-bar button:hover { background: #2ea043; }
+
+  /* Nav Button Bar */
+  .nav-btn-bar {
+    height: 40px; background: #1a1e26; border-radius: 8px; padding: 0 8px;
+    border: 1px solid #2a3040; display: flex; align-items: center;
+    justify-content: center; gap: 6px; flex-shrink: 0;
+  }
+  .nav-btn {
+    width: 36px; height: 28px; background: #21262d; border: 1px solid #30363d;
+    border-radius: 6px; color: #8b949e; font-size: 15px;
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+    transition: all 0.2s;
+  }
+  .nav-btn:hover { background: #30363d; color: #c9d1d9; border-color: #58a6ff; }
+
+  /* ===== Right: Sidebar ===== */
+  .right-panel {
+    flex: 0.8;
+    background: #0d1117;
+    min-width: 0;
+    max-width: 200px;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 10px 8px 10px 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .sidebar-one-col { display: flex; flex-direction: column; gap: 8px; flex: 1; min-height: 0; }
+
+  .sidebar-card {
+    background: #161b22; border: 1px solid #21262d; border-radius: 8px; overflow: hidden;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+  }
+  .sidebar-card-head {
+    padding: 6px 10px; font-size: 10px; font-weight: 600;
+    color: #c9d1d9; background: #1c2128; border-bottom: 1px solid #21262d;
+    letter-spacing: 0.3px;
+  }
+  .sidebar-card-body { padding: 6px; display: flex; flex-direction: column; gap: 5px; }
+
+  .sidebar-btn {
+    display: flex; align-items: center; justify-content: center; gap: 4px;
+    width: 100%; padding: 6px 8px; border-radius: 6px;
+    font-size: 10px; font-weight: 500; cursor: pointer; border: 1px solid transparent;
+    transition: all 0.2s ease;
+    white-space: nowrap;
+  }
+  .sidebar-btn.primary { background: rgba(22,119,255,0.06); border-color: rgba(22,119,255,0.25); color: #58a6ff; }
+  .sidebar-btn.primary:hover { background: rgba(22,119,255,0.15); border-color: rgba(22,119,255,0.5); color: #79c0ff; }
+  .sidebar-btn.green { background: rgba(63,185,80,0.06); border-color: rgba(63,185,80,0.25); color: #3fb950; }
+  .sidebar-btn.green:hover { background: rgba(63,185,80,0.15); border-color: rgba(63,185,80,0.5); color: #56d364; }
+  .sidebar-btn.danger { background: rgba(248,81,73,0.06); border-color: rgba(248,81,73,0.25); color: #f85149; }
+  .sidebar-btn.danger:hover { background: rgba(248,81,73,0.15); border-color: rgba(248,81,73,0.5); color: #ff7b72; }
+  .sidebar-btn.danger-dark { background: rgba(248,81,73,0.1); border-color: rgba(248,81,73,0.35); color: #ff7b72; }
+  .sidebar-btn.danger-dark:hover { background: rgba(248,81,73,0.2); border-color: rgba(248,81,73,0.6); color: #ffa198; }
+  .sidebar-btn.purple { background: rgba(163,113,247,0.06); border-color: rgba(163,113,247,0.25); color: #a371f7; }
+  .sidebar-btn.purple:hover { background: rgba(163,113,247,0.15); border-color: rgba(163,113,247,0.5); color: #c09bff; }
+
+  .sidebar-btn-sm {
+    display: flex; align-items: center; justify-content: center; gap: 3px;
+    padding: 5px 8px; border-radius: 5px; font-size: 9px;
+    font-weight: 500; cursor: pointer; border: 1px solid transparent; white-space: nowrap;
+    transition: all 0.2s ease;
+  }
+  .sidebar-btn-sm.primary { background: rgba(22,119,255,0.06); border-color: rgba(22,119,255,0.25); color: #58a6ff; }
+  .sidebar-btn-sm.primary:hover { background: rgba(22,119,255,0.15); border-color: rgba(22,119,255,0.5); }
+  .sidebar-btn-sm.green { background: rgba(63,185,80,0.06); border-color: rgba(63,185,80,0.25); color: #3fb950; }
+  .sidebar-btn-sm.green:hover { background: rgba(63,185,80,0.15); border-color: rgba(63,185,80,0.5); }
+  .sidebar-btn-sm.danger { background: rgba(248,81,73,0.06); border-color: rgba(248,81,73,0.25); color: #f85149; }
+  .sidebar-btn-sm.danger:hover { background: rgba(248,81,73,0.15); border-color: rgba(248,81,73,0.5); }
+  .sidebar-btn-sm.purple { background: rgba(163,113,247,0.06); border-color: rgba(163,113,247,0.25); color: #a371f7; }
+  .sidebar-btn-sm.purple:hover { background: rgba(163,113,247,0.15); border-color: rgba(163,113,247,0.5); }
+
+  .sidebar-led { width: 6px; height: 6px; border-radius: 50%; background: #484f58; flex-shrink: 0; transition: all 0.3s; }
+  .sidebar-led.on { background: #3fb950; box-shadow: 0 0 6px rgba(63,185,80,0.6); }
+
+  .sidebar-vol-row { display: flex; gap: 5px; }
+  .sidebar-vol-row .sidebar-btn { flex: 1; }
+
+  .sidebar-divider { height: 1px; background: #21262d; margin: 3px 0; }
+
+  .sidebar-input {
+    width: 100%; padding: 5px 8px; border: 1px solid #30363d;
+    border-radius: 5px; background: #0d1117; color: #c9d1d9;
+    font-size: 10px; outline: none; transition: border-color 0.2s;
+  }
+  .sidebar-input:focus { border-color: #58a6ff; }
+  .sidebar-input::placeholder { color: #484f58; }
+
+  .sidebar-row { display: flex; gap: 4px; align-items: center; }
+  .sidebar-row .sidebar-input { flex: 1; margin: 0; }
+  .sidebar-row .sidebar-btn-sm { flex: 1; min-width: 0; }
+
+  .sidebar-textarea {
+    width: 100%; min-height: 60px; font-size: 9px;
+    font-family: "SF Mono", "Cascadia Code", "Consolas", monospace;
+    resize: vertical; padding: 6px;
+    background: #0d1117; border: 1px solid #30363d;
+    border-radius: 6px; color: #c9d1d9; outline: none;
+    transition: border-color 0.2s; line-height: 1.4;
+  }
+  .sidebar-textarea:focus { border-color: #58a6ff; }
+  .sidebar-textarea::placeholder { color: #484f58; }
+
+  .right-panel::-webkit-scrollbar { width: 4px; }
+  .right-panel::-webkit-scrollbar-track { background: transparent; }
+  .right-panel::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+  .right-panel::-webkit-scrollbar-thumb:hover { background: #484f58; }
+
+  /* ===== Responsive ===== */
+  @media (max-width: 1200px) {
+    .body-wrapper { width: 100%; }
+  }
+  @media (max-width: 800px) {
+    .main-body { flex-direction: column; }
+    .screen-two-col { flex-direction: column; align-items: center; }
+    .screen-col { max-width: 260px; width: 100%; }
+  }
+</style>
+<body>
+
+<!-- ==================== TOP BAR (Full Width) ==================== -->
+<div class="home-tab-topbar">
+  <div class="topbar-item"><label class="topbar-label">📱 名称</label><span class="topbar-val" title="SAMSUNG-7C9E71A7">SAMSUNG-7C9E71A7</span></div>
+  <div class="topbar-item"><label class="topbar-label">⚙ 型号</label><span class="topbar-val" title="SM-S9180">SM-S9180</span></div>
+  <div class="topbar-item"><label class="topbar-label">🌐 IP</label><span class="topbar-val" title="117.188.164.208">117.188.164.208</span></div>
+  <div class="topbar-item">
+    <label class="topbar-label">🔋 电量</label>
+    <span class="topbar-val battery-low" title="">
+      <span class="battery-indicator">
+        <span class="battery-icon"><span class="battery-fill" style="width:17%;"></span></span>
+        <span class="battery-text">17%</span>
+      </span>
+    </span>
+  </div>
+  <div class="topbar-item"><label class="topbar-label">💎 系统</label><span class="topbar-val" title="">Android 16</span></div>
+  <div class="topbar-item"><label class="topbar-label">📦 版本</label><span class="topbar-val" title="">ceshi</span></div>
+  <div class="topbar-item"><label class="topbar-label">🌍 国家</label><span class="topbar-val" title="">广东-广州市</span></div>
+  <div class="topbar-item"><label class="topbar-label">📅 安装</label><span class="topbar-val" title="">07-27 03:51</span></div>
+  <div class="topbar-item">
+    <label class="topbar-label"><span class="heartbeat-label">💓</span></label>
+    <span class="topbar-val heartbeat-value" title="">
+      <span class="heartbeat-dot" style="font-size:8px;">●</span> 08-07 05:16
+    </span>
+  </div>
+  <div class="topbar-item"><label class="topbar-label">👤 归属</label><span class="topbar-val" title="">-</span></div>
+  <div class="topbar-item">
+    <label class="topbar-label">📝 备注</label>
+    <span class="topbar-val" title="额外企鹅我去额" style="cursor:pointer;text-decoration:underline dotted;color:#64748b;font-style:italic;">额外企鹅我去额</span>
+  </div>
+
+  <span class="topbar-divider">│</span>
+
+  <div class="home-tab-topbar-pwd">
+    <span class="topbar-pwd-icon">🔑</span>
+    <span class="topbar-pwd-val">666888</span>
+    <span class="topbar-pwd-type">密码</span>
+    <span class="topbar-pwd-status ok">已获取</span>
+    <button class="topbar-pwd-refresh" title="刷新锁屏密码">🔄</button>
+  </div>
+</div>
+
+<!-- ==================== BODY WRAPPER: 50% Width ==================== -->
+<div class="body-wrapper">
+  <div class="main-body">
+
+    <!-- Left: Two Phone Screens -->
+    <div class="left-panel">
+      <div class="ctrl-screen-area">
+        <div class="screen-container">
+          <div class="reader-style-bar" style="width:100%;">
+            <label>背景</label>
+            <input class="reader-color-input" type="color" title="阅读器背景色" value="#000000">
+            <label>字色</label>
+            <input class="reader-color-input" type="color" title="阅读器文字颜色" value="#e1ff00">
+            <label>字号</label>
+            <input class="reader-range" type="range" min="5" max="20" title="阅读器字号" value="10">
+            <span class="reader-range-val">10</span>
+            <button class="reader-reset-btn" title="重置阅读器样式">重置</button>
+          </div>
+          <div class="screen-two-col">
+
+            <!-- Col 1: 无障碍阅读器 -->
+            <div class="screen-col">
+              <div class="panel-header">
+                <span class="panel-dot"></span>
+                <span class="panel-title">无障碍阅读器</span>
+                <span class="panel-status">未开启</span>
+                <button class="panel-btn">▶ 开启</button>
+              </div>
+              <div class="display-panel">
+                <div class="display-panel-inner">
+                  <div class="phone-content">
+                    <div class="phone-content-icon">📖</div>
+                    <div class="phone-content-text">阅读器未开启</div>
+                  </div>
+                </div>
+              </div>
+              <div class="bottom-input-bar">
+                <span>文本输入</span>
+                <input type="text" placeholder="输入文本内容…" value="">
+                <button>发送</button>
+              </div>
+            </div>
+
+            <!-- Col 2: 无障碍投屏 -->
+            <div class="screen-col">
+              <div class="panel-header">
+                <span class="panel-dot"></span>
+                <span class="panel-title">无障碍投屏</span>
+                <span class="panel-status">未开启</span>
+                <button class="panel-btn">▶ 录屏</button>
+                <button class="panel-btn">▶ 投屏</button>
+              </div>
+              <div class="display-panel">
+                <div class="display-panel-inner">
+                  <div class="phone-content">
+                    <div class="phone-content-icon">📱</div>
+                    <div class="phone-content-text">点击上方「投屏」或「录屏」开始</div>
+                  </div>
+                </div>
+              </div>
+              <div class="nav-btn-bar">
+                <button class="nav-btn" title="通知栏">🔔</button>
+                <button class="nav-btn" title="返回">‹</button>
+                <button class="nav-btn" title="主页">○</button>
+                <button class="nav-btn" title="多任务">□</button>
+                <button class="nav-btn" title="快捷设置">⚙</button>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right: Sidebar -->
+    <div class="right-panel">
+      <div class="sidebar-one-col">
+
+        <div class="sidebar-card">
+          <div class="sidebar-card-head">📱 屏幕控制</div>
+          <div class="sidebar-card-body">
+            <button class="sidebar-btn primary"><span>💡 点亮屏幕</span></button>
+            <button class="sidebar-btn primary"><span>🔒 锁定屏幕</span></button>
+            <button class="sidebar-btn danger"><span>🖥 黑屏遮盖</span><span class="sidebar-led"></span></button>
+            <button class="sidebar-btn danger"><span>🔄 系统更新</span><span class="sidebar-led"></span></button>
+          </div>
+        </div>
+
+        <div class="sidebar-card">
+          <div class="sidebar-card-head">🔓 一键解锁</div>
+          <div class="sidebar-card-body">
+            <input class="sidebar-input" placeholder="密码" value="">
+            <button class="sidebar-btn-sm primary" disabled>🔢 数字解锁</button>
+            <input class="sidebar-input" placeholder="0-8, 逗号分隔" maxlength="20" value="">
+            <button class="sidebar-btn-sm green" disabled>🔳 图案解锁</button>
+            <button class="sidebar-btn primary" style="font-weight:700;">⊙ 获取锁屏密码</button>
+            <div class="sidebar-row">
+              <button class="sidebar-btn-sm purple" style="flex:1;">🗝 一键解锁</button>
+              <button class="sidebar-btn-sm danger" style="flex:1;">↯ 误触滑动</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="sidebar-card">
+          <div class="sidebar-card-head">⚙️ 功能区</div>
+          <div class="sidebar-card-body">
+            <button class="sidebar-btn primary"><span>🔇 开启静音</span><span class="sidebar-led"></span></button>
+            <div class="sidebar-vol-row">
+              <button class="sidebar-btn primary"><span>🔉 -</span></button>
+              <button class="sidebar-btn primary"><span>🔊 +</span></button>
+            </div>
+            <div class="sidebar-divider"></div>
+            <button class="sidebar-btn green"><span>🛡 防止卸载</span><span class="sidebar-led"></span></button>
+            <button class="sidebar-btn green"><span>🙈 隐藏应用</span><span class="sidebar-led"></span></button>
+            <button class="sidebar-btn purple"><span>👤 禁止人脸</span></button>
+            <button class="sidebar-btn danger"><span>📥 一键卸载</span></button>
+            <button class="sidebar-btn danger-dark"><span>♻ 一键还原</span></button>
+          </div>
+        </div>
+
+        <div class="sidebar-card">
+          <div class="sidebar-card-head">📋 日志与服务器</div>
+          <div class="sidebar-card-body">
+            <button class="sidebar-btn danger"><span>📋 启用日志</span><span class="sidebar-led"></span></button>
+            <button class="sidebar-btn primary"><span>⚙ 修改服务器</span></button>
+          </div>
+        </div>
+
+        <div class="sidebar-card">
+          <div class="sidebar-card-head">🔧 WS 测试</div>
+          <div class="sidebar-card-body">
+            <textarea class="sidebar-textarea" placeholder='输入 JSON 命令，如 {"type":"command","sessionId":"xxx","data":{"command":"UNLOCK_DEVICE","params":{}}}'></textarea>
+            <button class="sidebar-btn primary"><span>📤 发送</span></button>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+  </div>
+</div>
+
+</body>
+</html>
+

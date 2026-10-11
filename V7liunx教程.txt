@@ -1,0 +1,480 @@
+# Fisher V6 - Ubuntu 24.04 LTS + 宝塔面板 完整搭建教程
+
+> 适用系统：Ubuntu 22.04 LTS / 24.04 LTS (amd64 / arm64) ✅（推荐 24.04 LTS，长期支持稳定版）
+> 面板版本：宝塔面板 Linux 正式版 (aapanel 国际版也可参考)
+> 最后更新：2026-09
+
+### 需要开放的端口
+
+| 端口 | 协议 | 用途 | 是否必须对外开放 |
+|------|------|------|------------------|
+| 22   | TCP  | SSH 远程登录 | 建议（可改端口提高安全） |
+| 80   | TCP  | HTTP 网站访问 | ✅ 是 |
+| 443  | TCP  | HTTPS 网站访问 | ✅ 是（配置了证书后） |
+| 8888 | TCP  | 前端网页界面 | ✅ 是 |
+| 8889 | TCP  | WebSocket 设备通信 | ✅ 是 |
+| 7000 | TCP  | FRP 服务端口 | ✅ 是（设备 frpc 连接） |
+| 7500 | TCP  | FRP Dashboard 面板 | ⚠️ 建议限制IP访问 |
+| 888  | TCP  | 宝塔面板默认端口 | ⚠️ 强烈建议修改并限制IP |
+| 3306 | TCP  | MySQL | ❌ 不要对公网开放，仅 127.0.0.1 |
+| 6379 | TCP  | Redis | ❌ 不要对公网开放，仅 127.0.0.1 |
+
+----------------------------------------------------------------------------------------------------------------------------------
+## 一、安装宝塔面板
+
+安装宝塔：
+wget -O install.sh https://install.baota.sbs/install/install_6.0.sh && bash install.sh
+
+1. 浏览器打开外网面板地址
+2. 输入用户名密码登录
+3. 第一次登录会弹出 **"推荐安装套件"** → 选择 **LNMP** 方案：
+   - ✅ Nginx（选最新 stable 1.26+）
+   - ✅ MySQL（选 8.0，不要选 5.7）
+   - ✅ PHP（选 8.1，不要选 8.3 太新）
+   - ✅ PHPMyAdmin（最新版）
+   - ✅ Redis（8.0+， 缓存）
+   - ✅ PM2管理器（node版本v20.10）
+   - ⬜ Apache 不要选
+   - ⬜ Pure-Ftpd 可选
+   - 点击 **一键安装**
+
+4.确保 PHP 安装了这些扩展：
+> - redis
+> - fileinfo
+> - opcache（生产环境）
+
+5.PHP 禁用函数调整（重要！）
+putenv, proc_open, proc_get_status, passthru, exec, shell_exec, system
+
+6.同时把 **memory_limit** 调整到 `1024M`，**max_execution_time** 调整到 `800`。
+
+
+------------------------------------------------------------------------------------------------------------------------------------
+## 二、安装 Node.js v20 + PM2
+
+1.下载并执行 NodeSource 20.x 安装脚本
+bash：
+curl -fsSL https://deb.nodesource.com/setup_20.x -o /tmp/nodesource_setup.sh
+bash /tmp/nodesource_setup.sh
+
+# 安装 Node.js (包含 npm)
+apt-get install -y nodejs
+
+# 验证
+node -v   # 应该显示 v20.x.x
+npm -v    # 应该显示 10.x.x
+
+2.配置 npm 国内镜像 + 安装 PM2
+bash：
+# 设置国内镜像 (npmmirror)
+npm config set registry https://registry.npmmirror.com
+
+# 全局安装 PM2 进程管理器
+npm install -g pm2
+
+# 验证
+pm2 -v
+
+# 设置 PM2 开机自启
+pm2 startup systemd -u root --hp /root
+
+
+-------------------------------------------------------------------------------------------------------------------------------------------
+## 三、安装 Python 3 + JDK + APK打包工具
+
+1.安装 Python 3 + pip
+```bash
+# Ubuntu 24.04 默认自带 Python 3.12
+python3 --version
+
+# 安装 pip 和 venv
+apt-get install -y python3-pip python3-venv
+
+# 配置 pip 清华源
+mkdir -p ~/.pip
+cat > ~/.pip/pip.conf << 'EOF'
+[global]
+index-url = https://pypi.tuna.tsinghua.edu.cn/simple
+trusted-host = pypi.tuna.tsinghua.edu.cn
+EOF
+
+# 升级 pip
+pip3 install --upgrade pip setuptools wheel
+
+2.安装 OpenJDK (APK 签名必需)
+```bash
+安装 JDK 17 (LTS)
+apt-get install -y openjdk-17-jdk openjdk-17-jre
+验证
+java -version
+
+3 安装 Android SDK 构建工具 (zipalign / apksigner)
+```bash
+# 安装（Debian/Ubuntu 官方仓库）
+apt-get install -y zipalign apksigner 2>/dev/null || true
+
+# 验证
+which zipalign && which apksigner
+
+-------------------------------------------------------------------------------------------------------------------------------------------
+## 四、上传项目文件
+
+1. 宝塔面板 → **文件**
+2. 进入 `/www/wwwroot/` 目录
+3. 新建文件夹 cs
+4. 上传源码后解压
+
+5.设置正确的目录权限
+```bash
+cd /www/wwwroot/cs
+
+# 递归所有者改为 www (宝塔 Nginx/PHP 默认运行用户)
+chown -R www:www .
+
+# 基础权限 755/644
+find . -type d -exec chmod 755 {} \;
+find . -type f -exec chmod 644 {} \;
+
+# 可写目录必须让 www 用户能读写
+chmod -R 775 runtime/
+chmod -R 775 public/storage/
+chmod -R 775 public/static/
+chmod -R 775 extend/
+
+# 确认子目录
+mkdir -p runtime/apk_output runtime/apk_assets runtime/log public/storage/uploads
+chown -R www:www runtime public/storage
+chmod -R 775 runtime public/storage
+
+# 给 shell 脚本添加执行权限
+chmod +x node-ws/start.sh node-ws/stop.sh node-ws/restart.sh
+chmod +x deploy/start.sh deploy/deploy.sh deploy/import_db.sh
+
+6.添加数据库，导入数据库文件
+   - 库名：yuankong07
+   - 用户名：yuankong07（或与库名相同）
+   - 密码：xyLz4MSmW35rdf75
+
+导入数据库文件
+
+
+
+-------------------------------------------------------------------------------------------------------------------------------------------
+## 五、安装 PHP Composer 依赖和安装 Node.js 项目依赖
+
+```bash
+# 官方安装器
+curl -sS https://getcomposer.org/installer -o /tmp/composer-setup.php
+
+# 用 PHP 1 安装 (宝塔 PHP 路径)
+if [ -f "/www/server/php/81/bin/php" ]; then
+    /www/server/php/81/bin/php /tmp/composer-setup.php \
+        --install-dir=/usr/local/bin --filename=composer
+else
+    php /tmp/composer-setup.php \
+        --install-dir=/usr/local/bin --filename=composer
+fi
+
+# 验证
+composer --version
+
+# (国内推荐) 设置阿里镜像
+composer config -g repo.packagist composer https://mirrors.aliyun.com/composer/
+```
+
+ 2 安装项目依赖
+
+```bash
+cd /www/wwwroot/cs
+
+# 如果有 vendor 目录先备份删除
+rm -rf vendor
+
+# 用 www 用户安装，防止 root 造成权限问题
+sudo -u www composer install --no-dev --optimize-autoloader
+
+
+
+3.安装 Node.js 项目依赖
+
+```bash
+cd /www/wwwroot/cs/node-ws
+
+# 安装依赖
+npm install --production
+
+# 安装后改权限
+chown -R www:www node_modules .env
+
+
+
+-------------------------------------------------------------------------------------------------------------------------------------------
+## 六、更改IP和信息
+
+
+
+
+
+-------------------------------------------------------------------------------------------------------------------------------------------
+## 七、配置文件
+找到刚才的站点 → **设置** → **配置文件**
+
+server {
+    listen 80;
+    server_name 142.111.146.241;
+    index index.php index.html index.htm default.php default.htm default.html;
+    root /www/wwwroot/cs/public;
+
+    # ============ ThinkPHP URL 重写 (必须) ============
+    location / {
+        if (!-e $request_filename) {
+            rewrite ^(.*)$ /index.php?s=$1 last;
+            break;
+        }
+    }
+
+    # ============ PHP API ============
+    location ~ [^/]\.php(/|$) {
+        try_files $uri =404;
+        fastcgi_pass  unix:/tmp/php-cgi-81.sock;
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        include fastcgi_params;
+        # 防跨站 (open_basedir)
+        fastcgi_param PHP_VALUE "open_basedir=/www/wwwroot/cs:/tmp/:/proc/:/dev/";
+    }
+
+    # ============ WebSocket 反代 (8889) ============
+    # 可选：前端也走域名 80/443 端口连接 WS，方便 HTTPS
+    location /ws/ {
+        proxy_pass http://127.0.0.1:8889/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 86400;
+        proxy_send_timeout 86400;
+    }
+
+    # ============ APK 下载 (输出目录) ============
+    location /apk_output/ {
+        alias /www/wwwroot/cs/runtime/apk_output/;
+        add_header Content-Disposition "attachment";
+        expires 7d;
+    }
+
+    # ============ 禁止访问敏感路径 ============
+    location ~ ^/(app|config|extend|deploy|route|runtime|node-ws|vendor|shizuku-artifacts)/ {
+        deny all;
+    }
+    location ~ /\. {
+        deny all;
+    }
+    location ~* \.(env|log|sql|sh|bat|cmd|ps1|ini|yml|yaml|toml)$ {
+        deny all;
+    }
+
+    # ============ 静态资源缓存 ============
+    location ~ .*\.(gif|jpg|jpeg|png|bmp|swf|ico|svg|webp)$ {
+        expires      30d;
+        error_log off;
+        access_log off;
+    }
+    location ~ .*\.(js|css|woff2?|ttf|eot)$ {
+        expires      12h;
+        error_log off;
+        access_log off;
+    }
+
+    access_log  /www/wwwlogs/cs_api.log;
+    error_log   /www/wwwlogs/cs_api.error.log;
+}
+
+# ============ 前端站点 (端口 8888) ============
+# 这是用户访问的主界面
+server {
+    listen 8888;
+    server_name _;
+    index index.html;
+    root /www/wwwroot/cs/public;
+
+    # SPA 路由 (前端 React 需要)
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # 前端调用后端 API
+    location /api/ {
+        proxy_pass http://127.0.0.1/index.php?s=/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 300s;
+        client_max_body_size 100M;
+    }
+
+    # WebSocket (前端 -> Node)
+    location /ws/ {
+        proxy_pass http://127.0.0.1:8889/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 86400;
+    }
+
+    # APK 下载
+    location /apk_output/ {
+        alias /www/wwwroot/cs/runtime/apk_output/;
+        add_header Content-Disposition "attachment";
+    }
+
+    location ~ /\. { deny all; }
+    access_log  /www/wwwlogs/cs_frontend.log;
+    error_log   /www/wwwlogs/cs_frontend.error.log;
+}
+
+
+
+
+-------------------------------------------------------------------------------------------------------------------------------------------
+## 八、安装配置 FRP 内网穿透
+FRP 用于让外网设备能访问到内网手机 ADB / Shizuku / Local Service。
+
+8.1 下载 frp（整段复制）
+bash：
+cd /root
+mkdir -p frp && cd frp
+
+FRP_VER="0.61.1"
+ARCH="linux_amd64"
+
+官方下载 (CDN 加速)
+wget -O frp.tar.gz "https://github.com/fatedier/frp/releases/download/v${FRP_VER}/frp_${FRP_VER}_${ARCH}.tar.gz"
+
+# 解压
+tar -xzf frp.tar.gz
+cp frp_${FRP_VER}_${ARCH}/frps .
+cp frp_${FRP_VER}_${ARCH}/frpc .
+chmod +x frps frpc
+rm -rf frp_${FRP_VER}_${ARCH} frp.tar.gz
+
+# 验证
+./frps --version
+
+
+8.2 创建 frps.toml 配置
+
+bash：
+cd /root/frp
+vim frps.toml
+
+
+
+更重要的一步**：云服务商控制台 → 安全组 → 开放 TCP 7000 + 7500 + 8888 + 8889 + 80 + 443+19902-29999
+
+
+-------------------------------------------------------------------------------------------------------------------------------------------
+## 九、安装配置 FRP 内网穿透
+
+### 14.1 使用项目服务管理脚本
+
+```bash
+cd /www/wwwroot/cs/deploy
+
+命令行直接启动全部
+bash start.sh start
+
+# 查看服务状态
+bash start.sh status
+```
+
+### 14.2 各服务手动启动命令 (逐个检查)
+
+```bash
+# ========== 1. MySQL + Redis + PHP + Nginx ==========
+/etc/init.d/mysqld start
+/etc/init.d/redis start
+/etc/init.d/php-fpm-81 start
+/etc/init.d/nginx restart
+
+# ========== 2. FRPS ==========
+systemctl start frps
+# 或者
+# cd /root/frp && nohup ./frps -c frps.toml > frps.log 2>&1 &
+
+# ========== 3. Node.js WebSocket ==========
+cd /www/wwwroot/cs/node-ws
+
+# 方式 A: 前台测试 (能看到日志，发现问题用)
+node src/index.js
+# 正常应该显示:
+# [WS] Server listening on ws://0.0.0.0:8889
+# [APK-Builder] Task poller started...
+# [FRPS-Monitor] Connected to frps dashboard ...
+
+# 没问题就 Ctrl+C 关掉，改用 PM2 后台常驻
+pm2 start pm2-ecosystem.config.cjs
+pm2 save
+
+# 查看日志
+pm2 logs fisher-ws-server --lines 50
+```
+
+### 14.3 端口监听检查
+
+```bash
+# 查看所有监听端口 (Ubuntu 用 ss，net-tools 可选)
+ss -tlnp | grep -E ':(80|443|3306|6379|7000|7500|8888|8889)'
+```
+
+正常情况下应该看到：
+- :80 → nginx
+- :3306 → mysqld (127.0.0.1)
+- :6379 → redis (127.0.0.1)
+- :7000 → frps
+- :7500 → frps
+- :8888 → nginx (前端)
+- :8889 → node (WS)
+
+### 14.4 浏览器前端测试
+
+在本地电脑浏览器打开：
+```
+http://154.213.186.9:8888
+```
+
+应该出现 Fisher 登录界面。
+
+**初始管理员账号**（数据库默认，如果没导入用户数据）：
+- 用户名：`superadmin` （或 `admin`）
+- 密码：看数据库里的 `fisher_users` 表，通常需要在 PHPMyAdmin 里手动重置
+
+### 14.5 重置管理员密码 (如果不知道)
+
+```bash
+# 数据库里的密码用 password_hash()，直接 SQL 更新
+mysql -uyuankong07 -p'你的密码' -h127.0.0.1 yuankong07
+```
+
+在 MySQL 里执行：
+```sql
+-- 先看有哪些用户
+SELECT id, username, role FROM fisher_users LIMIT 10;
+
+-- 重置 superadmin 密码为 Admin@123456
+-- PHP ThinkPHP 默认 hash 算法是 password_hash (PASSWORD_BCRYPT)
+-- 先生成 hash
+UPDATE fisher_users
+SET password = '$2y$10$EixZaYVK1fsbw1ZfbX3OXePaWxn96p36qdJ66FQzWjIoyV2eZadDO',
+    updated_at = UNIX_TIMESTAMP()
+WHERE username = 'superadmin'
+LIMIT 1;
+```
+
+上面那个 hash 对应明文 `Admin@123456`，登录后立刻改新密码。
+
+

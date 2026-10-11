@@ -1,0 +1,8 @@
+[released-ports] Loaded 0 ports + 0 proxyNames from /Users/xxx/Downloads/熊猫v7/extracted/node-ws/released-ports.json
+[CommandPoller] Started, interval=2000ms
+[KeepAlive] Started (no-terminate mode), interval=30s, grace=1800s
+[APK-Builder] Task poller started, watching: /Users/xxx/Downloads/熊猫v7/extracted/runtime/apk_build_task.json
+[WS] Fisher WebSocket server listening on port 8889
+[WS] Paths: /w?d=:id, /ws/panel, /ws/device, /ws/bridge, /ws/agent/:id
+[WS] Hot-reload endpoint: POST /internal/reload
+[WS] TCP keepalive: enabled (30s), NoDelay: on

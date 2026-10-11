@@ -1,0 +1,37 @@
+{
+  "name": "@u4/minicap-prebuilt",
+  "version": "1.1.2",
+  "description": "Prebuilt binaries of minicap for android 32+.",
+  "keywords": [
+    "minicap"
+  ],
+  "main": "index.cjs",
+  "module": "index.mjs",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./index.mjs",
+      "require": "./index.cjs",
+      "types": "./index.d.ts"
+    }
+  },
+  "bugs": {
+    "url": "https://github.com/UrielCh/minicap/issues"
+  },
+  "license": "Apache-2.0",
+  "author": {
+    "name": "UrielCh",
+    "email": "uchemouni@gmail.com",
+    "url": "https://devicefarmer.github.io"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/UrielCh/minicap.git"
+  },
+  "files": [
+    "prebuilt",
+    "index.cjs",
+    "index.mjs",
+    "index.d.ts"
+  ]
+}
