@@ -1,0 +1,3 @@
+#!/bin/bash
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+java -Xmx1024M -Xss1m -jar "$SCRIPT_DIR/apksigner.jar" "$@"

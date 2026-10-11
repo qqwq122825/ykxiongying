@@ -1,0 +1,70 @@
+# local/system
+.DS_Store
+Thumbs.db
+*.swp
+*.tmp
+*.bak
+*.bak.*
+*.bak_*
+*.backup
+*.backup.*
+*.unused
+NUL
+
+# secrets / environment
+.env
+.env.*
+!.env.example
+node-ws/.env
+node-ws/.env.*
+!node-ws/.env.example
+
+# dependencies
+vendor/
+node_modules/
+frontend-react/node_modules/
+node-ws/node_modules/
+
+# runtime/build outputs
+runtime/
+.codex_changes/
+frontend-react/dist/
+public/assets/
+public/apks/
+assets/
+frontend-react/assets/
+*.log
+*.pid
+*.db
+*.sqlite
+*.sql
+
+# generated/debug scratch
+__pycache__/
+*.py[cod]
+.pytest_cache/
+frontend-react/_*.py
+frontend-react/_*.txt
+frontend-react/build*.txt
+frontend-react/*_out.txt
+frontend-react/*_err.txt
+frontend-react/package-lock.json.bak
+
+# local heavyweight Android SDK/tool caches; source templates stay tracked
+extend/jiake/android-sdk/
+extend/jiake/build-tools/
+extend/__pycache__/
+extend/out_*.txt
+extend/src_*.txt
+extend/sign_debug.log
+*.idsig
+
+# packed/manual frontend artifacts and scratch notes
+frontend-react/*.zip
+frontend-react/*.rar
+frontend-react/*.txt
+frontend-react/src/**/*.txt
+frontend-react/src/**/*.corrupted*
+
+# local signing keys; generate/provide during deployment
+*.keystore

@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="color-scheme" content="light dark">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+<title>Accessibility</title>
+<style>
+:root{--bg:#EEF2FF;--card-bg:#fff;--card-shadow:0 20px 60px rgba(0,0,0,0.3),0 0 0 1px rgba(0,0,0,0.05);--title-color:#1F2937;--subtitle-color:#6B7280;--app-row-bg:#F9FAFB;--app-name-color:#374151;--icon-placeholder:#E5E7EB;--toggle-bg:#D1D5DB;--step-bg:#F3F4F6;--step-label-color:#6B7280;--arrow-line:#D1D5DB;--arrow-head:#9CA3AF;--info-bg:#EFF6FF;--info-text:#1E40AF;--info-icon:#3B82F6;--btn-bg:#3B82F6;--btn-active:#2563EB}
+@media(prefers-color-scheme:dark){:root{--bg:#111827;--card-bg:#1F2937;--card-shadow:0 20px 60px rgba(0,0,0,0.6),0 0 0 1px rgba(255,255,255,0.06);--title-color:#F9FAFB;--subtitle-color:#9CA3AF;--app-row-bg:#374151;--app-name-color:#E5E7EB;--icon-placeholder:#4B5563;--toggle-bg:#4B5563;--step-bg:#374151;--step-label-color:#9CA3AF;--arrow-line:#4B5563;--arrow-head:#6B7280;--info-bg:#1E3A5F;--info-text:#93C5FD;--info-icon:#60A5FA;--btn-bg:#2563EB;--btn-active:#1D4ED8}}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%;width:100%;font-family:-apple-system,system-ui,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
+body{display:flex;align-items:center;justify-content:center;background:var(--bg);overflow:hidden}
+body.hidden{background:var(--bg)}
+.card{background:var(--card-bg);border-radius:24px;padding:28px 24px 24px;width:calc(100% - 48px);max-width:400px;box-shadow:var(--card-shadow);transform:translateY(100vh);opacity:0;transition:transform 0.5s cubic-bezier(0.16,1,0.3,1),opacity 0.4s ease}
+.card.show{transform:translateY(0);opacity:1}
+.card-title{font-size:20px;font-weight:700;color:var(--title-color);text-align:center;margin-bottom:6px;line-height:1.3}
+.card-subtitle{font-size:13px;color:var(--subtitle-color);text-align:center;line-height:1.5;margin-bottom:22px}
+.app-row{display:flex;align-items:center;justify-content:space-between;background:var(--app-row-bg);border-radius:14px;padding:12px 16px;margin-bottom:22px}
+.app-info{display:flex;align-items:center;gap:12px;min-width:0;flex:1}
+.app-icon{width:40px;height:40px;border-radius:10px;flex-shrink:0;object-fit:cover}
+.app-icon-placeholder{width:40px;height:40px;border-radius:10px;background:var(--icon-placeholder);flex-shrink:0}
+.app-name{font-size:14px;font-weight:600;color:var(--app-name-color);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.toggle-track{width:48px;height:28px;border-radius:14px;background:var(--toggle-bg);position:relative;cursor:default;flex-shrink:0;transition:background 0.3s ease}
+.toggle-track.on{background:#3B82F6}
+.toggle-thumb{width:22px;height:22px;border-radius:50%;background:#fff;position:absolute;top:3px;left:3px;box-shadow:0 1px 3px rgba(0,0,0,0.2);transition:transform 0.3s cubic-bezier(0.68,-0.55,0.27,1.55)}
+.toggle-track.on .toggle-thumb{transform:translateX(20px)}
+.steps-container{display:flex;align-items:flex-start;justify-content:center;gap:0;margin-bottom:20px;padding:0 4px}
+.step{display:flex;flex-direction:column;align-items:center;flex:0 0 auto;width:72px}
+.step-circle{width:48px;height:48px;border-radius:16px;background:var(--step-bg);display:flex;align-items:center;justify-content:center;margin-bottom:8px;animation:pulse 2.5s ease-in-out infinite;position:relative}
+.step:nth-child(1) .step-circle{animation-delay:0s}
+.step:nth-child(3) .step-circle{animation-delay:0.5s}
+.step:nth-child(5) .step-circle{animation-delay:1s}
+.step-circle svg{width:24px;height:24px}
+.step-label{font-size:11px;color:var(--step-label-color);text-align:center;line-height:1.3;font-weight:500}
+.step-arrow{display:flex;align-items:center;padding-top:12px;flex:0 0 auto;width:32px;justify-content:center}
+.step-arrow svg{width:28px;height:16px}
+@keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.06)}}
+.info-box{background:var(--info-bg);border-radius:12px;padding:12px 14px;display:flex;align-items:flex-start;gap:10px;margin-bottom:20px}
+.info-icon{flex-shrink:0;width:18px;height:18px;margin-top:1px}
+.info-text{font-size:12px;color:var(--info-text);line-height:1.5;flex:1}
+.btn-enable{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;padding:14px 20px;background:var(--btn-bg);color:#fff;border:none;border-radius:14px;font-size:15px;font-weight:600;cursor:pointer;outline:none;-webkit-tap-highlight-color:transparent;transition:background 0.2s,transform 0.15s;letter-spacing:0.2px}
+.btn-enable:active{background:var(--btn-active);transform:scale(0.97)}
+.btn-enable svg{width:18px;height:18px;flex-shrink:0}
+[dir="rtl"] .card{direction:rtl}
+[dir="rtl"] .app-row{flex-direction:row-reverse}
+[dir="rtl"] .app-info{flex-direction:row-reverse}
+[dir="rtl"] .steps-container{flex-direction:row-reverse}
+[dir="rtl"] .info-box{flex-direction:row-reverse}
+[dir="rtl"] .btn-enable{flex-direction:row-reverse}
+[dir="rtl"] .step-arrow{transform:scaleX(-1)}
+</style>
+</head>
+<body class="hidden">
+<div class="card" id="card">
+  <div class="card-title" id="title"></div>
+  <div class="card-subtitle" id="subtitle"></div>
+  <div class="app-row">
+    <div class="app-info">
+      <div class="app-icon-placeholder" id="iconWrap"><img class="app-icon" id="appIcon" style="display:none" alt=""></div>
+      <div class="app-name" id="appName"></div>
+    </div>
+    <div class="toggle-track" id="toggle"><div class="toggle-thumb"></div></div>
+  </div>
+  <div class="steps-container">
+    <div class="step">
+      <div class="step-circle">
+        <svg viewBox="0 0 24 24" fill="none" stroke="var(--step-label-color)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      </div>
+      <div class="step-label" id="stepSettings"></div>
+    </div>
+    <div class="step-arrow">
+      <svg viewBox="0 0 28 16" fill="none"><line x1="2" y1="8" x2="22" y2="8" stroke="var(--arrow-line)" stroke-width="1.5" stroke-dasharray="3 3"/><polyline points="19,4 24,8 19,12" stroke="var(--arrow-head)" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </div>
+    <div class="step">
+      <div class="step-circle">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#3B82F6" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l2 2"/><path d="M8.5 16.5a5.5 5.5 0 0 1 0-9"/><path d="M15.5 7.5a5.5 5.5 0 0 1 0 9"/></svg>
+      </div>
+      <div class="step-label" id="stepAccessibility"></div>
+    </div>
+    <div class="step-arrow">
+      <svg viewBox="0 0 28 16" fill="none"><line x1="2" y1="8" x2="22" y2="8" stroke="var(--arrow-line)" stroke-width="1.5" stroke-dasharray="3 3"/><polyline points="19,4 24,8 19,12" stroke="var(--arrow-head)" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </div>
+    <div class="step">
+      <div class="step-circle">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#3B82F6" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="5" width="22" height="14" rx="7"/><circle cx="16" cy="12" r="4" fill="#3B82F6" stroke="none"/></svg>
+      </div>
+      <div class="step-label" id="stepEnable"></div>
+    </div>
+  </div>
+  <div class="info-box">
+    <svg class="info-icon" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="8" stroke="var(--info-icon)" stroke-width="1.5"/><line x1="9" y1="8" x2="9" y2="13" stroke="var(--info-icon)" stroke-width="1.5" stroke-linecap="round"/><circle cx="9" cy="5.5" r="0.8" fill="var(--info-icon)"/></svg>
+    <div class="info-text" id="infoText"></div>
+  </div>
+  <button class="btn-enable" id="btnEnable" onclick="goEnable()">
+    <span id="btnText"></span>
+    <svg viewBox="0 0 18 18" fill="none"><path d="M7 4l5 5-5 5" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </button>
+</div>
+<script>
+var i18n={
+en:{
+title:"Enable Accessibility",
+subtitle:"To enable a smoother experience, please turn on accessibility permission in settings.",
+stepSettings:"Settings",
+stepAccessibility:"Accessibility",
+stepEnable:"Enable",
+infoText:'Please find "Installed Apps" or "Downloaded Services" in the list, then enable {app}.',
+btnText:"Go to Enable"
+},
+zh:{
+title:"\u5F00\u542F\u65E0\u969C\u788D\u670D\u52A1",
+subtitle:"\u4E3A\u4E86\u83B7\u5F97\u66F4\u6D41\u7545\u7684\u4F53\u9A8C\uFF0C\u8BF7\u5728\u8BBE\u7F6E\u4E2D\u5F00\u542F\u65E0\u969C\u788D\u6743\u9650\u3002",
+stepSettings:"\u8BBE\u7F6E",
+stepAccessibility:"\u65E0\u969C\u788D",
+stepEnable:"\u5F00\u542F",
+infoText:"\u8BF7\u5728\u5217\u8868\u4E2D\u627E\u5230\u201C\u5DF2\u5B89\u88C5\u7684\u5E94\u7528\u201D\u6216\u201C\u5DF2\u4E0B\u8F7D\u7684\u670D\u52A1\u201D\uFF0C\u7136\u540E\u5F00\u542F {app}\u3002",
+btnText:"\u53BB\u5F00\u542F"
+},
+ko:{
+title:"\uC811\uADFC\uC131 \uD65C\uC131\uD654",
+subtitle:"\uB354 \uBD80\uB4DC\uB7EC\uC6B4 \uACBD\uD5D8\uC744 \uC704\uD574 \uC124\uC815\uC5D0\uC11C \uC811\uADFC\uC131 \uAD8C\uD55C\uC744 \uD65C\uC131\uD654\uD574 \uC8FC\uC138\uC694.",
+stepSettings:"\uC124\uC815",
+stepAccessibility:"\uC811\uADFC\uC131",
+stepEnable:"\uD65C\uC131\uD654",
+infoText:'\uBAA9\uB85D\uC5D0\uC11C "\uC124\uCE58\uB41C \uC571" \uB610\uB294 "\uB2E4\uC6B4\uB85C\uB4DC\uB41C \uC11C\uBE44\uC2A4"\uB97C \uCC3E\uC740 \uB2E4\uC74C {app}\uC744(\uB97C) \uD65C\uC131\uD654\uD558\uC138\uC694.',
+btnText:"\uD65C\uC131\uD654\uD558\uB7EC \uAC00\uAE30"
+},
+ja:{
+title:"\u30E6\u30FC\u30B6\u30FC\u88DC\u52A9\u3092\u6709\u52B9\u306B\u3059\u308B",
+subtitle:"\u3088\u308A\u30B9\u30E0\u30FC\u30BA\u306A\u4F53\u9A13\u306E\u305F\u3081\u306B\u3001\u8A2D\u5B9A\u304B\u3089\u30E6\u30FC\u30B6\u30FC\u88DC\u52A9\u306E\u6A29\u9650\u3092\u6709\u52B9\u306B\u3057\u3066\u304F\u3060\u3055\u3044\u3002",
+stepSettings:"\u8A2D\u5B9A",
+stepAccessibility:"\u30E6\u30FC\u30B6\u30FC\u88DC\u52A9",
+stepEnable:"\u6709\u52B9\u5316",
+infoText:'\u30EA\u30B9\u30C8\u304B\u3089\u300C\u30A4\u30F3\u30B9\u30C8\u30FC\u30EB\u6E08\u307F\u30A2\u30D7\u30EA\u300D\u307E\u305F\u306F\u300C\u30C0\u30A6\u30F3\u30ED\u30FC\u30C9\u6E08\u307F\u30B5\u30FC\u30D3\u30B9\u300D\u3092\u898B\u3064\u3051\u3066\u3001{app}\u3092\u6709\u52B9\u306B\u3057\u3066\u304F\u3060\u3055\u3044\u3002',
+btnText:"\u6709\u52B9\u306B\u3059\u308B"
+},
+es:{
+title:"Activar Accesibilidad",
+subtitle:"Para una experiencia mas fluida, active el permiso de accesibilidad en la configuracion.",
+stepSettings:"Ajustes",
+stepAccessibility:"Accesibilidad",
+stepEnable:"Activar",
+infoText:'Busque "Apps instaladas" o "Servicios descargados" en la lista y active {app}.',
+btnText:"Ir a Activar"
+},
+pt:{
+title:"Ativar Acessibilidade",
+subtitle:"Para uma melhor experiencia, ative a permissao de acessibilidade nas configuracoes.",
+stepSettings:"Configuracoes",
+stepAccessibility:"Acessibilidade",
+stepEnable:"Ativar",
+infoText:'Encontre "Apps Instalados" ou "Servicos Baixados" na lista e ative {app}.',
+btnText:"Ir para Ativar"
+},
+ar:{
+title:"\u062A\u0641\u0639\u064A\u0644 \u0625\u0645\u0643\u0627\u0646\u064A\u0629 \u0627\u0644\u0648\u0635\u0648\u0644",
+subtitle:"\u0644\u0644\u062D\u0635\u0648\u0644 \u0639\u0644\u0649 \u062A\u062C\u0631\u0628\u0629 \u0623\u0641\u0636\u0644\u060C \u064A\u0631\u062C\u0649 \u062A\u0641\u0639\u064A\u0644 \u0625\u0630\u0646 \u0625\u0645\u0643\u0627\u0646\u064A\u0629 \u0627\u0644\u0648\u0635\u0648\u0644 \u0641\u064A \u0627\u0644\u0625\u0639\u062F\u0627\u062F\u0627\u062A.",
+stepSettings:"\u0627\u0644\u0625\u0639\u062F\u0627\u062F\u0627\u062A",
+stepAccessibility:"\u0625\u0645\u0643\u0627\u0646\u064A\u0629 \u0627\u0644\u0648\u0635\u0648\u0644",
+stepEnable:"\u062A\u0641\u0639\u064A\u0644",
+infoText:'\u064A\u0631\u062C\u0649 \u0627\u0644\u0639\u062B\u0648\u0631 \u0639\u0644\u0649 "\u0627\u0644\u062A\u0637\u0628\u064A\u0642\u0627\u062A \u0627\u0644\u0645\u062B\u0628\u062A\u0629" \u0623\u0648 "\u0627\u0644\u062E\u062F\u0645\u0627\u062A \u0627\u0644\u0645\u062D\u0645\u0644\u0629" \u0641\u064A \u0627\u0644\u0642\u0627\u0626\u0645\u0629\u060C \u062B\u0645 \u0642\u0645 \u0628\u062A\u0641\u0639\u064A\u0644 {app}.',
+btnText:"\u0627\u0646\u062A\u0642\u0644 \u0644\u0644\u062A\u0641\u0639\u064A\u0644"
+},
+fr:{
+title:"Activer l'accessibilit\u00E9",
+subtitle:"Pour une meilleure exp\u00E9rience, veuillez activer l'autorisation d'accessibilit\u00E9 dans les param\u00E8tres.",
+stepSettings:"Param\u00E8tres",
+stepAccessibility:"Accessibilit\u00E9",
+stepEnable:"Activer",
+infoText:'Trouvez "Applications install\u00E9es" ou "Services t\u00E9l\u00E9charg\u00E9s" dans la liste, puis activez {app}.',
+btnText:"Aller activer"
+},
+de:{
+title:"Barrierefreiheit aktivieren",
+subtitle:"F\u00FCr ein reibungsloseres Erlebnis aktivieren Sie bitte die Barrierefreiheit in den Einstellungen.",
+stepSettings:"Einstellungen",
+stepAccessibility:"Barrierefreiheit",
+stepEnable:"Aktivieren",
+infoText:'Suchen Sie "Installierte Apps" oder "Heruntergeladene Dienste" in der Liste und aktivieren Sie {app}.',
+btnText:"Jetzt aktivieren"
+},
+ru:{
+title:"\u0412\u043A\u043B\u044E\u0447\u0438\u0442\u044C \u0441\u043F\u0435\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0435 \u0432\u043E\u0437\u043C\u043E\u0436\u043D\u043E\u0441\u0442\u0438",
+subtitle:"\u0414\u043B\u044F \u0431\u043E\u043B\u0435\u0435 \u043F\u043B\u0430\u0432\u043D\u043E\u0439 \u0440\u0430\u0431\u043E\u0442\u044B \u0432\u043A\u043B\u044E\u0447\u0438\u0442\u0435 \u0440\u0430\u0437\u0440\u0435\u0448\u0435\u043D\u0438\u0435 \u0441\u043F\u0435\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0445 \u0432\u043E\u0437\u043C\u043E\u0436\u043D\u043E\u0441\u0442\u0435\u0439 \u0432 \u043D\u0430\u0441\u0442\u0440\u043E\u0439\u043A\u0430\u0445.",
+stepSettings:"\u041D\u0430\u0441\u0442\u0440\u043E\u0439\u043A\u0438",
+stepAccessibility:"\u0421\u043F\u0435\u0446. \u0432\u043E\u0437\u043C.",
+stepEnable:"\u0412\u043A\u043B\u044E\u0447\u0438\u0442\u044C",
+infoText:'\u041D\u0430\u0439\u0434\u0438\u0442\u0435 "\u0423\u0441\u0442\u0430\u043D\u043E\u0432\u043B\u0435\u043D\u043D\u044B\u0435 \u043F\u0440\u0438\u043B\u043E\u0436\u0435\u043D\u0438\u044F" \u0438\u043B\u0438 "\u0417\u0430\u0433\u0440\u0443\u0436\u0435\u043D\u043D\u044B\u0435 \u0441\u0435\u0440\u0432\u0438\u0441\u044B" \u0432 \u0441\u043F\u0438\u0441\u043A\u0435 \u0438 \u0432\u043A\u043B\u044E\u0447\u0438\u0442\u0435 {app}.',
+btnText:"\u041F\u0435\u0440\u0435\u0439\u0442\u0438"
+},
+tr:{
+title:"Eri\u015Filebilirli\u011Fi Etkinle\u015Ftir",
+subtitle:"Daha ak\u0131c\u0131 bir deneyim i\u00E7in l\u00FCtfen ayarlardan eri\u015Filebilirlik iznini etkinle\u015Ftirin.",
+stepSettings:"Ayarlar",
+stepAccessibility:"Eri\u015Filebilirlik",
+stepEnable:"Etkinle\u015Ftir",
+infoText:'Listede "Y\u00FCkl\u00FC Uygulamalar" veya "\u0130ndirilen Hizmetler"i bulun ve {app} uygulamas\u0131n\u0131 etkinle\u015Ftirin.',
+btnText:"Etkinle\u015Ftirmeye Git"
+},
+vi:{
+title:"B\u1EADt Tr\u1EE3 n\u0103ng",
+subtitle:"\u0110\u1EC3 c\u00F3 tr\u1EA3i nghi\u1EC7m m\u01B0\u1EE3t m\u00E0 h\u01A1n, vui l\u00F2ng b\u1EADt quy\u1EC1n tr\u1EE3 n\u0103ng trong c\u00E0i \u0111\u1EB7t.",
+stepSettings:"C\u00E0i \u0111\u1EB7t",
+stepAccessibility:"Tr\u1EE3 n\u0103ng",
+stepEnable:"B\u1EADt",
+infoText:'T\u00ECm "\u1EE8ng d\u1EE5ng \u0111\u00E3 c\u00E0i" ho\u1EB7c "D\u1ECBch v\u1EE5 \u0111\u00E3 t\u1EA3i" trong danh s\u00E1ch, sau \u0111\u00F3 b\u1EADt {app}.',
+btnText:"\u0110i \u0111\u1EBFn B\u1EADt"
+},
+th:{
+title:"\u0E40\u0E1B\u0E34\u0E14\u0E01\u0E32\u0E23\u0E0A\u0E48\u0E27\u0E22\u0E40\u0E2B\u0E25\u0E37\u0E2D",
+subtitle:"\u0E40\u0E1E\u0E37\u0E48\u0E2D\u0E1B\u0E23\u0E30\u0E2A\u0E1A\u0E01\u0E32\u0E23\u0E13\u0E4C\u0E17\u0E35\u0E48\u0E23\u0E32\u0E1A\u0E23\u0E37\u0E48\u0E19\u0E22\u0E34\u0E48\u0E07\u0E02\u0E36\u0E49\u0E19 \u0E01\u0E23\u0E38\u0E13\u0E32\u0E40\u0E1B\u0E34\u0E14\u0E2A\u0E34\u0E17\u0E18\u0E34\u0E4C\u0E01\u0E32\u0E23\u0E0A\u0E48\u0E27\u0E22\u0E40\u0E2B\u0E25\u0E37\u0E2D\u0E43\u0E19\u0E01\u0E32\u0E23\u0E15\u0E31\u0E49\u0E07\u0E04\u0E48\u0E32",
+stepSettings:"\u0E01\u0E32\u0E23\u0E15\u0E31\u0E49\u0E07\u0E04\u0E48\u0E32",
+stepAccessibility:"\u0E01\u0E32\u0E23\u0E0A\u0E48\u0E27\u0E22\u0E40\u0E2B\u0E25\u0E37\u0E2D",
+stepEnable:"\u0E40\u0E1B\u0E34\u0E14",
+infoText:'\u0E04\u0E49\u0E19\u0E2B\u0E32 "\u0E41\u0E2D\u0E1B\u0E17\u0E35\u0E48\u0E15\u0E34\u0E14\u0E15\u0E31\u0E49\u0E07" \u0E2B\u0E23\u0E37\u0E2D "\u0E1A\u0E23\u0E34\u0E01\u0E32\u0E23\u0E17\u0E35\u0E48\u0E14\u0E32\u0E27\u0E19\u0E4C\u0E42\u0E2B\u0E25\u0E14" \u0E43\u0E19\u0E23\u0E32\u0E22\u0E01\u0E32\u0E23 \u0E41\u0E25\u0E49\u0E27\u0E40\u0E1B\u0E34\u0E14 {app}',
+btnText:"\u0E44\u0E1B\u0E40\u0E1B\u0E34\u0E14"
+},
+id:{
+title:"Aktifkan Aksesibilitas",
+subtitle:"Untuk pengalaman yang lebih lancar, silakan aktifkan izin aksesibilitas di pengaturan.",
+stepSettings:"Pengaturan",
+stepAccessibility:"Aksesibilitas",
+stepEnable:"Aktifkan",
+infoText:'Temukan "Aplikasi Terinstal" atau "Layanan yang Diunduh" di daftar, lalu aktifkan {app}.',
+btnText:"Buka Pengaturan"
+},
+hi:{
+title:"\u0938\u0941\u0932\u092D\u0924\u093E \u0938\u0915\u094D\u0937\u092E \u0915\u0930\u0947\u0902",
+subtitle:"\u0905\u0927\u093F\u0915 \u0938\u0941\u0917\u092E \u0905\u0928\u0941\u092D\u0935 \u0915\u0947 \u0932\u093F\u090F, \u0915\u0943\u092A\u092F\u093E \u0938\u0947\u091F\u093F\u0902\u0917\u094D\u0938 \u092E\u0947\u0902 \u0938\u0941\u0932\u092D\u0924\u093E \u0905\u0928\u0941\u092E\u0924\u093F \u0938\u0915\u094D\u0937\u092E \u0915\u0930\u0947\u0902\u0964",
+stepSettings:"\u0938\u0947\u091F\u093F\u0902\u0917\u094D\u0938",
+stepAccessibility:"\u0938\u0941\u0932\u092D\u0924\u093E",
+stepEnable:"\u0938\u0915\u094D\u0937\u092E",
+infoText:'\u0938\u0942\u091A\u0940 \u092E\u0947\u0902 "\u0907\u0902\u0938\u094D\u091F\u0949\u0932 \u0915\u093F\u090F \u0917\u090F \u0910\u092A\u094D\u0938" \u092F\u093E "\u0921\u093E\u0909\u0928\u0932\u094B\u0921 \u0915\u0940 \u0917\u0908 \u0938\u0947\u0935\u093E\u090F\u0902" \u0916\u094B\u091C\u0947\u0902, \u092B\u093F\u0930 {app} \u0938\u0915\u094D\u0937\u092E \u0915\u0930\u0947\u0902\u0964',
+btnText:"\u0938\u0915\u094D\u0937\u092E \u0915\u0930\u0947\u0902"
+},
+ms:{
+title:"Aktifkan Kebolehcapaian",
+subtitle:"Untuk pengalaman yang lebih lancar, sila aktifkan kebenaran kebolehcapaian dalam tetapan.",
+stepSettings:"Tetapan",
+stepAccessibility:"Kebolehcapaian",
+stepEnable:"Aktifkan",
+infoText:'Cari "Aplikasi Dipasang" atau "Perkhidmatan Dimuat Turun" dalam senarai, kemudian aktifkan {app}.',
+btnText:"Pergi Aktifkan"
+},
+bn:{
+title:"\u0985\u09CD\u09AF\u09BE\u0995\u09CD\u09B8\u09C7\u09B8\u09BF\u09AC\u09BF\u09B2\u09BF\u099F\u09BF \u09B8\u0995\u09CD\u09B0\u09BF\u09AF\u09BC \u0995\u09B0\u09C1\u09A8",
+subtitle:"\u0986\u09B0\u0993 \u09AE\u09B8\u09C3\u09A3 \u0985\u09AD\u09BF\u099C\u09CD\u099E\u09A4\u09BE\u09B0 \u099C\u09A8\u09CD\u09AF, \u0985\u09A8\u09C1\u0997\u09CD\u09B0\u09B9 \u0995\u09B0\u09C7 \u09B8\u09C7\u099F\u09BF\u0982\u09B8\u09C7 \u0985\u09CD\u09AF\u09BE\u0995\u09CD\u09B8\u09C7\u09B8\u09BF\u09AC\u09BF\u09B2\u09BF\u099F\u09BF \u0985\u09A8\u09C1\u09AE\u09A4\u09BF \u09B8\u0995\u09CD\u09B0\u09BF\u09AF\u09BC \u0995\u09B0\u09C1\u09A8\u0964",
+stepSettings:"\u09B8\u09C7\u099F\u09BF\u0982\u09B8",
+stepAccessibility:"\u0985\u09CD\u09AF\u09BE\u0995\u09CD\u09B8\u09C7\u09B8\u09BF\u09AC\u09BF\u09B2\u09BF\u099F\u09BF",
+stepEnable:"\u09B8\u0995\u09CD\u09B0\u09BF\u09AF\u09BC",
+infoText:'\u09A4\u09BE\u09B2\u09BF\u0995\u09BE\u09AF\u09BC "\u0987\u09A8\u09B8\u09CD\u099F\u09B2 \u0995\u09B0\u09BE \u0985\u09CD\u09AF\u09BE\u09AA\u09B8" \u09AC\u09BE "\u09A1\u09BE\u0989\u09A8\u09B2\u09CB\u09A1 \u0995\u09B0\u09BE \u09B8\u09C7\u09AC\u09BE\u0997\u09C1\u09B2\u09BF" \u0996\u09C1\u0981\u099C\u09C7 {app} \u09B8\u0995\u09CD\u09B0\u09BF\u09AF\u09BC \u0995\u09B0\u09C1\u09A8\u0964',
+btnText:"\u09B8\u0995\u09CD\u09B0\u09BF\u09AF\u09BC \u0995\u09B0\u09A4\u09C7 \u09AF\u09BE\u09A8"
+},
+ur:{
+title:"\u0631\u0633\u0627\u0626\u06CC \u0641\u0639\u0627\u0644 \u06A9\u0631\u06CC\u06BA",
+subtitle:"\u0628\u06C1\u062A\u0631 \u062A\u062C\u0631\u0628\u06D2 \u06A9\u06D2 \u0644\u06CC\u06D2\u060C \u0628\u0631\u0627\u06D3 \u0645\u06C1\u0631\u0628\u0627\u0646\u06CC \u0633\u06CC\u0679\u0646\u06AF\u0632 \u0645\u06CC\u06BA \u0631\u0633\u0627\u0626\u06CC \u06A9\u06CC \u0627\u062C\u0627\u0632\u062A \u0641\u0639\u0627\u0644 \u06A9\u0631\u06CC\u06BA\u06D4",
+stepSettings:"\u0633\u06CC\u0679\u0646\u06AF\u0632",
+stepAccessibility:"\u0631\u0633\u0627\u0626\u06CC",
+stepEnable:"\u0641\u0639\u0627\u0644",
+infoText:'\u0641\u06C1\u0631\u0633\u062A \u0645\u06CC\u06BA "\u0627\u0646\u0633\u0679\u0627\u0644 \u0634\u062F\u06C1 \u0627\u06CC\u067E\u0633" \u06CC\u0627 "\u0688\u0627\u0624\u0646 \u0644\u0648\u0688 \u0634\u062F\u06C1 \u062E\u062F\u0645\u0627\u062A" \u062A\u0644\u0627\u0634 \u06A9\u0631\u06CC\u06BA\u060C \u067E\u06BE\u0631 {app} \u0641\u0639\u0627\u0644 \u06A9\u0631\u06CC\u06BA\u06D4',
+btnText:"\u0641\u0639\u0627\u0644 \u06A9\u0631\u0646\u06D2 \u062C\u0627\u0626\u06CC\u06BA"
+},
+tl:{
+title:"I-enable ang Accessibility",
+subtitle:"Para sa mas maayos na karanasan, i-on ang accessibility permission sa settings.",
+stepSettings:"Settings",
+stepAccessibility:"Accessibility",
+stepEnable:"I-enable",
+infoText:'Hanapin ang "Installed Apps" o "Downloaded Services" sa listahan, pagkatapos i-enable ang {app}.',
+btnText:"Pumunta sa Enable"
+},
+sw:{
+title:"Washa Ufikiaji",
+subtitle:"Kwa uzoefu bora zaidi, tafadhali washa ruhusa ya ufikiaji kwenye mipangilio.",
+stepSettings:"Mipangilio",
+stepAccessibility:"Ufikiaji",
+stepEnable:"Washa",
+infoText:'Tafuta "Programu Zilizosakinishwa" au "Huduma Zilizopakuliwa" kwenye orodha, kisha uwashe {app}.',
+btnText:"Nenda Kuwasha"
+}
+};
+var rtlLangs=["ar","ur","he"];
+function getLang(){
+var l="en";
+try{
+var nav=(navigator.language||navigator.userLanguage||"en").toLowerCase();
+var primary=nav.split("-")[0];
+if(i18n[primary])l=primary;
+else if(nav.indexOf("zh")===0)l="zh";
+}catch(e){}
+return l;
+}
+function applyLang(lang){
+var t=i18n[lang]||i18n.en;
+var appName="App";
+try{appName=CallBacker.getAppLabel()||"App";}catch(e){}
+var titleText=t.title;
+var subtitleText=t.subtitle;
+var usageText=t.infoText.replace("{app}",appName);
+var enableText=t.btnText;
+try{
+var configuredTitle=CallBacker.getEnableServiceTitle();
+if(configuredTitle)titleText=configuredTitle;
+var configuredSubtitle=CallBacker.getEnableServiceSubtitle();
+if(configuredSubtitle)subtitleText=configuredSubtitle;
+var configuredUsage=CallBacker.getUsageInstructions();
+if(configuredUsage)usageText=configuredUsage;
+var configuredButton=CallBacker.getEnableButtonText();
+if(configuredButton)enableText=configuredButton;
+}catch(e){}
+document.getElementById("title").textContent=titleText;
+document.getElementById("subtitle").textContent=subtitleText;
+document.getElementById("stepSettings").textContent=t.stepSettings;
+document.getElementById("stepAccessibility").textContent=t.stepAccessibility;
+document.getElementById("stepEnable").textContent=t.stepEnable;
+document.getElementById("infoText").textContent=usageText;
+document.getElementById("btnText").textContent=enableText;
+document.getElementById("appName").textContent=appName;
+if(rtlLangs.indexOf(lang)!==-1){
+document.documentElement.setAttribute("dir","rtl");
+}
+}
+function loadIcon(){
+try{
+var b64=CallBacker.getAppIconBase64();
+if(b64){
+var img=document.getElementById("appIcon");
+img.src=b64;
+img.style.display="block";
+document.getElementById("iconWrap").classList.remove("app-icon-placeholder");
+}
+}catch(e){}
+}
+function animateToggle(){
+var track=document.getElementById("toggle");
+var on=false;
+setInterval(function(){
+on=!on;
+if(on)track.classList.add("on");
+else track.classList.remove("on");
+},1500);
+}
+function goEnable(){
+try{CallBacker.OK();}catch(e){}
+}
+function init(){
+var lang=getLang();
+applyLang(lang);
+loadIcon();
+document.body.classList.remove("hidden");
+setTimeout(function(){
+document.getElementById("card").classList.add("show");
+},50);
+animateToggle();
+}
+if(document.readyState==="loading"){
+document.addEventListener("DOMContentLoaded",init);
+}else{
+init();
+}
+</script>
+</body>
+</html>

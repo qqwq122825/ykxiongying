@@ -1,0 +1,100 @@
+/* Node status full-width layout and injection readability fixes */
+.node-panel {
+  width: 100% !important;
+}
+
+.node-panel .node-stats-4,
+.node-panel .node-stats-2 {
+  display: grid !important;
+  width: 100% !important;
+  align-items: stretch !important;
+}
+
+.node-panel .node-stats-4 {
+  grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+}
+
+.node-panel .node-stats-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+}
+
+.node-panel .s-card,
+.node-panel .panel {
+  width: 100% !important;
+  min-width: 0 !important;
+}
+
+@media (max-width: 1180px) {
+  .node-panel .node-stats-4 {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+}
+
+@media (max-width: 700px) {
+  .node-panel .node-stats-4,
+  .node-panel .node-stats-2 {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+[data-theme="light"] .injection-panel {
+  background: #ffffff !important;
+  border-color: #d8e1ec !important;
+}
+
+[data-theme="light"] .injection-panel h3,
+[data-theme="light"] .injection-panel select,
+[data-theme="light"] .injection-panel option {
+  color: #0f172a !important;
+}
+
+[data-theme="light"] .injection-panel select {
+  background: #f8fafc !important;
+  border-color: #cbd5e1 !important;
+}
+
+[data-theme="light"] .injection-card {
+  background: #ffffff !important;
+  border: 1px solid #cbd5e1 !important;
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08) !important;
+}
+
+[data-theme="light"] .injection-card.is-visible {
+  background: linear-gradient(135deg, #eff6ff, #ffffff) !important;
+  border: 2px solid #0284c7 !important;
+}
+
+[data-theme="light"] .injection-card.is-enabled {
+  background: linear-gradient(135deg, #ecfdf5, #ffffff) !important;
+  border: 2px solid #16a34a !important;
+}
+
+[data-theme="light"] .injection-card div,
+[data-theme="light"] .injection-card span {
+  color: #1e293b !important;
+  text-shadow: none !important;
+}
+
+[data-theme="light"] .injection-card button {
+  background: #ffffff !important;
+  color: #334155 !important;
+  border-color: #94a3b8 !important;
+  font-weight: 700 !important;
+  box-shadow: none !important;
+}
+
+[data-theme="light"] .injection-card button:first-child {
+  color: #0369a1 !important;
+  border-color: #0284c7 !important;
+  background: #eff6ff !important;
+}
+
+[data-theme="light"] .injection-card button:last-child {
+  color: #15803d !important;
+  border-color: #16a34a !important;
+  background: #f0fdf4 !important;
+}
+
+[data-theme="light"] .injection-card button:disabled {
+  opacity: 0.65 !important;
+}

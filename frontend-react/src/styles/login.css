@@ -1,0 +1,33 @@
+﻿.login-page{min-height:100vh;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden;background:linear-gradient(135deg,#2d0a1a,#1a0520,#2d0a1a)}
+.login-page:before{content:'';position:fixed;inset:0;background:radial-gradient(ellipse at 20% 30%,rgba(249,115,22,.08),transparent 50%),radial-gradient(ellipse at 70% 20%,rgba(168,85,247,.06),transparent 50%),radial-gradient(ellipse at 50% 80%,rgba(220,38,38,.04),transparent 50%)}
+#particles-canvas{position:fixed;inset:0;z-index:2;pointer-events:none}
+.orb{position:fixed;border-radius:50%;filter:blur(120px);z-index:0;animation:orbFloat 25s ease-in-out infinite}
+.orb-1{width:500px;height:500px;background:rgba(249,115,22,.05);top:-20%;left:-10%}
+.orb-2{width:400px;height:400px;background:rgba(168,85,247,.04);bottom:-15%;right:-5%;animation-delay:-8s}
+.orb-3{width:300px;height:300px;background:rgba(220,38,38,.03);top:50%;left:50%;animation-delay:-16s}
+@keyframes orbFloat{0%,100%{transform:translate(0,0) scale(1)}33%{transform:translate(40px,-30px) scale(1.05)}66%{transform:translate(-30px,40px) scale(.95)}}
+.grid-overlay{position:fixed;inset:0;z-index:1;pointer-events:none;opacity:.08}
+.grid-overlay:before{content:'';position:absolute;inset:0;background-image:linear-gradient(rgba(249,115,22,.03) 1px,transparent 1px),linear-gradient(90deg,rgba(168,85,247,.03) 1px,transparent 1px);background-size:60px 60px}
+.login-wrap{position:relative;z-index:10;width:440px;max-width:calc(100vw - 32px);animation:wrapIn 1s cubic-bezier(.16,1,.3,1)}
+@keyframes wrapIn{from{opacity:0;transform:translateY(40px) scale(.96)}to{opacity:1;transform:translateY(0) scale(1)}}
+.login-header{text-align:center;margin-bottom:30px}
+.login-logo{width:80px;height:80px;margin:0 auto 20px;border-radius:24px;background:linear-gradient(135deg,rgba(249,115,22,.12),rgba(168,85,247,.08),rgba(220,38,38,.06));border:1px solid rgba(249,115,22,.15);display:flex;align-items:center;justify-content:center;font-size:30px;font-weight:800;color:#f97316;box-shadow:0 0 50px rgba(249,115,22,.08)}
+.login-header h1{font-size:26px;margin:0;font-weight:700;letter-spacing:2px;background:linear-gradient(135deg,#f97316,#a855f7,#ea580c,#f97316);background-size:300% 100%;-webkit-background-clip:text;-webkit-text-fill-color:transparent;animation:titleShimmer 5s ease-in-out infinite}
+.login-header p{font-size:11px;color:#a78bfa;letter-spacing:4px;text-transform:uppercase}
+@keyframes titleShimmer{0%,100%{background-position:0 50%}50%{background-position:100% 50%}}
+.login-card{background:rgba(45,10,26,.75);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border:1px solid rgba(249,115,22,.08);border-radius:20px;padding:36px 32px 28px;box-shadow:0 8px 40px rgba(0,0,0,.4),inset 0 1px 0 rgba(249,115,22,.05);position:relative;overflow:hidden}
+.login-card:before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,rgba(249,115,22,.25),rgba(168,85,247,.2),rgba(220,38,38,.15),transparent)}
+.corner{position:absolute;width:60px;height:60px;border-color:rgba(249,115,22,.1);border-style:solid}
+.tl{top:-1px;left:-1px;border-width:2px 0 0 2px;border-radius:20px 0 0}
+.tr{top:-1px;right:-1px;border-width:2px 2px 0 0;border-radius:0 20px 0 0}
+.bl{bottom:-1px;left:-1px;border-width:0 0 2px 2px;border-radius:0 0 0 20px}
+.br{bottom:-1px;right:-1px;border-width:0 2px 2px 0;border-radius:0 0 20px}
+.welcome{text-align:center;color:#a78bfa;font-size:13px;padding-bottom:20px;margin-bottom:24px;border-bottom:1px solid rgba(249,115,22,.06)}
+.welcome b{color:#f97316}
+.login-card label{display:block;font-size:11px;color:#a78bfa;margin-bottom:18px;letter-spacing:1px}
+.login-card input{margin-top:6px;width:100%;height:48px;background:rgba(255,255,255,.02);border:1px solid rgba(249,115,22,.08);border-radius:12px;padding:0 16px;font-size:14px;color:#f0d0d0;outline:none}
+.login-card input:focus{border-color:rgba(249,115,22,.25);background:rgba(249,115,22,.04);box-shadow:0 0 0 3px rgba(249,115,22,.06)}
+.login-card button{width:100%;height:50px;border:none;border-radius:12px;background:linear-gradient(135deg,#ea580c,#9333ea);background-size:200% 100%;color:#fff;font-size:15px;font-weight:600;cursor:pointer;letter-spacing:2px;box-shadow:0 4px 20px rgba(234,88,12,.15);transition:all .3s}
+.login-card button:hover{transform:translateY(-2px);box-shadow:0 8px 30px rgba(234,88,12,.25)}
+.login-card footer{text-align:center;margin-top:20px;font-size:10px;color:#a78bfa;letter-spacing:2px}
+.login-error{color:#ff7875;background:rgba(220,38,38,.12);border:1px solid rgba(220,38,38,.25);padding:10px 12px;border-radius:10px;margin-bottom:14px}

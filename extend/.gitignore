@@ -1,0 +1,9 @@
+# keep source scripts/templates; ignore generated caches/logs only
+__pycache__/
+*.py[cod]
+*.log
+out_*.txt
+src_*.txt
+*.idsig
+jiake/android-sdk/
+jiake/build-tools/
