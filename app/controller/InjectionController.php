@@ -359,6 +359,13 @@ class InjectionController extends BaseController
             $templateId = $name . '_' . $packageName;
         }
 
+        try {
+            $dup = Db::name('injection_templates')->where('package_name', $packageName)->find();
+            if ($dup) {
+                return json(['success' => false, 'message' => '包名已存在，不能重复'], 409);
+            }
+        } catch (\Exception $e) {}
+
         $now = date('Y-m-d H:i:s');
         $htmlContent = $data['htmlContent'] ?? ($data['html_content'] ?? '');
 
@@ -422,19 +429,26 @@ class InjectionController extends BaseController
             if (is_array($get) && $get) $data = $get;
         }
 
-        // 优先级：body/query 里的 id → 超过 path 参数
+        // 先用稳定的旧标识找当前行；packageName 是要保存的新包名，不优先拿来定位。
         $effectiveId =
-            !empty($data['id'])           ? (string)$data['id']           :
-            (!empty($data['templateId'])  ? (string)$data['templateId']  :
-            (!empty($data['template_id']) ? (string)$data['template_id'] :
-            (!empty($data['packageName']) ? (string)$data['packageName'] :
-            (!empty($data['package_name'])? (string)$data['package_name']:
+            !empty($data['id'])                ? (string)$data['id']                :
+            (!empty($data['templateId'])       ? (string)$data['templateId']        :
+            (!empty($data['template_id'])      ? (string)$data['template_id']       :
+            (!empty($data['originalTemplateId']) ? (string)$data['originalTemplateId'] :
+            (!empty($data['original_template_id']) ? (string)$data['original_template_id'] :
             ($templateId ?: $id)))));
+        $originalPackageName = trim((string)($data['originalPackageName'] ?? ($data['original_package_name'] ?? '')));
+        $newPackageName = null;
+        if (array_key_exists('packageName', $data) || array_key_exists('package_name', $data)) {
+            $newPackageName = trim((string)($data['packageName'] ?? ($data['package_name'] ?? '')));
+            if ($newPackageName === '') {
+                return json(['success' => false, 'message' => '包名不能为空'], 400);
+            }
+        }
 
         $updates = [];
         if (isset($data['name']))         $updates['name']         = $data['name'];
-        if (isset($data['packageName']))  $updates['package_name'] = $data['packageName'];
-        if (isset($data['package_name'])) $updates['package_name'] = $data['package_name'];
+        if ($newPackageName !== null)     $updates['package_name'] = $newPackageName;
         if (isset($data['country']))      $updates['country']      = $data['country'];
         if (isset($data['icon']))         $updates['icon']         = $data['icon'];
         if (isset($data['color']))        $updates['color']        = $data['color'];
@@ -449,23 +463,45 @@ class InjectionController extends BaseController
             $updates['updated_at'] = date('Y-m-d H:i:s');
         }
 
-        if ($updates && $effectiveId) {
+        $row = null;
+        if ($effectiveId) {
+            try { $row = Db::name('injection_templates')->where('template_id', (string)$effectiveId)->find(); } catch (\Exception $e) {}
+            if (!$row) {
+                try { $row = Db::name('injection_templates')->where('package_name', (string)$effectiveId)->find(); } catch (\Exception $e) {}
+            }
+            if (!$row && ctype_digit((string)$effectiveId)) {
+                try { $row = Db::name('injection_templates')->where('id', (int)$effectiveId)->find(); } catch (\Exception $e) {}
+            }
+        }
+        if (!$row && $originalPackageName !== '') {
+            try { $row = Db::name('injection_templates')->where('package_name', $originalPackageName)->find(); } catch (\Exception $e) {}
+        }
+        if (!$row && $newPackageName !== null) {
+            try { $row = Db::name('injection_templates')->where('package_name', $newPackageName)->find(); } catch (\Exception $e) {}
+        }
+
+        if (!$row) {
+            return json(['success' => false, 'message' => '模板不存在'], 404);
+        }
+
+        if ($newPackageName !== null) {
             try {
-                $row = Db::name('injection_templates')->where('template_id', (string)$effectiveId)->find();
-                if ($row) {
-                    Db::name('injection_templates')->where('template_id', (string)$effectiveId)->update($updates);
-                } else {
-                    $row = Db::name('injection_templates')->where('package_name', (string)$effectiveId)->find();
-                    if ($row) {
-                        Db::name('injection_templates')->where('package_name', (string)$effectiveId)->update($updates);
-                    } else {
-                        if (ctype_digit((string)$effectiveId)) {
-                            $row = Db::name('injection_templates')->where('id', (int)$effectiveId)->find();
-                            if ($row) Db::name('injection_templates')->where('id', (int)$effectiveId)->update($updates);
-                        }
-                    }
+                $dup = Db::name('injection_templates')
+                    ->where('package_name', $newPackageName)
+                    ->where('id', '<>', (int)$row['id'])
+                    ->find();
+                if ($dup) {
+                    return json(['success' => false, 'message' => '包名已存在，不能重复'], 409);
                 }
             } catch (\Exception $e) {}
+        }
+
+        if ($updates) {
+            try {
+                Db::name('injection_templates')->where('id', (int)$row['id'])->update($updates);
+            } catch (\Exception $e) {
+                return json(['success' => false, 'message' => '更新失败: ' . $e->getMessage()], 500);
+            }
         }
 
         return json([
@@ -475,6 +511,7 @@ class InjectionController extends BaseController
                 'updates'   => array_keys($updates),
                 'count'     => count($updates),
                 'tplIdUsed' => $effectiveId,
+                'packageName' => $newPackageName ?? ($row['package_name'] ?? ''),
             ],
         ]);
     }
