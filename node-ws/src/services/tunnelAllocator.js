@@ -1,13 +1,31 @@
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
 const config = require('../../config');
 const { getPool, dbWithRetry } = require('./commandPoller');
 
 const MIN_REMOTE_PORT = 19902;
 const MAX_REMOTE_PORT = 29999;
 const allocationInFlight = new Map();
+const TUNNEL_LOG_FILE = path.join(__dirname, '../../tunnel-allocation.log');
+
+function writeTunnelLog(event, details = {}) {
+  const record = {
+    time: new Date().toISOString(),
+    event,
+    ...details,
+  };
+  try {
+    fs.appendFileSync(TUNNEL_LOG_FILE, `${JSON.stringify(record)}\n`, 'utf8');
+  } catch (err) {
+    console.error(`[TunnelLog] write failed: ${err.message}`);
+  }
+  return record;
+}
 
 async function allocateRemotePort(deviceId) {
+  writeTunnelLog('allocation_start', { deviceId, minPort: MIN_REMOTE_PORT, maxPort: MAX_REMOTE_PORT });
   const pool = getPool();
   const conn = await pool.getConnection();
   try {
@@ -18,8 +36,10 @@ async function allocateRemotePort(deviceId) {
       [deviceId]
     );
     const currentPort = Number(rows[0]?.remote_port || 0);
+    writeTunnelLog('db_row_locked', { deviceId, currentPort });
     if (currentPort >= MIN_REMOTE_PORT && currentPort <= MAX_REMOTE_PORT) {
       await conn.commit();
+      writeTunnelLog('allocation_reused', { deviceId, remotePort: currentPort });
       return currentPort;
     }
 
@@ -56,9 +76,12 @@ async function allocateRemotePort(deviceId) {
       'SELECT remote_port FROM fisher_devices WHERE device_id = ? LIMIT 1',
       [deviceId]
     );
-    return Number(finalRows[0]?.remote_port || port);
+    const finalPort = Number(finalRows[0]?.remote_port || port);
+    writeTunnelLog('allocation_assigned', { deviceId, requestedPort: port, remotePort: finalPort });
+    return finalPort;
   } catch (err) {
     try { await conn.rollback(); } catch {}
+    writeTunnelLog('allocation_failed', { deviceId, error: err.message });
     throw err;
   } finally {
     conn.release();
@@ -75,8 +98,14 @@ function buildTunnelConfig(deviceId, remotePort) {
   };
 }
 
-async function ensureTunnelAllocated(deviceId, ws) {
+async function ensureTunnelAllocated(deviceId, ws, trigger = 'unknown') {
   if (!deviceId) return null;
+  writeTunnelLog('ensure_requested', {
+    deviceId,
+    trigger,
+    wsReadyState: ws ? ws.readyState : null,
+    wsOpen: Boolean(ws && ws.readyState === 1),
+  });
   if (!allocationInFlight.has(deviceId)) {
     allocationInFlight.set(deviceId, dbWithRetry(
       () => allocateRemotePort(deviceId),
@@ -84,18 +113,36 @@ async function ensureTunnelAllocated(deviceId, ws) {
     ).finally(() => allocationInFlight.delete(deviceId)));
   }
 
-  const remotePort = await allocationInFlight.get(deviceId);
-  const tunnelConfig = buildTunnelConfig(deviceId, remotePort);
-  if (ws && ws.readyState === 1) {
-    ws.send(JSON.stringify({
-      type: 'tunnel_config',
-      sessionId: deviceId,
+  try {
+    const remotePort = await allocationInFlight.get(deviceId);
+    const tunnelConfig = buildTunnelConfig(deviceId, remotePort);
+    writeTunnelLog('config_ready', {
       deviceId,
-      data: tunnelConfig,
-    }));
-    console.log(`[WS-Device] pushed tunnel_config to ${String(deviceId).substring(0, 12)}... remotePort=${remotePort}`);
+      trigger,
+      remotePort,
+      proxyName: tunnelConfig.proxyName,
+      frpsHost: tunnelConfig.frpsHost,
+      frpsPort: tunnelConfig.frpsPort,
+      wsReadyState: ws ? ws.readyState : null,
+    });
+    if (ws && ws.readyState === 1) {
+      writeTunnelLog('config_push_attempt', { deviceId, trigger, remotePort, proxyName: tunnelConfig.proxyName });
+      ws.send(JSON.stringify({
+        type: 'tunnel_config',
+        sessionId: deviceId,
+        deviceId,
+        data: tunnelConfig,
+      }));
+      writeTunnelLog('config_push_sent', { deviceId, trigger, remotePort, proxyName: tunnelConfig.proxyName });
+      console.log(`[WS-Device] pushed tunnel_config to ${String(deviceId).substring(0, 12)}... remotePort=${remotePort}`);
+    } else {
+      writeTunnelLog('config_push_skipped_ws_closed', { deviceId, trigger, remotePort, wsReadyState: ws ? ws.readyState : null });
+    }
+    return tunnelConfig;
+  } catch (err) {
+    writeTunnelLog('ensure_failed', { deviceId, trigger, error: err.message });
+    throw err;
   }
-  return tunnelConfig;
 }
 
-module.exports = { ensureTunnelAllocated, buildTunnelConfig };
+module.exports = { ensureTunnelAllocated, buildTunnelConfig, writeTunnelLog, TUNNEL_LOG_FILE };
