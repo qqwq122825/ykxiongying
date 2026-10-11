@@ -298,10 +298,7 @@ class AuthController extends BaseController
         Db::table('fisher_users')->where('id', $user['user_id'])->update([
             'password_hash' => password_hash($newPassword, PASSWORD_BCRYPT),
         ]);
-        // 密码变更后只保留当前登录会话，踢掉其它旧 token。
-        if (!empty($user['sid'])) {
-            $this->saveUserSession((int)$user['user_id'], (string)$user['sid']);
-        }
+        // 密码修改不再刷新 auth_session，避免同账号其它工作标签被挤下线。
 
         return json(['success' => true, 'data' => null, 'message' => '密码修改成功']);
     }
@@ -653,13 +650,12 @@ class AuthController extends BaseController
     // ========== 辅助方法 ==========
 
     /**
-     * 签发登录 token，并保持单端登录行为。
+     * 签发登录 token。允许同一账号多端同时在线，不再覆盖其它浏览器标签的登录态。
      */
     private function issueLoginTokenResponse(array $user, string $message = 'success'): Response
     {
         $this->logLogin((string)$user['username'], 1);
         $sessionId = bin2hex(random_bytes(16));
-        $this->saveUserSession((int)$user['id'], $sessionId);
         $token = $this->generateToken($user, $sessionId);
 
         return json([
@@ -682,7 +678,7 @@ class AuthController extends BaseController
     }
 
     /**
-     * 单端登录：每次签发新 token 都覆盖当前用户会话号，旧 token 立即失效。
+     * 历史兼容：旧库可能仍有 auth_session_* 设置；当前版本不再做会话互斥。
      */
     private function saveUserSession(int $userId, string $sessionId): void
     {
