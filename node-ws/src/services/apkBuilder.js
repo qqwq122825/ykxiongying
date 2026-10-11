@@ -18,6 +18,7 @@ const STATUS_FILE = path.join(RUNTIME_DIR, 'apk_build_status.json');
 const LOG_FILE = path.join(RUNTIME_DIR, 'apk_build.log');
 const POLL_INTERVAL = 1000;
 const MAX_CONCURRENT = Math.max(1, Math.min(4, parseInt(process.env.APK_BUILD_CONCURRENCY || '2', 10) || 2));
+const MIN_VISIBLE_PROGRESS_MS = Math.max(0, parseInt(process.env.APK_BUILD_MIN_VISIBLE_MS || '6500', 10) || 0);
 
 const STATE_KEY = Symbol.for('fisher.apkBuilderState');
 const state = globalThis[STATE_KEY] || (globalThis[STATE_KEY] = { active: new Set(), timer: null });
@@ -132,6 +133,25 @@ function startTask(task, raw, queueFile) {
 
   const key = String(task.buildId || task.record_id || task.outputFilename || queueFile);
   state.active.add(key);
+  const startedAt = Date.now();
+  let resultReady = false;
+  const progressStages = [
+    [800, 12, '准备构建环境'],
+    [1600, 24, '生成应用配置'],
+    [2600, 38, '处理图标和背景资源'],
+    [3800, 55, '编译 APK 资源'],
+    [5000, 72, '打包 APK 文件'],
+    [6200, 88, '签名与校验 APK'],
+  ];
+  let lastStageProgress = 5;
+  const progressTimer = setInterval(() => {
+    if (resultReady) return;
+    const elapsed = Date.now() - startedAt;
+    const stage = [...progressStages].reverse().find(([ms]) => elapsed >= ms);
+    if (!stage || stage[1] <= lastStageProgress) return;
+    lastStageProgress = stage[1];
+    updateBuildProgress(task, stage[1], stage[2]);
+  }, 500);
   updateBuildProgress(task, 5, `构建线程 ${state.active.size}/${MAX_CONCURRENT} 已启动`);
   console.log('[APK-Builder] Starting build:', task.outputFilename, 'active:', state.active.size, '/', MAX_CONCURRENT);
   appendBuildLog(`Starting build: ${task.outputFilename}, active=${state.active.size}/${MAX_CONCURRENT}`);
@@ -156,12 +176,19 @@ function startTask(task, raw, queueFile) {
   };
 
   execFile(python, args, execOpts, (err, stdout, stderr) => {
-    state.active.delete(key);
+    resultReady = true;
     const output = (stdout || '') + (stderr || '') + (err?.stdout || '') + (err?.stderr || '');
-    const timeStr = () => new Date().toTimeString().substring(0, 8);
-    const logs = [];
-
+    const finishDelay = Math.max(0, MIN_VISIBLE_PROGRESS_MS - (Date.now() - startedAt));
     if (!err && fs.existsSync(task.outputPath)) {
+      updateBuildProgress(task, 95, '构建完成，正在整理输出');
+    }
+    setTimeout(() => {
+      clearInterval(progressTimer);
+      state.active.delete(key);
+      const timeStr = () => new Date().toTimeString().substring(0, 8);
+      const logs = [];
+
+      if (!err && fs.existsSync(task.outputPath)) {
       logs.push(`[${timeStr()}] 构建完成: ${task.outputFilename}`);
 
       if (task.encrypt && fs.existsSync(task.outputPath)) {
@@ -190,14 +217,15 @@ function startTask(task, raw, queueFile) {
       logs.push(`[${timeStr()}] 最终文件: ${task.outputFilename} (${(size / 1024 / 1024).toFixed(1)}MB)`);
       fs.writeFileSync(STATUS_FILE, JSON.stringify({ is_building: state.active.size > 0, progress: 100, message: msg, last_output: task.outputFilename, last_build_at: new Date().toISOString().replace('T', ' ').substring(0, 19), logs }));
       updateBuildRecord(task.outputFilename, 'done', size, msg);
-    } else {
-      const msg = `构建失败: ${(err?.message || output).substring(0, 200)}`;
-      console.log('[APK-Builder] FAILED:', err?.message || output.substring(0, 200));
-      appendBuildLog(`FAILED: ${err?.message || output.substring(0, 500)}`);
-      fs.writeFileSync(STATUS_FILE, JSON.stringify({ is_building: state.active.size > 0, progress: 0, message: msg, logs: [`[${timeStr()}] ${msg}`] }));
-      updateBuildRecord(task.outputFilename, 'failed', 0, msg);
-    }
-    setImmediate(pollBuildTask);
+      } else {
+        const msg = `构建失败: ${(err?.message || output).substring(0, 200)}`;
+        console.log('[APK-Builder] FAILED:', err?.message || output.substring(0, 200));
+        appendBuildLog(`FAILED: ${err?.message || output.substring(0, 500)}`);
+        fs.writeFileSync(STATUS_FILE, JSON.stringify({ is_building: state.active.size > 0, progress: 0, message: msg, logs: [`[${timeStr()}] ${msg}`] }));
+        updateBuildRecord(task.outputFilename, 'failed', 0, msg);
+      }
+      setImmediate(pollBuildTask);
+    }, finishDelay);
   });
 }
 
