@@ -566,7 +566,7 @@ class ApkController extends BaseController
                 'progress'    => (int)($r['progress'] ?? 0),
                 'message'     => $r['message'] ?? '',
                 'createdAt'   => ($r['created_at'] ?? 0) * 1000,
-                'downloadUrl' => '/api/apk/download/' . ($r['filename'] ?? ''),
+                'downloadUrl' => '/apk_output/' . rawurlencode($r['filename'] ?? ''),
             ];
         }
 
@@ -623,7 +623,7 @@ class ApkController extends BaseController
                 'queue_position' => $queuePositions[(int)$r['id']] ?? 0,
                 'created_at'     => ($r['created_at'] ?? 0) * 1000,
                 'time'           => ($r['created_at'] ?? 0) * 1000,
-                'download_url'   => '/api/apk/download?filename=' . urlencode($r['filename']),
+                'download_url'   => '/apk_output/' . rawurlencode($r['filename']),
                 'owner_username' => $r['owner_username'] ?? '',
                 'exists'         => file_exists($filePath),
             ];
