@@ -15,6 +15,27 @@ $errors = [];
 function h($value): string { return htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8'); }
 function postv(string $key, string $default = ''): string { return trim((string)($_POST[$key] ?? $default)); }
 function random_secret(): string { return bin2hex(random_bytes(32)); }
+
+function existing_install_detected(string $envFile): bool {
+    if (!is_file($envFile) || !extension_loaded('pdo_mysql')) return false;
+    $env = @parse_ini_file($envFile, true, INI_SCANNER_RAW);
+    if (!is_array($env)) return false;
+    $db = $env['DATABASE'] ?? [];
+    $host = trim((string)($db['HOSTNAME'] ?? '127.0.0.1'));
+    $port = trim((string)($db['HOSTPORT'] ?? '3306'));
+    $name = trim((string)($db['DB_NAME'] ?? $db['DATABASE'] ?? ''));
+    $user = trim((string)($db['USERNAME'] ?? ''));
+    $pass = trim((string)($db['PASSWORD'] ?? ''));
+    if ($name === '' || $user === '') return false;
+    try {
+        $pdo = new PDO("mysql:host=$host;port=$port;dbname=$name;charset=utf8mb4", $user, $pass, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+        $table = $pdo->query("SHOW TABLES LIKE 'fisher_users'")->fetchColumn();
+        if (!$table) return false;
+        return (int)$pdo->query('SELECT COUNT(*) FROM fisher_users')->fetchColumn() > 0;
+    } catch (Throwable $e) {
+        return false;
+    }
+}
 function valid_username(string $username): bool { return (bool)preg_match('/^[A-Za-z0-9_.-]{3,64}$/', $username); }
 function valid_chat_id(string $chatId): bool { return $chatId === '' || (bool)preg_match('/^-?\d{5,20}$/', $chatId); }
 function valid_bot_token(string $token): bool { return $token === '' || (bool)preg_match('/^\d{5,20}:[A-Za-z0-9_-]{20,}$/', $token); }
@@ -64,7 +85,8 @@ function write_env_file(string $envFile, array $cfg): void {
     file_put_contents($envFile, $content, LOCK_EX);
 }
 
-$alreadyLocked = is_file($lockFile);
+$alreadyLocked = is_file($lockFile) || existing_install_detected($envFile);
+if ($alreadyLocked && !is_file($lockFile) && is_dir(dirname($lockFile))) { @file_put_contents($lockFile, 'installed_at=' . date('c') . "\nauto_detected=1\n", LOCK_EX); }
 $defaults = [
     'db_host' => '127.0.0.1',
     'db_port' => '3306',
