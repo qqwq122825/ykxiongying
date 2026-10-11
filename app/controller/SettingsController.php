@@ -185,8 +185,8 @@ class SettingsController extends BaseController
     }
 
     /**
-     * Telegram Webhook：用户给机器人发送任意消息，机器人自动返回 from.id 与 chat.id。
-     * 支持 /id、/start、/查询自己的id，也支持普通消息触发，方便管理员复制绑定。
+     * Telegram Webhook：用户给机器人发送任意消息，机器人只返回可绑定的 Chat ID。
+     * 支持 /id、/start、/查询自己的id，也支持普通消息触发。
      */
     public function telegramWebhook()
     {
@@ -207,36 +207,13 @@ class SettingsController extends BaseController
         }
 
         $chat = $message['chat'] ?? [];
-        $from = $message['from'] ?? [];
         $chatId = (string)($chat['id'] ?? '');
         if ($chatId === '') {
             return json(['success' => true, 'message' => 'ignored']);
         }
 
-        $fromId = (string)($from['id'] ?? '');
-        $username = trim((string)($from['username'] ?? ''));
-        $chatType = (string)($chat['type'] ?? 'private');
-        $chatTitle = trim((string)($chat['title'] ?? (($chat['first_name'] ?? '') . ' ' . ($chat['last_name'] ?? ''))));
-
-        $lines = [
-            '🔎 <b>Telegram ID 查询结果</b>',
-            '',
-            'User ID: <code>' . htmlspecialchars($fromId, ENT_QUOTES, 'UTF-8') . '</code>',
-            'Chat ID: <code>' . htmlspecialchars($chatId, ENT_QUOTES, 'UTF-8') . '</code>',
-            'Chat Type: <code>' . htmlspecialchars($chatType, ENT_QUOTES, 'UTF-8') . '</code>',
-        ];
-        if ($username !== '') {
-            $lines[] = 'Username: @' . htmlspecialchars($username, ENT_QUOTES, 'UTF-8');
-        }
-        if ($chatTitle !== '') {
-            $lines[] = 'Chat Name: ' . htmlspecialchars($chatTitle, ENT_QUOTES, 'UTF-8');
-        }
-        $lines[] = '';
-        $lines[] = $chatType === 'private'
-            ? '后台个人通知请填写上面的 Chat ID。'
-            : '群通知请填写上面的 Chat ID，群 ID 一般是 -100 开头。';
-
-        $this->sendTelegramMessage($botToken, $chatId, implode("\n", $lines));
+        $reply = '您的id是 <code>' . htmlspecialchars($chatId, ENT_QUOTES, 'UTF-8') . '</code>';
+        $this->sendTelegramMessage($botToken, $chatId, $reply);
         return json(['success' => true, 'message' => 'ok']);
     }
 
