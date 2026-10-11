@@ -98,7 +98,8 @@ class AuthController extends BaseController
         [$sent, $sendError] = $this->sendTelegramLoginCode($telegram, $user, $code);
         if (!$sent) {
             Db::table('fisher_settings')->where('key', $challengeKey)->delete();
-            return json(['success' => false, 'message' => 'Telegram 验证码发送失败: ' . $sendError], 502);
+            [$sendMessage, $httpStatus] = $this->formatTelegramLoginError($sendError);
+            return json(['success' => false, 'message' => $sendMessage], $httpStatus);
         }
 
         return json([
@@ -831,6 +832,22 @@ class AuthController extends BaseController
                 Db::table('fisher_settings')->where('key', $row['key'])->delete();
             }
         }
+    }
+
+    /** Convert Telegram API failures to user-facing validation errors instead of a generic 502. */
+    private function formatTelegramLoginError(string $error): array
+    {
+        $normalized = strtolower($error);
+        if (strpos($normalized, 'chat not found') !== false) {
+            return ['Telegram Chat ID 不可达，请先打开机器人发送 /start，或检查群聊 ID 是否为 -100 开头', 400];
+        }
+        if (strpos($normalized, 'bot was blocked') !== false || strpos($normalized, 'forbidden') !== false) {
+            return ['Telegram 机器人无法给该 Chat ID 发消息，请取消屏蔽机器人后重试', 400];
+        }
+        if (strpos($normalized, 'not found') !== false || strpos($normalized, 'unauthorized') !== false) {
+            return ['Telegram Bot Token 无效，请检查机器人 Token', 400];
+        }
+        return ['Telegram 验证码发送失败: ' . $error, 503];
     }
 
     /** Send the one-time login code using the same IPv4/proxy path as Telegram settings. */
