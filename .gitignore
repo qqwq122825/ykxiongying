@@ -1,0 +1,4 @@
+/runtime/
+/public/__codex_*.txt
+/node-ws/*.log
+/node-ws/.env
