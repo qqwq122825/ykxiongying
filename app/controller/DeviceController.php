@@ -178,7 +178,7 @@ class DeviceController extends BaseController
             }
         }
 
-        // 清掉这个设备已取/未取命令结果类缓存；保留 device_deleted:* 墓碑，防止设备仍在线时立刻重建脏数据。
+        // 清掉这个设备已取/未取命令结果类缓存，避免删除后残留旧命令结果。
         try {
             Db::table('fisher_settings')
                 ->where('key', 'like', 'cmd_result_%')
