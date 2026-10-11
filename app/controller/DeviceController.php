@@ -169,7 +169,6 @@ class DeviceController extends BaseController
         $deleted = [];
         foreach (array_values(array_unique($tables)) as $table) {
             $safeTable = str_replace('`', '', $table);
-            if (!$this->tableHasColumn($safeTable, 'device_id')) continue;
             try {
                 $n = Db::table($safeTable)->where('device_id', $deviceId)->delete();
                 if ($n) $deleted[$safeTable] = $n;
