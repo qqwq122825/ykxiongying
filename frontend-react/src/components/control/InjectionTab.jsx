@@ -41,6 +41,7 @@ export default function InjectionTab({
   injActiveIds = new Set(),
   injGrabbed = [],
   parseGrabbedData,
+  appList = [],
 }) {
   const [injectionActive, setInjectionActive] = useState(true)
   const [toggling, setToggling] = useState(false)
@@ -194,17 +195,35 @@ export default function InjectionTab({
     if (pkg) templateMap[pkg] = t
   })
 
-  // 从设备应用列表中提取完整应用对象
-  const appObjects = deviceApps.map(a => {
+  // 从设备应用列表中提取完整应用对象；合并父页面实时 appList，避免注入中心只读旧缓存导致数量少
+  const normalizeApp = (a) => {
     if (typeof a === 'string') return { packageName: a, appName: a }
+    if (!a || typeof a !== 'object') return { packageName: '', appName: '' }
     return {
-      packageName: a.packageName || a.package_name || a.pkg || '',
+      packageName: a.packageName || a.package_name || a.package || a.pkg || '',
       appName: a.appName || a.app_name || a.name || a.label || '',
       versionName: a.versionName || a.version_name || a.version || '',
       icon: a.icon || '',
       isSystemApp: a.isSystemApp || a.is_system_app || false,
     }
-  }).filter(a => a.packageName)
+  }
+
+  const appObjects = (() => {
+    const byPkg = new Map()
+    ;[...deviceApps, ...appList].forEach(item => {
+      const app = normalizeApp(item)
+      if (!app.packageName) return
+      const prev = byPkg.get(app.packageName) || {}
+      byPkg.set(app.packageName, {
+        ...prev,
+        ...app,
+        appName: app.appName || prev.appName || app.packageName,
+        versionName: app.versionName || prev.versionName || '',
+        icon: app.icon || prev.icon || '',
+      })
+    })
+    return Array.from(byPkg.values())
+  })()
 
   // 匹配到模板的应用（有注入能力）
   const matchedApps = appObjects
