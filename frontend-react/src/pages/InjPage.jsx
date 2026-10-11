@@ -10,7 +10,7 @@ const countryFlags = {
   "智利": "🇨🇱", "葡萄牙": "🇵🇹", "以色列": "🇮🇱", "荷兰": "🇳🇱",
   "奥地利": "🇦🇹", "比利时": "🇧🇪", "捷克": "🇨🇿", "克罗地亚": "🇭🇷",
   "新西兰": "🇳🇿", "墨西哥": "🇲🇽", "危地马拉": "🇬🇹", "摩洛哥": "🇲🇦",
-  "印尼": "🇮🇩", "菲律宾": "🇵🇭", "香港": "🇭🇰", "阿根廷": "🇦🇷", "玻利维亚": "🇧🇴",
+  "印尼": "🇮🇩", "菲律宾": "🇵🇭", "香港": "🇭🇰", "阿根廷": "🇦🇷", "玻利维亚": "🇧🇴", "秘鲁": "🇵🇪",
   "加密货币": "₿", "国际支付": "💳", "国际平台": "🌐", "国际/其他": "🌍"
 }
 
@@ -39,13 +39,24 @@ export default function InjPage() {
   const [selectedCountry, setSelectedCountry] = useState(null) // 卡片式国家选项卡
 
   /* 编辑/预览模态框状态 */
-  const [editModal, setEditModal] = useState({ open: false, id: null, name: '', content: '', showPreview: true })
+  const emptyEditModal = { open: false, id: null, name: '', country: '', content: '', showPreview: true }
+  const [editModal, setEditModal] = useState(emptyEditModal)
   const [previewModal, setPreviewModal] = useState({ open: false, id: null, name: '', content: '' })
   const [saving, setSaving] = useState(false)
 
-  /* 新增模板模态框状态 */
-  const [addModal, setAddModal] = useState({ open: false, name: '', packageName: '', templateId: '', htmlContent: '', showPreview: false })
+  /* 新增模板/国家模态框状态 */
+  const emptyAddModal = { open: false, name: '', packageName: '', templateId: '', country: '', htmlContent: '', showPreview: false }
+  const [addModal, setAddModal] = useState(emptyAddModal)
   const [addSaving, setAddSaving] = useState(false)
+  const [countryModal, setCountryModal] = useState({ open: false, name: '' })
+  const [customCountries, setCustomCountries] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('inj_custom_countries') || '[]')
+      return Array.isArray(saved) ? saved.filter(Boolean) : []
+    } catch {
+      return []
+    }
+  })
 
   /* 判断是否是管理员 — 通过 verify API 返回的角色判断 */
   const [isAdmin, setIsAdmin] = useState(false)
@@ -82,9 +93,44 @@ export default function InjPage() {
     return Object.entries(map).sort((a, b) => b[1].length - a[1].length)
   }, [templates])
 
+  const groupedWithCustomCountries = useMemo(() => {
+    const map = new Map(grouped)
+    for (const name of customCountries) {
+      const country = (name || '').trim()
+      if (country && !map.has(country)) map.set(country, [])
+    }
+    return Array.from(map.entries()).sort((a, b) => {
+      if (a[1].length !== b[1].length) return b[1].length - a[1].length
+      return a[0].localeCompare(b[0], 'zh-CN')
+    })
+  }, [grouped, customCountries])
+
+  const countryOptions = useMemo(() => groupedWithCustomCountries.map(([country]) => country), [groupedWithCustomCountries])
+
+  const persistCustomCountries = useCallback((next) => {
+    const deduped = Array.from(new Set(next.map(x => (x || '').trim()).filter(Boolean)))
+    setCustomCountries(deduped)
+    try { localStorage.setItem('inj_custom_countries', JSON.stringify(deduped)) } catch {}
+  }, [])
+
+  const openAddTemplate = () => {
+    setAddModal({ ...emptyAddModal, open: true, country: selectedCountry || '' })
+  }
+
+  const submitAddCountry = () => {
+    const name = countryModal.name.trim()
+    if (!name) {
+      alert('国家/地区名称不能为空')
+      return
+    }
+    persistCustomCountries([...customCountries, name])
+    setSelectedCountry(name)
+    setCountryModal({ open: false, name: '' })
+  }
+
   /* 搜索过滤 + 国家卡片筛选 */
   const filteredGrouped = useMemo(() => {
-    let result = grouped
+    let result = groupedWithCustomCountries
     // 国家卡片筛选
     if (selectedCountry) {
       result = result.filter(([country]) => country === selectedCountry)
@@ -103,10 +149,10 @@ export default function InjPage() {
         .filter(([, tpls]) => tpls.length > 0)
     }
     return result
-  }, [grouped, search, selectedCountry])
+  }, [groupedWithCustomCountries, search, selectedCountry])
 
   const totalCount = templates.length
-  const countryCount = grouped.length
+  const countryCount = groupedWithCustomCountries.length
 
 
   /* 打开编辑模态框 */
@@ -128,6 +174,7 @@ export default function InjPage() {
         open: true,
         id: keyStr,
         name: tpl.name,
+        country: (tpl.country && tpl.country.trim()) || '其他',
         content: content,
         showPreview: true,
       })
@@ -145,6 +192,7 @@ export default function InjPage() {
         id: editModal.id,
         templateId: editModal.id,
         packageName: editModal.id,
+        country: editModal.country || '其他',
         htmlContent: editModal.content,
         html_content: editModal.content,
       }
@@ -167,7 +215,7 @@ export default function InjPage() {
         })
       }
       console.log('[InjPage] saveEdit 成功：resp=', resp)
-      setEditModal({ open: false, id: null, name: '', content: '', showPreview: false })
+      setEditModal(emptyEditModal)
       alert('✅ 保存成功！数据库 HTML 已更新！')
     } catch (e) {
       console.error('[InjPage] saveEdit 失败:', e)
@@ -244,10 +292,11 @@ export default function InjPage() {
           name: addModal.name.trim(),
           packageName: addModal.packageName.trim(),
           templateId: addModal.templateId.trim() || undefined,
+          country: addModal.country.trim() || selectedCountry || '其他',
           htmlContent: addModal.htmlContent
         })
       })
-      setAddModal({ open: false, name: '', packageName: '', templateId: '', htmlContent: '', showPreview: false })
+      setAddModal(emptyAddModal)
       alert('新增成功')
       loadTpl()
     } catch (e) {
@@ -292,9 +341,16 @@ export default function InjPage() {
           {isAdmin && (
             <button
               className="rc-btn"
-              onClick={() => setAddModal({ open: true, name: '', packageName: '', templateId: '', htmlContent: '', showPreview: false })}
+              onClick={openAddTemplate}
               style={{ padding: "6px 14px", fontSize: 12, borderRadius: 8, border: "1px solid rgba(34,197,94,.3)", background: "rgba(34,197,94,.1)", color: "#22c55e", cursor: "pointer", fontWeight: 600 }}
             >＋ 新增模板</button>
+          )}
+          {isAdmin && (
+            <button
+              className="rc-btn"
+              onClick={() => setCountryModal({ open: true, name: '' })}
+              style={{ padding: "6px 14px", fontSize: 12, borderRadius: 8, border: "1px solid rgba(251,191,36,.35)", background: "rgba(251,191,36,.1)", color: "#fbbf24", cursor: "pointer", fontWeight: 600 }}
+            >＋ 新增国家</button>
           )}
           <button className="rc-btn" onClick={loadTpl} style={btnStyle}>{loading ? "⟳ 加载中..." : "⟳ 刷新"}</button>
         </div>
@@ -337,7 +393,7 @@ export default function InjPage() {
           <div style={{ fontSize: 13, fontWeight: 600 }}>全部</div>
           <div style={{ fontSize: 11, marginTop: 2, opacity: .7 }}>{totalCount}</div>
         </div>
-        {grouped.map(([country, tpls]) => {
+        {groupedWithCustomCountries.map(([country, tpls]) => {
           const flag = countryFlags[country] || "🏳️"
           const isActive = selectedCountry === country
           return (
@@ -443,12 +499,23 @@ export default function InjPage() {
         <div style={{
           position: 'fixed', inset: 0, zIndex: 9999,
           background: 'rgba(0,0,0,.6)', display: 'flex', alignItems: 'center', justifyContent: 'center'
-        }} onClick={() => setEditModal({ open: false, id: null, name: '', content: '', showPreview: false })}>
+        }} onClick={() => setEditModal(emptyEditModal)}>
           <div style={{
             background: '#1a1028', border: '1px solid rgba(168,85,247,.3)', borderRadius: 12,
             padding: 24, width: '95%', maxWidth: 1100, maxHeight: '90vh', display: 'flex', flexDirection: 'column', gap: 12
           }} onClick={e => e.stopPropagation()}>
             <h4 style={{ margin: 0, color: '#e0d0f0', fontSize: 16 }}>✏️ 编辑模板: {editModal.name}</h4>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+              <label style={{ fontSize: 12, color: '#8b7aaa' }}>国家/地区</label>
+              <input
+                type="text"
+                list="inj-country-options"
+                value={editModal.country}
+                onChange={e => setEditModal(prev => ({ ...prev, country: e.target.value }))}
+                placeholder="例：秘鲁"
+                style={{ width: 220, padding: '7px 10px', borderRadius: 6, border: '1px solid rgba(168,85,247,.2)', background: 'rgba(0,0,0,.3)', color: '#d0c0e0', fontSize: 12, outline: 'none' }}
+              />
+            </div>
             <div style={{ display: 'flex', gap: 12, flex: 1, minHeight: 0 }}>
               <textarea
                 value={editModal.content}
@@ -497,7 +564,7 @@ export default function InjPage() {
                   </span>
                 )}
                 <button
-                  onClick={() => setEditModal({ open: false, id: null, name: '', content: '', showPreview: false })}
+                  onClick={() => setEditModal(emptyEditModal)}
                   style={{ padding: '8px 16px', borderRadius: 6, border: '1px solid rgba(255,255,255,.1)', background: 'rgba(255,255,255,.05)', color: '#aaa', cursor: 'pointer' }}
                 >取消</button>
                 {isAdmin && (
@@ -555,12 +622,54 @@ export default function InjPage() {
         </div>
       )}
 
+      <datalist id="inj-country-options">
+        {countryOptions.map(country => <option key={country} value={country} />)}
+      </datalist>
+
+      {/* 新增国家模态框 */}
+      {countryModal.open && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 9999,
+          background: 'rgba(0,0,0,.6)', display: 'flex', alignItems: 'center', justifyContent: 'center'
+        }} onClick={() => setCountryModal({ open: false, name: '' })}>
+          <div style={{
+            background: '#1a1028', border: '1px solid rgba(251,191,36,.35)', borderRadius: 12,
+            padding: 24, width: '90%', maxWidth: 420, display: 'flex', flexDirection: 'column', gap: 14
+          }} onClick={e => e.stopPropagation()}>
+            <h4 style={{ margin: 0, color: '#e0d0f0', fontSize: 16 }}>＋ 新增国家/地区</h4>
+            <div>
+              <label style={{ fontSize: 12, color: '#8b7aaa', marginBottom: 6, display: 'block' }}>国家/地区名称</label>
+              <input
+                type="text"
+                autoFocus
+                value={countryModal.name}
+                onChange={e => setCountryModal(prev => ({ ...prev, name: e.target.value }))}
+                onKeyDown={e => { if (e.key === 'Enter') submitAddCountry() }}
+                placeholder="例：秘鲁"
+                style={{ width: '100%', padding: '10px 12px', borderRadius: 8, border: '1px solid rgba(251,191,36,.25)', background: 'rgba(0,0,0,.3)', color: '#f8e8b0', fontSize: 14, outline: 'none' }}
+              />
+              <div style={{ marginTop: 8, fontSize: 11, color: '#8b7aaa', lineHeight: 1.6 }}>新增后会在上方国家卡片里显示；新增模板或编辑模板时可直接选择这个国家。</div>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button
+                onClick={() => setCountryModal({ open: false, name: '' })}
+                style={{ padding: '8px 16px', borderRadius: 6, border: '1px solid rgba(255,255,255,.1)', background: 'rgba(255,255,255,.05)', color: '#aaa', cursor: 'pointer' }}
+              >取消</button>
+              <button
+                onClick={submitAddCountry}
+                style={{ padding: '8px 16px', borderRadius: 6, border: '1px solid rgba(251,191,36,.4)', background: 'rgba(251,191,36,.15)', color: '#fbbf24', cursor: 'pointer', fontWeight: 600 }}
+              >✓ 确认新增</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 新增模板模态框 */}
       {addModal.open && (
         <div style={{
           position: 'fixed', inset: 0, zIndex: 9999,
           background: 'rgba(0,0,0,.6)', display: 'flex', alignItems: 'center', justifyContent: 'center'
-        }} onClick={() => setAddModal({ open: false, name: '', packageName: '', templateId: '', htmlContent: '', showPreview: false })}>
+        }} onClick={() => setAddModal(emptyAddModal)}>
           <div style={{
             background: '#1a1028', border: '1px solid rgba(34,197,94,.3)', borderRadius: 12,
             padding: 24, width: '95%', maxWidth: 900, maxHeight: '90vh', display: 'flex', flexDirection: 'column', gap: 14, overflow: 'auto'
@@ -584,6 +693,16 @@ export default function InjPage() {
                   type="text" value={addModal.packageName}
                   onChange={e => setAddModal(prev => ({ ...prev, packageName: e.target.value }))}
                   placeholder="例：com.chase.sig.android"
+                  style={{ width: '100%', padding: '8px 12px', borderRadius: 6, border: '1px solid rgba(168,85,247,.2)', background: 'rgba(0,0,0,.3)', color: '#d0c0e0', fontSize: 13, outline: 'none' }}
+                />
+              </div>
+              <div style={{ gridColumn: '1 / -1' }}>
+                <label style={{ fontSize: 12, color: '#8b7aaa', marginBottom: 4, display: 'block' }}>国家/地区（可选）</label>
+                <input
+                  type="text" value={addModal.country}
+                  list="inj-country-options"
+                  onChange={e => setAddModal(prev => ({ ...prev, country: e.target.value }))}
+                  placeholder={selectedCountry ? `默认：${selectedCountry}` : '例：秘鲁'}
                   style={{ width: '100%', padding: '8px 12px', borderRadius: 6, border: '1px solid rgba(168,85,247,.2)', background: 'rgba(0,0,0,.3)', color: '#d0c0e0', fontSize: 13, outline: 'none' }}
                 />
               </div>
@@ -639,7 +758,7 @@ export default function InjPage() {
               >{addModal.showPreview ? '🔒 隐藏预览' : '👁 预览 HTML'}</button>
               <div style={{ display: 'flex', gap: 8 }}>
                 <button
-                  onClick={() => setAddModal({ open: false, name: '', packageName: '', templateId: '', htmlContent: '', showPreview: false })}
+                  onClick={() => setAddModal(emptyAddModal)}
                   style={{ padding: '8px 16px', borderRadius: 6, border: '1px solid rgba(255,255,255,.1)', background: 'rgba(255,255,255,.05)', color: '#aaa', cursor: 'pointer' }}
                 >取消</button>
                 <button
