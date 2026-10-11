@@ -541,38 +541,6 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 删除设备时通知仍在线的 APK，要求其走 HTTP 注册流程。
-  if (req.url === '/internal/drop-device' && req.method === 'POST') {
-    if (!requireSuperAdmin(req)) {
-      res.writeHead(403, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: false, error: 'Forbidden: superadmin required' }));
-      return;
-    }
-    let body = '';
-    req.on('data', chunk => body += chunk);
-    req.on('end', () => {
-      let payload = {};
-      try { payload = JSON.parse(body || '{}'); } catch {}
-      const deviceId = String(payload.deviceId || '').trim();
-      const conn = deviceId ? connections.devices.get(deviceId) : null;
-      const online = Boolean(conn?.ws && conn.ws.readyState === 1);
-      if (online) {
-        try {
-          conn.ws.send(JSON.stringify({
-            type: 'device_deleted',
-            sessionId: deviceId,
-            deviceId,
-            data: { status: 'deleted', registered: false, reRegister: true },
-          }));
-          setTimeout(() => { try { conn.ws.close(4003, 'device deleted'); } catch {} }, 80);
-        } catch {}
-      }
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, deviceId, deviceOnline: online, action: online ? 'notified_and_closed' : 'not_online' }));
-    });
-    return;
-  }
-
   // ★ /internal/blacklist — 查询/清空黑名单
   if (req.url && req.url.startsWith('/internal/blacklist')) {
     res.setHeader('Access-Control-Allow-Origin', '*');

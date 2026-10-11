@@ -360,12 +360,8 @@ class AuthController extends BaseController
         if (!$deviceId) {
             return json(['success' => false, 'message' => '缺少 deviceId'], 400);
         }
-        $requestedReRegister = !empty($data['reRegister']) || !empty($data['forceReRegister']);
-        if ($this->isDeviceDeleted((string)$deviceId) && !$requestedReRegister) {
+        if ($this->isDeviceDeleted((string)$deviceId)) {
             return json(['success' => true, 'data' => ['deviceId' => $deviceId, 'ignored' => true], 'message' => 'device deleted']);
-        }
-        if ($requestedReRegister) {
-            Db::table('fisher_settings')->where('key', $this->deletedDeviceKey((string)$deviceId))->delete();
         }
 
         $now = time();
