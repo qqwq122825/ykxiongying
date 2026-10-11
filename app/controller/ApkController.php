@@ -678,6 +678,14 @@ class ApkController extends BaseController
         foreach ($rows as $r) {
             $r = $this->reconcileBuildRow($r);
             $filePath = $this->apkOutDir . '/' . $r['filename'];
+            $actualFileSize = file_exists($filePath) ? (int)@filesize($filePath) : (int)($r['file_size'] ?? 0);
+            if (file_exists($filePath) && (int)($r['file_size'] ?? 0) !== $actualFileSize) {
+                try {
+                    Db::table('fisher_apk_builds')->where('id', (int)$r['id'])->update(['file_size' => $actualFileSize]);
+                } catch (\Throwable $e) {
+                    error_log('[APK Build] sync list file size failed: ' . $e->getMessage());
+                }
+            }
             $list[] = [
                 'id'             => $r['id'],
                 'build_id'       => $r['id'],
@@ -688,8 +696,8 @@ class ApkController extends BaseController
                 'webUrl'         => $r['web_url'] ?? '',
                 'app_name'       => $r['app_name'] ?? '',
                 'appName'        => $r['app_name'] ?? '',
-                'size'           => (int)($r['file_size'] ?? 0),
-                'file_size'      => (int)($r['file_size'] ?? 0),
+                'size'           => $actualFileSize,
+                'file_size'      => $actualFileSize,
                 'status'         => $r['status'] ?? 'done',
                 'progress'       => (int)($r['progress'] ?? 0),
                 'message'        => $r['message'] ?? '',
