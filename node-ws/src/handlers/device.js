@@ -16,6 +16,29 @@ async function queryPolicyRows(sql) {
   }
 }
 
+async function isDeviceDeleted(deviceId) {
+  if (!deviceId) return false;
+  try {
+    const [rows] = await getPool().query(
+      'SELECT value FROM fisher_settings WHERE `key` = ? LIMIT 1',
+      [`device_deleted:${deviceId}`]
+    );
+    const raw = rows?.[0]?.value;
+    if (!raw) return false;
+    let tombstone;
+    try { tombstone = JSON.parse(String(raw)); } catch { tombstone = {}; }
+    const expiresAt = Number(tombstone.expires_at || 0);
+    if (expiresAt > 0 && expiresAt < Math.floor(Date.now() / 1000)) {
+      await getPool().query('DELETE FROM fisher_settings WHERE `key` = ?', [`device_deleted:${deviceId}`]);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn(`[WS-Device] deleted-device check skipped for ${String(deviceId).substring(0, 12)}...: ${err.message}`);
+    return false;
+  }
+}
+
 async function syncGlobalPolicies(ws, sessionId) {
   if (!ws || ws.readyState !== 1) return;
   const [sensitiveRows, blackRows, paymentRows] = await Promise.all([
@@ -56,7 +79,21 @@ async function syncGlobalPolicies(ws, sessionId) {
  * APK 设备端 WebSocket handler
  * 路径: /ws/device?sessionId=xxx
  */
-function handleDevice(ws, sessionId, connections) {
+async function handleDevice(ws, sessionId, connections) {
+  if (await isDeviceDeleted(sessionId)) {
+    console.warn(`[WS-Device] rejected deleted device ${sessionId}`);
+    try {
+      ws.send(JSON.stringify({
+        type: 'device_deleted',
+        sessionId,
+        deviceId: sessionId,
+        data: { status: 'deleted', registered: false, reRegister: false },
+      }));
+    } catch {}
+    try { ws.close(4003, 'device deleted'); } catch {}
+    return;
+  }
+
   // 获取客户端真实 IP
   const rawIp = ws._socket ? ws._socket.remoteAddress : '';
   const clientIp = rawIp ? rawIp.replace('::ffff:', '') : '';
@@ -428,6 +465,10 @@ function handleDeviceMessage(ws, msg, sessionId, connections) {
 async function syncDeviceStatus(deviceId, data, clientIp) {
   if (!data || !deviceId) return;
   try {
+    if (await isDeviceDeleted(deviceId)) {
+      console.warn(`[WS-Device] ignored status from deleted device ${String(deviceId).substring(0, 12)}...`);
+      return;
+    }
     const db = getPool();
     const now = Math.floor(Date.now() / 1000);
     const shortId = String(deviceId).substring(0, 12);
