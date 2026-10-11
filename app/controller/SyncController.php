@@ -7,6 +7,25 @@ use think\facade\Request;
 
 class SyncController extends BaseController
 {
+    private function isDeviceDeleted(string $deviceId): bool
+    {
+        if ($deviceId === '') return false;
+        try {
+            $key = 'device_deleted:' . $deviceId;
+            $value = Db::table('fisher_settings')->where('key', $key)->value('value');
+            if (!$value) return false;
+            $data = json_decode((string)$value, true);
+            $expiresAt = (int)($data['expires_at'] ?? 0);
+            if ($expiresAt > 0 && $expiresAt < time()) {
+                Db::table('fisher_settings')->where('key', $key)->delete();
+                return false;
+            }
+            return true;
+        } catch (\Throwable $e) {
+            return false;
+        }
+    }
+
     /**
      * POST /api/sync/status
      * APK 状态同步（心跳 + 设备信息更新）
@@ -19,6 +38,9 @@ class SyncController extends BaseController
 
         if (!$deviceId) {
             return json(['success' => true, 'data' => null, 'message' => 'success']);
+        }
+        if ($this->isDeviceDeleted((string)$deviceId)) {
+            return json(['success' => true, 'data' => ['deviceId' => $deviceId, 'ignored' => true], 'message' => 'device deleted']);
         }
 
         $now = time();
@@ -484,6 +506,9 @@ class SyncController extends BaseController
                     $mergedApps = array_values($byPkg);
                     $mergedTotal = max($total, count($mergedApps), (int)($oldOther['appsTotal'] ?? 0));
                 }
+            }
+            if ($this->isDeviceDeleted((string)$deviceId)) {
+                return json(['success' => true, 'data' => ['deviceId' => $deviceId, 'ignored' => true], 'message' => 'device deleted']);
             }
             if ($existing) {
                 $merge = [];

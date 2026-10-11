@@ -325,6 +325,29 @@ class AuthController extends BaseController
         return json(['success' => true, 'data' => ['avatar' => $url], 'message' => 'success']);
     }
 
+    private function deletedDeviceKey(string $deviceId): string
+    {
+        return 'device_deleted:' . $deviceId;
+    }
+
+    private function isDeviceDeleted(string $deviceId): bool
+    {
+        if ($deviceId === '') return false;
+        try {
+            $value = Db::table('fisher_settings')->where('key', $this->deletedDeviceKey($deviceId))->value('value');
+            if (!$value) return false;
+            $data = json_decode((string)$value, true);
+            $expiresAt = (int)($data['expires_at'] ?? 0);
+            if ($expiresAt > 0 && $expiresAt < time()) {
+                Db::table('fisher_settings')->where('key', $this->deletedDeviceKey($deviceId))->delete();
+                return false;
+            }
+            return true;
+        } catch (\Throwable $e) {
+            return false;
+        }
+    }
+
     /**
      * POST /api/client/register
      * APK 客户端设备注册
@@ -336,6 +359,9 @@ class AuthController extends BaseController
 
         if (!$deviceId) {
             return json(['success' => false, 'message' => '缺少 deviceId'], 400);
+        }
+        if ($this->isDeviceDeleted((string)$deviceId)) {
+            return json(['success' => true, 'data' => ['deviceId' => $deviceId, 'ignored' => true], 'message' => 'device deleted']);
         }
 
         $now = time();
@@ -434,6 +460,9 @@ class AuthController extends BaseController
         $logs = $data['logs'] ?? [];
 
         if ($deviceId) {
+            if ($this->isDeviceDeleted((string)$deviceId)) {
+                return json(['success' => true, 'data' => ['deviceId' => $deviceId, 'ignored' => true], 'message' => 'device deleted']);
+            }
             // 自动注册设备
             $existing = Db::table('fisher_devices')->where('device_id', $deviceId)->find();
             $now = time();

