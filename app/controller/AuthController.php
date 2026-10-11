@@ -175,7 +175,9 @@ class AuthController extends BaseController
 
         Db::table('fisher_settings')->where('key', $challengeKey)->delete();
         $this->logLogin($user['username'], 1);
-        $token = $this->generateToken($user);
+        $sessionId = bin2hex(random_bytes(16));
+        $this->saveUserSession((int)$user['id'], $sessionId);
+        $token = $this->generateToken($user, $sessionId);
 
         return json([
             'success' => true,
@@ -274,6 +276,14 @@ class AuthController extends BaseController
      */
     public function logout()
     {
+        $user = $this->request->user ?? $this->request->userPayload ?? null;
+        if ($user && !empty($user['user_id']) && !empty($user['sid'])) {
+            $key = 'auth_session_' . (int)$user['user_id'];
+            $row = Db::table('fisher_settings')->where('key', $key)->find();
+            if ($row && hash_equals((string)($row['value'] ?? ''), (string)$user['sid'])) {
+                Db::table('fisher_settings')->where('key', $key)->delete();
+            }
+        }
         return json(['success' => true, 'data' => null, 'message' => 'success']);
     }
 
@@ -308,6 +318,10 @@ class AuthController extends BaseController
         Db::table('fisher_users')->where('id', $user['user_id'])->update([
             'password_hash' => password_hash($newPassword, PASSWORD_BCRYPT),
         ]);
+        // 密码变更后只保留当前登录会话，踢掉其它旧 token。
+        if (!empty($user['sid'])) {
+            $this->saveUserSession((int)$user['user_id'], (string)$user['sid']);
+        }
 
         return json(['success' => true, 'data' => null, 'message' => '密码修改成功']);
     }
@@ -658,6 +672,21 @@ class AuthController extends BaseController
 
     // ========== 辅助方法 ==========
 
+    /**
+     * 单端登录：每次签发新 token 都覆盖当前用户会话号，旧 token 立即失效。
+     */
+    private function saveUserSession(int $userId, string $sessionId): void
+    {
+        $key = 'auth_session_' . $userId;
+        $value = $sessionId;
+        $existing = Db::table('fisher_settings')->where('key', $key)->find();
+        if ($existing) {
+            Db::table('fisher_settings')->where('key', $key)->update(['value' => $value]);
+        } else {
+            Db::table('fisher_settings')->insert(['key' => $key, 'value' => $value]);
+        }
+    }
+
     private function permissionsForRole($permissions, string $role): ?array
     {
         $decoded = null;
@@ -680,7 +709,7 @@ class AuthController extends BaseController
     /**
      * 生成 JWT token
      */
-    private function generateToken(array $user): string
+    private function generateToken(array $user, string $sessionId): string
     {
         $secret = (string)env('JWT.JWT_SECRET', '');
         $weakSecrets = ['fisher_secret_2026', 'secret', 'changeme', '123456', 'password'];
@@ -692,6 +721,8 @@ class AuthController extends BaseController
             'user_id'   => $user['id'],
             'username'  => $user['username'],
             'role'      => $user['role'],
+            'sid'       => $sessionId,
+            'iat'       => time(),
             'exp'       => time() + 86400 * 30, // 30 天
         ]));
         $signature = $this->base64url(hash_hmac('sha256', "$header.$payload", $secret, true));

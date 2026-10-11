@@ -146,6 +146,13 @@ class Auth
         if (!empty($dbUser['expire_at']) && (int)$dbUser['expire_at'] > 0 && (int)$dbUser['expire_at'] < time()) {
             return json(['success' => false, 'message' => '该账号已过期，请联系管理员续期'], 403);
         }
+        // 单端登录：token 必须携带当前会话号，且与数据库中最后一次登录会话一致。
+        $sessionId = (string)($user['sid'] ?? '');
+        $sessionKey = 'auth_session_' . (int)$user['user_id'];
+        $activeSession = (string)\think\facade\Db::table('fisher_settings')->where('key', $sessionKey)->value('value');
+        if ($sessionId === '' || $activeSession === '' || !hash_equals($activeSession, $sessionId)) {
+            return json(['success' => false, 'message' => '账号已在其它设备登录，请重新登录'], 401);
+        }
 
         // 权限以数据库实时值为准，避免旧 JWT 在账号降权后继续保留管理员权限。
         $user['username'] = $dbUser['username'] ?? ($user['username'] ?? '');
