@@ -292,6 +292,9 @@ $apiRoutes = function () {
         Route::rule('global-configs/:configId', 'MiscController/injectionGlobalConfigDetail', 'GET|PUT|DELETE');
     });
 
+    // ========== Telegram Bot Webhook ==========
+    Route::post('telegram/webhook', 'SettingsController/telegramWebhook');
+
     // ========== Settings ==========
     Route::group('settings', function () {
         Route::get('/', 'SettingsController/getSettings');

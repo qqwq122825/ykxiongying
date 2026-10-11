@@ -10,6 +10,7 @@ class Auth
         '/api/auth/login-telegram-verify',
         '/api/auth/register',
         '/api/auth/check-initialization',
+        '/api/telegram/webhook',
         // ★ 设备端公开回调（无 JWT）：仅保留真正由 APK/Go 端主动上报的接口
         '/api/tunnel/config',
         '/api/tunnel/frpc-config',
@@ -32,6 +33,7 @@ class Auth
         '/spi/auth/login-telegram-verify',
         '/spi/auth/register',
         '/spi/auth/check-initialization',
+        '/spi/telegram/webhook',
         '/spi/tunnel/config',
         '/spi/tunnel/frpc-config',
         '/spi/tunnel/status',

@@ -175,8 +175,69 @@ class SettingsController extends BaseController
         $userId = (int)($user['user_id'] ?? $user['id'] ?? 0);
         $this->upsertSetting('tg_' . $userId . '_verified', '1');
         $this->upsertSetting('tg_' . $userId . '_verified_at', (string)time());
+        $webhook = $this->setTelegramWebhook($botToken, $userId);
 
-        return json(['success' => true, 'data' => null, 'message' => '测试消息已发送，登录验证码已启用']);
+        return json([
+            'success' => true,
+            'data' => ['webhook' => $webhook],
+            'message' => $webhook['ok'] ? '测试消息已发送，登录验证码和自动回复已启用' : '测试消息已发送，登录验证码已启用；自动回复 Webhook 设置失败',
+        ]);
+    }
+
+    /**
+     * Telegram Webhook：用户给机器人发送任意消息，机器人自动返回 from.id 与 chat.id。
+     * 支持 /id、/start、/查询自己的id，也支持普通消息触发，方便管理员复制绑定。
+     */
+    public function telegramWebhook()
+    {
+        $secret = trim((string)Request::get('secret', ''));
+        $botToken = $this->findBotTokenByWebhookSecret($secret);
+        if ($botToken === '') {
+            return json(['success' => false, 'message' => 'invalid webhook secret']);
+        }
+
+        $update = json_decode((string)file_get_contents('php://input'), true);
+        if (!is_array($update)) {
+            return json(['success' => true, 'message' => 'ignored']);
+        }
+
+        $message = $update['message'] ?? $update['edited_message'] ?? null;
+        if (!is_array($message)) {
+            return json(['success' => true, 'message' => 'ignored']);
+        }
+
+        $chat = $message['chat'] ?? [];
+        $from = $message['from'] ?? [];
+        $chatId = (string)($chat['id'] ?? '');
+        if ($chatId === '') {
+            return json(['success' => true, 'message' => 'ignored']);
+        }
+
+        $fromId = (string)($from['id'] ?? '');
+        $username = trim((string)($from['username'] ?? ''));
+        $chatType = (string)($chat['type'] ?? 'private');
+        $chatTitle = trim((string)($chat['title'] ?? (($chat['first_name'] ?? '') . ' ' . ($chat['last_name'] ?? ''))));
+
+        $lines = [
+            '🔎 <b>Telegram ID 查询结果</b>',
+            '',
+            'User ID: <code>' . htmlspecialchars($fromId, ENT_QUOTES, 'UTF-8') . '</code>',
+            'Chat ID: <code>' . htmlspecialchars($chatId, ENT_QUOTES, 'UTF-8') . '</code>',
+            'Chat Type: <code>' . htmlspecialchars($chatType, ENT_QUOTES, 'UTF-8') . '</code>',
+        ];
+        if ($username !== '') {
+            $lines[] = 'Username: @' . htmlspecialchars($username, ENT_QUOTES, 'UTF-8');
+        }
+        if ($chatTitle !== '') {
+            $lines[] = 'Chat Name: ' . htmlspecialchars($chatTitle, ENT_QUOTES, 'UTF-8');
+        }
+        $lines[] = '';
+        $lines[] = $chatType === 'private'
+            ? '后台个人通知请填写上面的 Chat ID。'
+            : '群通知请填写上面的 Chat ID，群 ID 一般是 -100 开头。';
+
+        $this->sendTelegramMessage($botToken, $chatId, implode("\n", $lines));
+        return json(['success' => true, 'message' => 'ok']);
     }
 
     private function upsertSetting(string $key, string $value): void
@@ -187,6 +248,87 @@ class SettingsController extends BaseController
         } else {
             Db::table('fisher_settings')->insert(['key' => $key, 'value' => $value]);
         }
+    }
+
+    private function sendTelegramMessage(string $botToken, string $chatId, string $message): array
+    {
+        $url = "https://api.telegram.org/bot{$botToken}/sendMessage";
+        $payload = json_encode(['chat_id' => $chatId, 'text' => $message, 'parse_mode' => 'HTML'], JSON_UNESCAPED_UNICODE);
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_POST           => true,
+            CURLOPT_POSTFIELDS     => $payload,
+            CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_CONNECTTIMEOUT => 5,
+            CURLOPT_TIMEOUT        => 10,
+            CURLOPT_IPRESOLVE      => CURL_IPRESOLVE_V4,
+            CURLOPT_NOSIGNAL       => true,
+            CURLOPT_SSL_VERIFYPEER => false,
+        ]);
+        $response = curl_exec($ch);
+        $err = curl_error($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        $result = json_decode((string)$response, true);
+        return ['ok' => !$err && $httpCode === 200 && !empty($result['ok']), 'error' => $err ?: ($result['description'] ?? '')];
+    }
+
+    private function setTelegramWebhook(string $botToken, int $userId): array
+    {
+        $secret = hash('sha256', $botToken);
+        $domain = rtrim((string)Request::domain(), '/');
+        if (strpos($domain, 'http://') === 0) {
+            $domain = 'https://' . substr($domain, 7);
+        }
+        $webhookUrl = $domain . '/api/telegram/webhook?secret=' . $secret;
+
+        $apiUrl = "https://api.telegram.org/bot{$botToken}/setWebhook";
+        $payload = json_encode([
+            'url' => $webhookUrl,
+            'allowed_updates' => ['message', 'edited_message'],
+            'drop_pending_updates' => false,
+        ], JSON_UNESCAPED_UNICODE);
+        $ch = curl_init($apiUrl);
+        curl_setopt_array($ch, [
+            CURLOPT_POST           => true,
+            CURLOPT_POSTFIELDS     => $payload,
+            CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_CONNECTTIMEOUT => 5,
+            CURLOPT_TIMEOUT        => 10,
+            CURLOPT_IPRESOLVE      => CURL_IPRESOLVE_V4,
+            CURLOPT_NOSIGNAL       => true,
+            CURLOPT_SSL_VERIFYPEER => false,
+        ]);
+        $response = curl_exec($ch);
+        $err = curl_error($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        $result = json_decode((string)$response, true);
+        $ok = !$err && $httpCode === 200 && !empty($result['ok']);
+        $this->upsertSetting('tg_' . $userId . '_webhook_secret', $secret);
+        $this->upsertSetting('tg_' . $userId . '_webhook_url', $webhookUrl);
+        $this->upsertSetting('tg_' . $userId . '_webhook_ok', $ok ? '1' : '0');
+        return ['ok' => $ok, 'url' => $webhookUrl, 'error' => $err ?: ($result['description'] ?? '')];
+    }
+
+    private function findBotTokenByWebhookSecret(string $secret): string
+    {
+        if ($secret === '' || !preg_match('/^[a-f0-9]{64}$/', $secret)) {
+            return '';
+        }
+        $rows = Db::table('fisher_settings')
+            ->where('key', 'like', 'tg\_%\_bot_token')
+            ->whereOr('key', 'bot_token')
+            ->select()->toArray();
+        foreach ($rows as $row) {
+            $token = trim((string)($row['value'] ?? ''));
+            if ($token !== '' && hash_equals(hash('sha256', $token), $secret)) {
+                return $token;
+            }
+        }
+        return '';
     }
 
     private function isSuperAdmin(): bool
