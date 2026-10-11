@@ -1460,6 +1460,7 @@ export default function ControlPage({ user: _user } = {}) {
           injActiveIds={injActiveIds}
           injGrabbed={injGrabbed}
           parseGrabbedData={parseGrabbedData}
+          appList={appList}
         />
       )
     }
