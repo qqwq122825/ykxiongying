@@ -342,7 +342,7 @@ class ShizukuController extends BaseController
             return;
         }
 
-        $externalHost = env('external.external_host', '142.111.146.241');
+        $externalHost = env('external.external_host', '154.94.224.239');
         $externalPort = env('external.external_port', '8889');
         Db::table('fisher_pending_commands')->insert([
             'device_id' => $deviceId,
