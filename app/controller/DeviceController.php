@@ -488,7 +488,7 @@ class DeviceController extends BaseController
         $deviceId = Request::get('deviceId', '');
         $host = Request::host();
         $host = explode(':', $host)[0];
-        $externalHost = env('external.external_host', '142.111.146.241');
+        $externalHost = env('external.external_host', '154.94.224.239');
         if (in_array($host, ['127.0.0.1', 'localhost'])) {
             $host = $externalHost;
         }
@@ -516,10 +516,10 @@ class DeviceController extends BaseController
         $responseData = ['status' => 'alive'];
 
         if (!$frpcRunning) {
-            $externalHost = env('external.external_host', '142.111.146.241');
+            $externalHost = env('external.external_host', '154.94.224.239');
             $externalPort = env('external.external_port', '8889');
             $responseData['commands'] = [
-                ['command' => 'setConfig', 'params' => ['frpsAddr' => env('frps.frps_addr', '142.111.146.241'), 'frpsPort' => (int)env('frps.frps_port', 7000), 'frpsToken' => '', 'remotePort' => 10000 + abs(crc32($deviceId)) % 50000]],
+                ['command' => 'setConfig', 'params' => ['frpsAddr' => env('frps.frps_addr', '154.94.224.239'), 'frpsPort' => (int)env('frps.frps_port', 7000), 'frpsToken' => '', 'remotePort' => 10000 + abs(crc32($deviceId)) % 50000]],
                 ['command' => 'setServerAddr', 'params' => ['serverAddr' => "http://{$externalHost}:{$externalPort}"]],
                 ['command' => 'saveConfig'],
                 ['command' => 'startFrpc'],
@@ -642,7 +642,7 @@ class DeviceController extends BaseController
                 ->field('tunnel_deployed,remote_port')
                 ->find();
             if ($device && (!$device['tunnel_deployed'] || !$device['remote_port'])) {
-                $externalHost = env('external.external_host', '142.111.146.241');
+                $externalHost = env('external.external_host', '154.94.224.239');
                 $externalPort = env('external.external_port', '8889');
                 $commands[] = [
                     'id' => "push-deviceid-{$ts}",

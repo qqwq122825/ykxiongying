@@ -49,7 +49,7 @@ class TunnelController extends BaseController
                 if ($row && !empty($row['value'])) $serverAddr = $row['value'];
             } catch (\Exception $e) {}
         }
-        if (empty($serverAddr)) $serverAddr = '142.111.146.241';
+        if (empty($serverAddr)) $serverAddr = '154.94.224.239';
 
         $serverPort = (int)(env('frps.server_port', '') ?: env('FRPS.FRPS_PORT', 7000));
         if ($serverPort <= 0) $serverPort = 7000;
@@ -686,7 +686,7 @@ class TunnelController extends BaseController
             $nodeWsPort = env('node_ws.port', 8889);
             $payload = json_encode([
                 'deviceId' => $deviceId,
-                'message' => ['command' => 'setServerAddr', 'params' => ['serverAddr' => env('frps.server_addr', '142.111.146.241:8889')]]
+                'message' => ['command' => 'setServerAddr', 'params' => ['serverAddr' => env('frps.server_addr', '154.94.224.239:8889')]]
             ]);
             $ch = curl_init("http://127.0.0.1:{$nodeWsPort}/internal/bridge-send");
             curl_setopt_array($ch, [
@@ -740,7 +740,7 @@ class TunnelController extends BaseController
         if ($port === 19901) {
             // 即使 fallback 端口，也尝试下发（local-service 可能正通过 frps 跳板连到 19901）
         }
-        $serverAddr = 'http://' . env('frps.server_addr', '142.111.146.241:8889');
+        $serverAddr = 'http://' . env('frps.server_addr', '154.94.224.239:8889');
 
         // Step 1: 调用 /setAppConfig
         $setAppConfigUrl = "/setAppConfig?deviceId=" . urlencode($deviceId) . "&serverAddr=" . urlencode($serverAddr);
