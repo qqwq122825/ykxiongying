@@ -108,6 +108,24 @@ class DeviceController extends BaseController
         }
     }
 
+
+    private function logDeviceApiError(string $where, \Throwable $e, array $context = []): void
+    {
+        $record = [
+            'time' => date('c'),
+            'where' => $where,
+            'message' => $e->getMessage(),
+            'file' => $e->getFile(),
+            'line' => $e->getLine(),
+            'context' => $context,
+        ];
+        @file_put_contents(
+            runtime_path() . 'device_api_error.log',
+            json_encode($record, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . PHP_EOL,
+            FILE_APPEND | LOCK_EX
+        );
+    }
+
     private function cleanupDeviceRows(string $deviceId): array
     {
         $tables = [
@@ -162,22 +180,54 @@ class DeviceController extends BaseController
      */
     public function listDevices()
     {
-        $user = $this->currentActor();
-        $scope = $this->managedUsernames($user);
-        $query = Db::table('fisher_devices');
-        if ($scope !== null) {
-            $query->whereIn('owner_username', $scope ?: ['__no_authorized_owner__']);
+        try {
+            $user = $this->currentActor();
+            $scope = $this->managedUsernames($user);
+            $query = Db::table('fisher_devices');
+
+            // 兼容旧库：owner_username/last_seen 等列缺失时不要把列表接口打成 500。
+            $hasOwnerColumn = $this->tableHasColumn('fisher_devices', 'owner_username');
+            if ($scope !== null && $hasOwnerColumn) {
+                $query->whereIn('owner_username', $scope ?: ['__no_authorized_owner__']);
+            } elseif ($scope !== null && !$hasOwnerColumn) {
+                $this->logDeviceApiError('device.list.scope_skipped', new \RuntimeException('fisher_devices.owner_username column missing'), [
+                    'scope_count' => count($scope ?: []),
+                    'actor' => $user['username'] ?? '',
+                ]);
+            }
+
+            $orderColumn = $this->tableHasColumn('fisher_devices', 'last_seen') ? 'last_seen' : 'device_id';
+            $rows = $query->order($orderColumn, 'desc')->select()->toArray();
+
+            // 通知逻辑不能影响主列表返回。
+            try {
+                $this->checkNewDeviceNotify($rows, $user);
+            } catch (\Throwable $e) {
+                $this->logDeviceApiError('device.list.notify', $e);
+            }
+
+            $onlineInfo = $this->getOnlineDevices();
+            $devices = [];
+            foreach ($rows as $row) {
+                try {
+                    $devices[] = $this->deviceToDict($row, $onlineInfo);
+                } catch (\Throwable $e) {
+                    $this->logDeviceApiError('device.list.row', $e, ['device_id' => $row['device_id'] ?? '']);
+                    $devices[] = [
+                        'id' => $row['device_id'] ?? '',
+                        'deviceId' => $row['device_id'] ?? '',
+                        'name' => $row['device_id'] ?? 'UNKNOWN',
+                        'status' => 'offline',
+                        'lastSeen' => (int)($row['last_seen'] ?? 0) * 1000,
+                        'ownerUsername' => $row['owner_username'] ?? '',
+                    ];
+                }
+            }
+            return json(['success' => true, 'data' => $devices, 'message' => 'success']);
+        } catch (\Throwable $e) {
+            $this->logDeviceApiError('device.list.fallback', $e);
+            return json(['success' => true, 'data' => [], 'message' => 'device list fallback']);
         }
-        $rows = $query->order('last_seen', 'desc')->select()->toArray();
-
-        // ★ 检测新设备并发送 TG 通知（first_seen 在最近 60 秒内且未通知过）
-        $this->checkNewDeviceNotify($rows, $user);
-
-        $onlineInfo = $this->getOnlineDevices();
-        $devices = array_map(function ($row) use ($onlineInfo) {
-            return $this->deviceToDict($row, $onlineInfo);
-        }, $rows);
-        return json(['success' => true, 'data' => $devices, 'message' => 'success']);
     }
 
     /**
