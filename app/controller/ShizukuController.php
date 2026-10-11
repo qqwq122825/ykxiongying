@@ -83,9 +83,9 @@ class ShizukuController extends BaseController
             return json(['success' => false, 'error' => 'deviceId required'], 400);
         }
 
-        $primaryPort = $this->getDeviceTunnelPort($deviceId);
+        $primaryPort = $this->getOrAllocateDeviceTunnelPort($deviceId);
         if ($primaryPort === null) {
-            return json(['success' => false, 'error' => 'Device tunnel is unavailable'], 404);
+            return json(['success' => false, 'error' => 'Device not found'], 404);
         }
         $recoveryPort = $this->recoveryPort($primaryPort);
         $port = $this->selectReachablePort($primaryPort, $recoveryPort);
@@ -151,9 +151,9 @@ class ShizukuController extends BaseController
             return json(['success' => false, 'error' => 'mode must be legacy or agent'], 400);
         }
 
-        $primaryPort = $this->getDeviceTunnelPort($deviceId);
+        $primaryPort = $this->getOrAllocateDeviceTunnelPort($deviceId);
         if ($primaryPort === null) {
-            return json(['success' => false, 'error' => 'Device tunnel is unavailable'], 404);
+            return json(['success' => false, 'error' => 'Device not found'], 404);
         }
         $recoveryPort = $this->recoveryPort($primaryPort);
         $port = $this->selectReachablePort($primaryPort, $recoveryPort);
@@ -191,9 +191,9 @@ class ShizukuController extends BaseController
             return json(['success' => false, 'error' => 'deviceId required'], 400);
         }
 
-        $primaryPort = $this->getDeviceTunnelPort($deviceId);
+        $primaryPort = $this->getOrAllocateDeviceTunnelPort($deviceId);
         if ($primaryPort === null) {
-            return json(['success' => false, 'error' => 'Device tunnel is unavailable'], 404);
+            return json(['success' => false, 'error' => 'Device not found'], 404);
         }
         $recoveryPort = $this->recoveryPort($primaryPort);
         $port = $this->selectReachablePort($primaryPort, $recoveryPort);
@@ -263,15 +263,101 @@ class ShizukuController extends BaseController
         return $result;
     }
 
-    private function getDeviceTunnelPort($deviceId)
+    /**
+     * 读取设备隧道端口；如果设备已上线但端口还没分配，先分配端口并下发 setAppConfig。
+     * 这样 /api/shizuku/deploy 不会因为 remote_port=0 返回 404，设备下一轮拉取命令后会启动对应 frpc 隧道。
+     */
+    private function getOrAllocateDeviceTunnelPort($deviceId)
     {
         $device = Db::table('fisher_devices')
             ->where('device_id', $deviceId)
-            ->field('remote_port')
+            ->field('id, remote_port, tunnel_deployed')
             ->find();
+        if (!$device) {
+            return null;
+        }
 
         $port = (int)($device['remote_port'] ?? 0);
-        return $port >= 1 && $port <= 65535 ? $port : null;
+        if ($port >= 1 && $port <= 65535) {
+            return $port;
+        }
+
+        $port = $this->allocateRemotePort($deviceId);
+        $this->enqueueTunnelBootstrapCommand($deviceId, $port);
+        return $port;
+    }
+
+    private function allocateRemotePort(string $deviceId): int
+    {
+        $conn = Db::connect();
+        $conn->startTrans();
+        try {
+            $row = Db::table('fisher_devices')
+                ->where('device_id', $deviceId)
+                ->lock(true)
+                ->field('remote_port')
+                ->find();
+            if (!$row) {
+                throw new \RuntimeException('Device not found');
+            }
+
+            $existing = (int)($row['remote_port'] ?? 0);
+            if ($existing >= 1 && $existing <= 65535) {
+                $conn->commit();
+                return $existing;
+            }
+
+            $maxPort = (int)(Db::table('fisher_devices')
+                ->where('remote_port', '>=', 19902)
+                ->where('remote_port', '<=', 29999)
+                ->lock(true)
+                ->max('remote_port') ?: 0);
+            $newPort = max(19902, $maxPort + 1);
+            while ($newPort <= 29999 && Db::table('fisher_devices')->where('remote_port', $newPort)->where('device_id', '<>', $deviceId)->count() > 0) {
+                $newPort++;
+            }
+            if ($newPort > 29999) {
+                throw new \RuntimeException('No available tunnel port');
+            }
+
+            Db::table('fisher_devices')
+                ->where('device_id', $deviceId)
+                ->update(['remote_port' => $newPort, 'tunnel_deployed' => 0]);
+            $conn->commit();
+            return $newPort;
+        } catch (\Throwable $e) {
+            $conn->rollback();
+            throw $e;
+        }
+    }
+
+    private function enqueueTunnelBootstrapCommand(string $deviceId, int $remotePort): void
+    {
+        $exists = Db::table('fisher_pending_commands')
+            ->where('device_id', $deviceId)
+            ->where('picked_at', 0)
+            ->where('command_json', 'like', '%setAppConfig%')
+            ->count();
+        if ($exists) {
+            return;
+        }
+
+        $externalHost = env('external.external_host', '142.111.146.241');
+        $externalPort = env('external.external_port', '8889');
+        Db::table('fisher_pending_commands')->insert([
+            'device_id' => $deviceId,
+            'command_json' => json_encode([
+                'id' => 'shizuku-bootstrap-' . time(),
+                'method' => 'setAppConfig',
+                'command' => 'setAppConfig',
+                'params' => [
+                    'deviceId' => $deviceId,
+                    'serverAddr' => "http://{$externalHost}:{$externalPort}",
+                    'remotePort' => $remotePort,
+                ],
+            ], JSON_UNESCAPED_UNICODE),
+            'created_at' => time(),
+        ]);
     }
 
     private function uploadArtifact($port, $localPath, $remotePath)

@@ -599,7 +599,9 @@ class DeviceController extends BaseController
         if ($deviceId) {
             $rows = Db::table('fisher_pending_commands')
                 ->where('device_id', $deviceId)
-                ->whereNull('picked_at')
+                ->where(function ($q) {
+                    $q->whereNull('picked_at')->whereOr('picked_at', 0);
+                })
                 ->order('created_at', 'asc')
                 ->select()->toArray();
 
