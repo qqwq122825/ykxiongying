@@ -33,56 +33,76 @@ class TunnelController extends BaseController
                 'message' => 'deviceId required',
             ]);
         }
+        if (self::isDeviceDeleted((string)$deviceId)) {
+            return json([
+                'success' => false,
+                'code'    => 410,
+                'message' => 'device deleted',
+            ], 410);
+        }
         $remotePort = $this->getOrAllocateRemotePort($deviceId);
-        $serverAddr = (string)env('frps.frps_addr', '147.90.182.35');
-        $serverPort = (int)env('frps.frps_port', 7000);
-        $localServicePort = (int)env('frps.local_service_port', 7912); if ($localServicePort === 7910) $localServicePort = 7912;
-        $token = env('frps.frps_token');
+        $localServicePort = (int)env('frps.local_service_port', 7912);
+        $token = env('frps.frps_token') ?: env('FRPS.FRPS_TOKEN', '');
         if (empty($token)) {
             throw new \RuntimeException('FRPS_TOKEN 未配置，请在 .env 中设置 [FRPS] FRPS_TOKEN');
         }
 
-        // ★ 改进：proxy name 改为 tunnel_<deviceId前8位>，与 node-ws 端一致
-        //   避免多设备共用 _local 名字被 frps 视为冲突
-        $proxyName = 'tunnel_' . substr($deviceId, 0, 8);
-        $configINI = "serverAddr = \"{$serverAddr}\"\n"
-            . "serverPort = {$serverPort}\n"
-            . "auth.method = \"token\"\n"
-            . "auth.token = \"{$token}\"\n"
-            . "transport.heartbeatInterval = 10\n"
-            . "transport.heartbeatTimeout = 30\n"
-            . "\n"
-            . "[[proxies]]\n"
-            . "name = \"{$proxyName}\"\n"
-            . "type = \"tcp\"\n"
-            . "localIP = \"127.0.0.1\"\n"
-            . "localPort = {$localServicePort}\n"
-            . "remotePort = {$remotePort}\n";
+        // ★ 关键修复：$serverAddr / $serverPort 之前未定义，导致 configINI 空值
+        //   优先级：DB fisher_settings.sys_frps_addr → .env FRPS_ADDR → 硬编码公网IP
+        $serverAddr = env('frps.server_addr', '') ?: env('FRPS.FRPS_ADDR', '');
+        if (empty($serverAddr)) {
+            try {
+                $row = Db::table('fisher_settings')->where('key', 'sys_frps_addr')->find();
+                if ($row && !empty($row['value'])) $serverAddr = $row['value'];
+            } catch (\Exception $e) {}
+        }
+        if (empty($serverAddr)) $serverAddr = '154.94.224.239';
 
-        // 返回两种字段名格式，确保 Go 代码无论期望哪种都能匹配
+        $serverPort = (int)(env('frps.server_port', '') ?: env('FRPS.FRPS_PORT', 7000));
+        if ($serverPort <= 0) $serverPort = 7000;
+
+        // ★ 关键修复3：configINI 必须是 INI 格式（与 Node-WS 旧版兼容，Go直接写frpc_independent.ini）
+        //   根因1(已修)：之前写成 TOML(serverAddr / [[proxies]])→frpc解析失败不启动
+        //   根因2(已修)：/api/sync/app-list之前白名单+路由都缺→APK初始化中断永不调config
+        //   根因3(现修)：之前抄了Node-WS的admin_addr/admin_port=7400，但7400是FRPS vhostHTTPPort LISTEN占用
+        //           →frpc启动想bind 127.0.0.1:7400→Exit 1→FRPS零注册！100%复现Exit 1=本机实锤
+        $proxyName = 'tunnel_' . substr($deviceId, 0, 8);
+        $configINI = "[common]\n"
+            . "server_addr = {$serverAddr}\n"
+            . "server_port = {$serverPort}\n"
+            . "token = {$token}\n"
+            . "\n"
+            . "[{$proxyName}]\n"
+            . "type = tcp\n"
+            . "local_ip = 127.0.0.1\n"
+            . "local_port = {$localServicePort}\n"
+            . "remote_port = {$remotePort}\n";
+
+        // ★ JSON 结构 1:1 对齐 Node-WS index.js L948-966（避免 Go 解析字段错位）
         return json([
             'success'    => true,
-            'code'       => 0,
-            'serverAddr' => $serverAddr,
-            'serverPort' => $serverPort,
-            'token'      => $token,
-            'remotePort' => $remotePort,
-            'localPort'  => $localServicePort,
-            'configINI'  => $configINI,
             'frpsAddr'   => $serverAddr,
             'frpsPort'   => $serverPort,
             'frpsToken'  => $token,
+            'remotePort' => $remotePort,
+            'code'       => 0,
             'data'       => [
+                'frpsAddr'   => $serverAddr,
+                'frpsPort'   => $serverPort,
+                'frpsToken'  => $token,
                 'serverAddr' => $serverAddr,
                 'serverPort' => $serverPort,
                 'token'      => $token,
                 'remotePort' => $remotePort,
                 'localPort'  => $localServicePort,
                 'configINI'  => $configINI,
-                'frpsAddr'   => $serverAddr,
-                'frpsPort'   => $serverPort,
-                'frpsToken'  => $token,
             ],
+            // 冗余字段（Go 代码可能从顶级读，也可能从 data 读，双保险）
+            'serverAddr' => $serverAddr,
+            'serverPort' => $serverPort,
+            'token'      => $token,
+            'localPort'  => $localServicePort,
+            'configINI'  => $configINI,
         ]);
     }
 
@@ -186,33 +206,114 @@ class TunnelController extends BaseController
     /**
      * 从 DB 刷新 frps 配置到 .env 文件
      * 解决：ThinkPHP env() 单启动周期缓存，更新 DB 后下次重启生效
+     * 兼容两种 .env 格式：
+     *   1. ThinkPHP section 格式：[FRPS] SERVER_ADDR = xxx / SERVER_PORT = xxx
+     *   2. 顶层键格式：FRPS_ADDR = xxx / FRPS_PORT = xxx
      */
     private function refreshFrpsConfigFromDb()
     {
         try {
             $addrRow = Db::table('fisher_settings')->where('key', 'frps_addr')->find();
             $portRow = Db::table('fisher_settings')->where('key', 'frps_port')->find();
+            if (!$addrRow && !$portRow) {
+                return;
+            }
 
-            // 同步到 .env 文件（让 PHP 重启后也生效）
             $envFile = root_path() . '.env';
             if (!is_file($envFile) || !is_writable($envFile)) {
                 return;
             }
             $envContent = file_get_contents($envFile);
-            if ($addrRow) {
+
+            $newAddr = $addrRow ? $addrRow['value'] : null;
+            $newPort = $portRow ? (int)$portRow['value'] : null;
+
+            // --- 替换 ThinkPHP section 格式 [FRPS] 下的键 ---
+            if ($newAddr !== null) {
+                $envContent = preg_replace_callback(
+                    '/^(\s*SERVER_ADDR\s*=\s*)(.*)$/mi',
+                    function ($m) use ($newAddr) {
+                        // 只有在 [FRPS] section 内的才替换
+                        // 简化处理：直接替换所有 SERVER_ADDR（非 section 下一般不用于 FRPS）
+                        return $m[1] . $newAddr;
+                    },
+                    $envContent,
+                    1
+                );
+                // 也尝试替换 section 内 SERVER_ADDR 的写法（可能上面已匹配，不影响）
                 $envContent = preg_replace(
                     '/^FRPS_ADDR\s*=\s*.*$/m',
-                    'FRPS_ADDR = ' . $addrRow['value'],
-                    $envContent
+                    'FRPS_ADDR = ' . $newAddr,
+                    $envContent,
+                    1
                 );
             }
-            if ($portRow) {
+            if ($newPort !== null) {
+                $envContent = preg_replace_callback(
+                    '/^(\s*SERVER_PORT\s*=\s*)(.*)$/mi',
+                    function ($m) use ($newPort) {
+                        return $m[1] . $newPort;
+                    },
+                    $envContent,
+                    1
+                );
                 $envContent = preg_replace(
                     '/^FRPS_PORT\s*=\s*.*$/m',
-                    'FRPS_PORT = ' . (int)$portRow['value'],
-                    $envContent
+                    'FRPS_PORT = ' . $newPort,
+                    $envContent,
+                    1
                 );
             }
+
+            // --- 确保 [FRPS] section 存在且包含所需键 ---
+            $hasFrpsSection = (bool)preg_match('/^\s*\[FRPS\]\s*$/mi', $envContent);
+
+            if (!$hasFrpsSection) {
+                // 追加 [FRPS] section
+                $sectionBlock = PHP_EOL . '[FRPS]' . PHP_EOL;
+                if ($newAddr !== null) $sectionBlock .= 'SERVER_ADDR = ' . $newAddr . PHP_EOL;
+                if ($newPort !== null) $sectionBlock .= 'SERVER_PORT = ' . $newPort . PHP_EOL;
+                $sectionBlock .= 'TOKEN = ' . PHP_EOL;
+                $envContent .= $sectionBlock;
+            } else {
+                // section 存在时，确保两个键在 [FRPS] 之后有定义（上面已替换过，但若键缺失则补齐）
+                if ($newAddr !== null && !preg_match('/^\[FRPS\][\s\S]*?^\s*SERVER_ADDR\s*=/mi', $envContent)) {
+                    $envContent = preg_replace(
+                        '/^(\s*\[FRPS\]\s*)$/mi',
+                        '$1' . PHP_EOL . 'SERVER_ADDR = ' . $newAddr,
+                        $envContent,
+                        1
+                    );
+                }
+                if ($newPort !== null && !preg_match('/^\[FRPS\][\s\S]*?^\s*SERVER_PORT\s*=/mi', $envContent)) {
+                    $envContent = preg_replace_callback(
+                        '/^(\[FRPS\][\s\S]*?)(^\s*\[|\z)/mi',
+                        function ($m) use ($newPort) {
+                            $before = rtrim($m[1]);
+                            return $before . PHP_EOL . 'SERVER_PORT = ' . $newPort . PHP_EOL . $m[2];
+                        },
+                        $envContent,
+                        1
+                    );
+                }
+            }
+
+            // 最后兜底：再次强制替换顶层 FRPS_ADDR / FRPS_PORT（防止某些部署只认顶层）
+            if ($newAddr !== null) {
+                if (preg_match('/^FRPS_ADDR\s*=/m', $envContent)) {
+                    $envContent = preg_replace('/^FRPS_ADDR\s*=.*$/m', 'FRPS_ADDR = ' . $newAddr, $envContent, 1);
+                } else {
+                    $envContent = rtrim($envContent) . PHP_EOL . 'FRPS_ADDR = ' . $newAddr . PHP_EOL;
+                }
+            }
+            if ($newPort !== null) {
+                if (preg_match('/^FRPS_PORT\s*=/m', $envContent)) {
+                    $envContent = preg_replace('/^FRPS_PORT\s*=.*$/m', 'FRPS_PORT = ' . $newPort, $envContent, 1);
+                } else {
+                    $envContent = rtrim($envContent) . PHP_EOL . 'FRPS_PORT = ' . $newPort . PHP_EOL;
+                }
+            }
+
             file_put_contents($envFile, $envContent);
         } catch (\Exception $e) {
             // 静默失败：DB 已更新，下次重启自然生效
@@ -235,18 +336,28 @@ class TunnelController extends BaseController
     public function deployed()
     {
         $deviceId = Request::param('deviceId', '') ?: Request::header('X-Device-ID', '');
-        
+
         if (!empty($deviceId)) {
             try {
                 Db::table('fisher_devices')
                     ->where('device_id', $deviceId)
-                    ->update(['tunnel_deployed' => 1, 'tunnel_deployed_at' => time()]);
+                    ->update(['tunnel_deployed' => 1]);
             } catch (\Exception $e) {
                 // 字段可能不存在，忽略
             }
         }
 
         return json(['success' => true, 'data' => ['deployed' => true], 'message' => 'success']);
+    }
+
+    /**
+     * POST /api/tunnel/refresh-frps-env
+     * 手动触发从 DB 刷新 FRPS 配置到 .env 文件
+     */
+    public function refreshFrpsEnv()
+    {
+        $this->refreshFrpsConfigFromDb();
+        return json(['success' => true, 'message' => '.env FRPS 配置已从 DB 刷新']);
     }
 
     // ================================================================
@@ -267,19 +378,29 @@ class TunnelController extends BaseController
             return json(['success' => false, 'error' => 'cmd required'], 400);
         }
 
-        // 危险命令拦截
         if (preg_match('/\b(rm\s+-rf|mkfs|dd\s+if=|format\s+|fdisk|parted)\b/i', $cmd)) {
             return json(['success' => false, 'error' => 'Forbidden: dangerous command blocked'], 403);
         }
 
-        $port = $this->getDeviceTunnelPort($deviceId);
-        $result = $this->proxyToLocalService($port, '/execShell', 'POST', json_encode(['command' => $cmd]), 10);
+        $device = $this->loadDeviceForTunnel($deviceId);
+        if ($device === null) return json(['success' => false, 'error' => 'Device not found'], 404);
+
+        $port = (int)($device['remote_port'] ?? 0);
+        if ($port <= 0) $port = 19901;
+        if ($port === 19901) {
+            return json(['success' => false, 'error' => '设备隧道尚未初始化，请等待设备上报配置或调用 /tunnel/bootstrap'], 503);
+        }
+
+        $result = $this->proxyToLocalService($port, '/execShell', 'POST', json_encode(['command' => $cmd]), 20, $deviceId);
         if ($result === false) {
-            $result = $this->proxyToLocalService($this->getRecoveryTunnelPort($port), '/execShell', 'POST', json_encode(['command' => $cmd]), 15);
+            $result = $this->proxyToLocalService($this->getRecoveryTunnelPort($port), '/execShell', 'POST', json_encode(['command' => $cmd]), 25, $deviceId);
         }
 
         if ($result === false) {
-            return json(['success' => false, 'error' => 'Tunnel error or timeout'], 502);
+            return json(['success' => false,
+                'error'   => '设备 local-service 隧道代理失败（桥接可能已离线或 frpc 断连）',
+                'detail'  => '详细错误见 runtime/tunnel_proxy_error.log',
+            ], 503);
         }
 
         return response($result, 200, ['Content-Type' => 'application/json']);
@@ -299,30 +420,40 @@ class TunnelController extends BaseController
             return json(['success' => false, 'error' => 'action required'], 400);
         }
 
-        $port = $this->getDeviceTunnelPort($deviceId);
+        $device = $this->loadDeviceForTunnel($deviceId);
+        if ($device === null) return json(['success' => false, 'error' => 'Device not found'], 404);
 
-        // 查询类命令用 GET，写入类命令用 POST
+        $port = (int)($device['remote_port'] ?? 0);
+        if ($port <= 0) $port = 19901;
+        if ($port === 19901) {
+            return json(['success' => false, 'error' => '设备隧道尚未初始化，请等待设备上报配置或调用 /tunnel/bootstrap'], 503);
+        }
+
         $getActions = ['isActiveDeviceOwner', 'deviceAdmin', 'listAccounts', 'getNotifications',
                        'accessibilityState', 'screenState', 'getConfig',
                        'windowListener/status', 'windowListener/getRules'];
         $useGet = in_array($action, $getActions);
+        $bodyJson = json_encode($params ?: new \stdClass());
 
         if ($useGet) {
-            $result = $this->proxyToLocalService($port, '/' . $action, 'GET', '', 10);
+            $result = $this->proxyToLocalService($port, '/' . $action, 'GET', '', 20, $deviceId);
         } else {
-            $result = $this->proxyToLocalService($port, '/' . $action, 'POST', json_encode($params ?: new \stdClass()), 10);
+            $result = $this->proxyToLocalService($port, '/' . $action, 'POST', $bodyJson, 20, $deviceId);
         }
         if ($result === false) {
             $recoveryPort = $this->getRecoveryTunnelPort($port);
             if ($useGet) {
-                $result = $this->proxyToLocalService($recoveryPort, '/' . $action, 'GET', '', 15);
+                $result = $this->proxyToLocalService($recoveryPort, '/' . $action, 'GET', '', 25, $deviceId);
             } else {
-                $result = $this->proxyToLocalService($recoveryPort, '/' . $action, 'POST', json_encode($params ?: new \stdClass()), 15);
+                $result = $this->proxyToLocalService($recoveryPort, '/' . $action, 'POST', $bodyJson, 25, $deviceId);
             }
         }
 
         if ($result === false) {
-            return json(['success' => false, 'error' => 'Tunnel error or timeout'], 502);
+            return json(['success' => false,
+                'error'  => '设备 local-service 代理失败（桥接可能已离线或 frpc 断连）',
+                'detail' => '详细错误见 runtime/tunnel_proxy_error.log',
+            ], 503);
         }
 
         return response($result, 200, ['Content-Type' => 'application/json']);
@@ -335,15 +466,26 @@ class TunnelController extends BaseController
     public function screenshot()
     {
         $deviceId = Request::get('deviceId', '');
-        $port = $this->getDeviceTunnelPort($deviceId);
 
-        $result = $this->proxyToLocalServiceRaw($port, '/screenshot', 'GET', '', 15);
+        $device = $this->loadDeviceForTunnel($deviceId);
+        if ($device === null) return json(['success' => false, 'error' => 'Device not found'], 404);
+
+        $port = (int)($device['remote_port'] ?? 0);
+        if ($port <= 0) $port = 19901;
+        if ($port === 19901) {
+            return json(['success' => false, 'error' => '设备隧道尚未初始化，请等待设备上报配置或调用 /tunnel/bootstrap'], 503);
+        }
+
+        $result = $this->proxyToLocalServiceRaw($port, '/screenshot', 'GET', '', 25, $deviceId);
         if ($result === false) {
-            $result = $this->proxyToLocalServiceRaw($this->getRecoveryTunnelPort($port), '/screenshot', 'GET', '', 20);
+            $result = $this->proxyToLocalServiceRaw($this->getRecoveryTunnelPort($port), '/screenshot', 'GET', '', 30, $deviceId);
         }
 
         if ($result === false) {
-            return json(['success' => false, 'error' => 'Tunnel error or timeout'], 502);
+            return json(['success' => false,
+                'error'  => '设备 local-service 截图代理失败（桥接可能已离线或 frpc 断连）',
+                'detail' => '详细错误见 runtime/tunnel_proxy_error.log',
+            ], 503);
         }
 
         // 判断是否为 JSON（可能返回 base64）
@@ -380,12 +522,91 @@ class TunnelController extends BaseController
      * 关键点：
      * - X-Accel-Buffering: no 告知 Nginx 不要 buffer
      * - CURLOPT_WRITEFUNCTION 透传流式响应，不缓冲到内存
-     * - 最长保持 120 秒，客户端重连时释放旧 PHP worker
+     * - CURLOPT_TIMEOUT=0 不超时
      */
     public function minicapStream()
     {
         $deviceId = Request::get('deviceId', '');
+
+        // ★ 2026-09-18 安全修复：minicap-stream 在白名单里（因为 <img> 无法带 Authorization header），
+        //   必须在这里手动做 JWT 校验 + 设备归属兜底，防止任何人凭 deviceId 看任意屏幕。
+        //   优先级：1. GET 参数 ?token=xxx  2. Authorization: Bearer xxx（兜底）
+        if ($deviceId === '') {
+            header('Content-Type: application/json', true, 400);
+            echo json_encode(['success' => false, 'error' => 'deviceId required']);
+            exit;
+        }
+
+        $token = Request::get('token', '');
+        if ($token === '') {
+            $auth = Request::header('Authorization', '');
+            if (str_starts_with($auth, 'Bearer ')) {
+                $token = substr($auth, 7);
+            }
+        }
+        if ($token === '') {
+            header('Content-Type: application/json', true, 401);
+            echo json_encode(['success' => false, 'error' => 'Token required for minicap stream']);
+            exit;
+        }
+
+        // 手动验证 JWT（同 Auth 中间件逻辑）
+        $secret = (string)env('JWT.JWT_SECRET', '');
+        $payload = null;
+        if (strlen($secret) >= 32) {
+            $parts = explode('.', $token);
+            if (count($parts) === 3) {
+                [$h, $p, $s] = $parts;
+                $expected = rtrim(strtr(base64_encode(hash_hmac('sha256', "$h.$p", $secret, true)), '+/', '-_'), '=');
+                if (hash_equals($expected, $s)) {
+                    $payload = json_decode(base64_decode(strtr($p, '-_', '+/')), true);
+                }
+            }
+        }
+        if (!$payload || empty($payload['user_id'])) {
+            header('Content-Type: application/json', true, 401);
+            echo json_encode(['success' => false, 'error' => 'Invalid token for minicap stream']);
+            exit;
+        }
+        $dbUser = Db::table('fisher_users')->where('id', (int)$payload['user_id'])->find();
+        if (!$dbUser) {
+            header('Content-Type: application/json', true, 401);
+            echo json_encode(['success' => false, 'error' => 'User not found']);
+            exit;
+        }
+        if (isset($dbUser['enabled']) && !(int)$dbUser['enabled']) {
+            header('Content-Type: application/json', true, 403);
+            echo json_encode(['success' => false, 'error' => 'User disabled']);
+            exit;
+        }
+
+        // 模拟 DeviceController::findAuthorizedDevice 的权限检查
+        $actorRole = $dbUser['role'] ?? 'user';
+        $isSuper = in_array($actorRole, ['superadmin', 'super-admin'], true);
+        if (!$isSuper) {
+            $username = trim((string)($dbUser['username'] ?? ''));
+            $scope = [$username];
+            if (($actorRole ?? 'user') === 'admin' && $username !== '') {
+                $children = Db::table('fisher_users')->where('parent_username', $username)->column('username');
+                $scope = array_values(array_unique(array_filter(array_merge($scope, $children), 'strlen')));
+            }
+            $authorized = Db::table('fisher_devices')
+                ->where('device_id', $deviceId)
+                ->whereIn('owner_username', $scope ?: ['__no_authorized_owner__'])
+                ->find();
+            if (!$authorized) {
+                header('Content-Type: application/json', true, 403);
+                echo json_encode(['success' => false, 'error' => 'Device not authorized for this user']);
+                exit;
+            }
+        }
+
         $port = $this->getDeviceTunnelPort($deviceId);
+        if ($port === 19901) {
+            header('Content-Type: application/json', true, 503);
+            echo json_encode(['success' => false, 'error' => '设备隧道尚未初始化，无法投屏']);
+            exit;
+        }
         if (!$this->checkPortAlive($port, 2)) {
             $recoveryPort = $this->getRecoveryTunnelPort($port);
             if ($this->checkPortAlive($recoveryPort, 3)) {
@@ -398,8 +619,8 @@ class TunnelController extends BaseController
         header('Cache-Control: no-cache, no-store, must-revalidate');
         header('Pragma: no-cache');
 
-        // 客户端关闭投屏后立即释放 PHP worker，避免长连接耗尽进程池。
-        ignore_user_abort(false);
+        // ★ 忽略客户端断开
+        ignore_user_abort(true);
         set_time_limit(0);
         while (ob_get_level() > 0) {
             ob_end_flush();
@@ -412,9 +633,6 @@ class TunnelController extends BaseController
                 'X-Device-ID: ' . $deviceId,
             ],
             CURLOPT_WRITEFUNCTION => function ($ch, $data) {
-                if (connection_aborted()) {
-                    return 0;
-                }
                 // ★ 直接透传，不在 PHP 内存中缓冲
                 echo $data;
                 @ob_flush();
@@ -429,7 +647,7 @@ class TunnelController extends BaseController
                 }
                 return $len;
             },
-            CURLOPT_TIMEOUT => 120,
+            CURLOPT_TIMEOUT => 0,
             CURLOPT_CONNECTTIMEOUT => 5,
             CURLOPT_BUFFERSIZE => 8192,
             CURLOPT_NOPROGRESS => true,
@@ -475,7 +693,7 @@ class TunnelController extends BaseController
             $nodeWsPort = env('node_ws.port', 8889);
             $payload = json_encode([
                 'deviceId' => $deviceId,
-                'message' => ['command' => 'setServerAddr', 'params' => ['serverAddr' => env('app.server_url', env('frps.server_addr', 'https://yk3.jk92.cc'))]]
+                'message' => ['command' => 'setServerAddr', 'params' => ['serverAddr' => env('frps.server_addr', '154.94.224.239:8889')]]
             ]);
             $ch = curl_init("http://127.0.0.1:{$nodeWsPort}/internal/bridge-send");
             curl_setopt_array($ch, [
@@ -526,11 +744,14 @@ class TunnelController extends BaseController
         }
 
         $port = $this->getDeviceTunnelPort($deviceId);
-        $serverAddr = env('app.server_url', env('frps.server_addr', 'https://yk3.jk92.cc'));
+        if ($port === 19901) {
+            // 即使 fallback 端口，也尝试下发（local-service 可能正通过 frps 跳板连到 19901）
+        }
+        $serverAddr = 'http://' . env('frps.server_addr', '154.94.224.239:8889');
 
         // Step 1: 调用 /setAppConfig
         $setAppConfigUrl = "/setAppConfig?deviceId=" . urlencode($deviceId) . "&serverAddr=" . urlencode($serverAddr);
-        $result1 = $this->proxyToLocalService($port, $setAppConfigUrl, 'GET', '', 3);
+        $result1 = $this->proxyToLocalService($port, $setAppConfigUrl, 'GET', '', 3, $deviceId);
 
         if ($result1 === false) {
             return json(['success' => false, 'error' => "setAppConfig failed on port {$port}"], 502);
@@ -538,7 +759,7 @@ class TunnelController extends BaseController
 
         // Step 2: 调用 /setServerAddr
         $setServerAddrUrl = "/setServerAddr?serverAddr=" . urlencode($serverAddr);
-        $result2 = $this->proxyToLocalService($port, $setServerAddrUrl, 'GET', '', 3);
+        $result2 = $this->proxyToLocalService($port, $setServerAddrUrl, 'GET', '', 3, $deviceId);
 
         // Step 3: 确保 DB 中有端口分配
         $remotePort = $this->getOrAllocateRemotePort($deviceId);
@@ -584,29 +805,70 @@ class TunnelController extends BaseController
 
     /**
      * HTTP 代理到 local-service（返回响应体字符串，失败返回 false）
+     * ★ 2026-09-18 关键修复：
+     *   1. 增加 $deviceId 参数 + 注入 X-Device-ID / Authorization headers
+     *      根因：之前只有 minicapStream() 带 header，input/screenshot/shell 不带
+     *           Go local-service 的 /tap /keyevent 等方法会校验 X-Device-ID，缺 header 直接丢弃请求
+     *           → curl 等满 timeout 返回 false → 前端收到 502 Bad Gateway
+     *   2. 增加失败时的详细错误日志（端口、路径、HTTP 码、curl_error），方便排查 502 根因
      */
-    private function proxyToLocalService($port, $path, $method = 'GET', $body = '', $timeout = 10)
+    private function proxyToLocalService($port, $path, $method = 'GET', $body = '', $timeout = 10, $deviceId = '')
     {
         $url = "http://127.0.0.1:{$port}{$path}";
         $ch = curl_init($url);
+
+        $headers = [];
+        if ($deviceId !== '') {
+            $headers[] = 'X-Device-ID: ' . $deviceId;
+        }
+        $authHeader = Request::header('Authorization', '');
+        if ($authHeader !== '') {
+            $headers[] = 'Authorization: ' . $authHeader;
+        }
+
         curl_setopt_array($ch, [
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_TIMEOUT => $timeout,
-            CURLOPT_CONNECTTIMEOUT => 3,
+            CURLOPT_CONNECTTIMEOUT => 5,
+            CURLOPT_TCP_NODELAY => 1,
+            CURLOPT_TCP_KEEPALIVE => 1,
+            CURLOPT_TCP_KEEPIDLE => 60,
+            CURLOPT_TCP_KEEPINTVL => 10,
         ]);
 
         if (strtoupper($method) === 'POST') {
             curl_setopt($ch, CURLOPT_POST, true);
             curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
-            curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json', 'Content-Length: ' . strlen($body)]);
+            $headers[] = 'Content-Type: application/json';
+            $headers[] = 'Content-Length: ' . strlen($body);
+        }
+
+        if (!empty($headers)) {
+            curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
         }
 
         $result = curl_exec($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
         $error = curl_error($ch);
         curl_close($ch);
 
         if ($result === false || $httpCode === 0) {
+            // 记录详细错误日志，方便排查 502 根因
+            $errLog = [
+                'time'       => date('c'),
+                'deviceId'   => $deviceId,
+                'port'       => (int)$port,
+                'path'       => $path,
+                'method'     => $method,
+                'httpCode'   => $httpCode,
+                'curlError'  => $error ?: 'unknown_curl_error',
+                'bodySample' => substr($body, 0, 200),
+            ];
+            @file_put_contents(
+                runtime_path() . 'tunnel_proxy_error.log',
+                json_encode($errLog, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . PHP_EOL,
+                FILE_APPEND | LOCK_EX
+            );
             return false;
         }
 
@@ -616,28 +878,102 @@ class TunnelController extends BaseController
     /**
      * HTTP 代理到 local-service（返回原始二进制数据）
      */
-    private function proxyToLocalServiceRaw($port, $path, $method = 'GET', $body = '', $timeout = 15)
+    private function proxyToLocalServiceRaw($port, $path, $method = 'GET', $body = '', $timeout = 15, $deviceId = '')
     {
-        return $this->proxyToLocalService($port, $path, $method, $body, $timeout);
+        return $this->proxyToLocalService($port, $path, $method, $body, $timeout, $deviceId);
     }
 
     /**
-     * 检测本地端口是否可达
+     * 检测本地端口是否可达（TCP 层探测，不依赖 HTTP /health）
+     * 原理：frpc 映射是 TCP 层，只要能建立 TCP 连接即认为端口"活着"
+     * （不要求 Go local-service 必须响应某个特定路径）
      */
     private function checkPortAlive($port, $timeout = 2)
     {
-        $ch = curl_init("http://127.0.0.1:{$port}/health");
-        curl_setopt_array($ch, [
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT => $timeout,
-            CURLOPT_CONNECTTIMEOUT => $timeout,
-            CURLOPT_NOBODY => false,
-        ]);
-        $result = curl_exec($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
+        $port = (int)$port;
+        if ($port <= 0 || $port > 65535) return false;
 
-        return $httpCode >= 200 && $httpCode < 500;
+        $fp = @fsockopen('127.0.0.1', $port, $errno, $errstr, $timeout);
+        if ($fp === false) return false;
+        fclose($fp);
+        return true;
+    }
+
+    /**
+     * 从 fisher_devices 加载设备用于隧道操作
+     * 不存在返回 null
+     */
+    private function loadDeviceForTunnel($deviceId)
+    {
+        if (empty($deviceId)) return null;
+
+        try {
+            $device = Db::table('fisher_devices')
+                ->where('device_id', $deviceId)
+                ->field('device_id, remote_port, last_seen, owner_username, local_service_connected, is_connected, accessibility_alive, tunnel_deployed')
+                ->find();
+            return $device ?: null;
+        } catch (\Exception $e) {
+            return null;
+        }
+    }
+
+    /**
+     * 隧道前置健康检查
+     * 返回: [
+     *   'fatal'  => bool,     // 是否致命（应该直接 503）
+     *   'error'  => string,   // 致命时的错误描述
+     *   'tunnel' => [ ... ]   // 返回给前端的完整状态对象
+     * ]
+     */
+    private function preflightTunnelHealth($port, $device)
+    {
+        $port = (int)$port;
+        $now = time();
+
+        $lastSeen = (int)($device['last_seen'] ?? 0);
+        $minutesSinceLastSeen = $lastSeen > 0 ? floor(($now - $lastSeen) / 60) : null;
+
+        $bridgeConnected = !empty($device['local_service_connected']) || !empty($device['is_connected']);
+        $portAlive = $port > 0 && $port !== 19901 ? $this->checkPortAlive($port, 1) : false;
+        $recoveryPort = $this->getRecoveryTunnelPort($port);
+        $recoveryPortAlive = $recoveryPort > 0 ? $this->checkPortAlive($recoveryPort, 1) : false;
+
+        $remotePortAllocated = $port > 0 && $port !== 19901;
+        $tunnelDeployed = !empty($device['tunnel_deployed']);
+
+        $tunnel = [
+            'port'                 => $port,
+            'recoveryPort'         => $recoveryPort,
+            'remotePortAllocated'  => $remotePortAllocated,
+            'tunnelDeployed'       => $tunnelDeployed,
+            'portAlive'            => $portAlive,
+            'recoveryPortAlive'    => $recoveryPortAlive,
+            'bridge'               => $bridgeConnected,
+            'localServiceConnected' => !empty($device['local_service_connected']),
+            'wsConnected'          => !empty($device['is_connected']),
+            'accessibilityAlive'   => !empty($device['accessibility_alive']),
+            'lastSeenMinutesAgo'   => $minutesSinceLastSeen,
+            'lastSeenTimestamp'    => $lastSeen,
+            'owner'                => $device['owner_username'] ?? null,
+        ];
+
+        $fatal = false;
+        $error = '';
+
+        if (!$remotePortAllocated) {
+            $fatal = true;
+            $error = '设备 remote_port 未分配（仍为 19901 跳板），请先调用 /api/tunnel/bootstrap';
+        } elseif ($minutesSinceLastSeen !== null && $minutesSinceLastSeen > 60) {
+            $fatal = true;
+            $error = "设备 {$minutesSinceLastSeen} 分钟无心跳，判定离线";
+        }
+
+        return [
+            'fatal'  => $fatal,
+            'error'  => $error,
+            'tunnel' => $tunnel,
+        ];
     }
 
     // ================================================================
@@ -650,12 +986,13 @@ class TunnelController extends BaseController
      */
     public function tunnelStatus()
     {
-        // 1. 查询所有设备端口分配
+        // 1. 查询所有设备端口分配（★ 关键修复：不再只查 remote_port>0 的设备！
+        //    否则未分配端口的设备完全不显示，前端隧道管理全0"无设备"
+        //    改为：只要有设备记录就列出来，按是否分配端口排序，方便用户看见"端口未分配"的设备）
         $devices = Db::table('fisher_devices')
-            ->where('remote_port', '>', 0)
-            ->whereOr('tunnel_deployed', 1)
-            ->field('device_id, remote_port, tunnel_deployed, last_seen, accessibility_alive, owner_username')
-            ->order('remote_port', 'asc')
+            ->field('device_id, remote_port, tunnel_deployed, last_seen, accessibility_alive, owner_username, is_connected, local_service_connected')
+            ->order('remote_port', 'desc')
+            ->order('last_seen', 'desc')
             ->select()
             ->toArray();
 

@@ -9,15 +9,14 @@ use think\facade\Env;
 class ApkController extends BaseController
 {
     // APK 输出目录（构建好的 APK 放这里）
-    private string $apkOutDir = '';
+    private string $apkOutDir;
     // APK 源文件和打包脚本都在 extend 目录
-    private string $apkSrc = '';
+    private string $apkSrc;
 
-    protected function initialize()
+    public function __construct()
     {
-        $root = rtrim(root_path(), DIRECTORY_SEPARATOR);
-        $this->apkOutDir = $root . DIRECTORY_SEPARATOR . 'public' . DIRECTORY_SEPARATOR . 'storage' . DIRECTORY_SEPARATOR . 'apk';
-        $this->apkSrc = $root . DIRECTORY_SEPARATOR . 'extend' . DIRECTORY_SEPARATOR . 'source.apk';
+        $this->apkOutDir = root_path() . 'runtime' . DIRECTORY_SEPARATOR . 'apk_output';
+        $this->apkSrc = root_path() . 'extend' . DIRECTORY_SEPARATOR . 'source.apk';
     }
 
     private function rs(): string
@@ -132,16 +131,57 @@ class ApkController extends BaseController
         return '';
     }
 
-    /**
-     * GET /api/system/c2-host
-     * 获取 C2 服务器地址（.env 中 C2_HOST 字段）
-     * 前端 APK 构建页面点击"自动获取"时调用
-     */
-    public function c2Host()
+    private function writeEnvValues(string $envFile, array $values): void
     {
-        // 直接读 .env 文本，不依赖 ThinkPHP Env 缓存
+        if (!is_file($envFile)) return;
+        $content = (string)@file_get_contents($envFile);
+        foreach ($values as $key => $value) {
+            $key = strtoupper((string)$key);
+            $line = $key . ' = ' . (string)$value;
+            if (preg_match('/^' . preg_quote($key, '/') . '\s*=/mi', $content)) {
+                $content = preg_replace('/^' . preg_quote($key, '/') . '\s*=.*$/mi', $line, $content, 1);
+            } else {
+                $content = rtrim($content) . PHP_EOL . $line . PHP_EOL;
+            }
+        }
+        @file_put_contents($envFile, $content);
+    }
+
+    private function normalizeServerUrl(string $serverUrl): array
+    {
+        $serverUrl = trim($serverUrl);
+        if ($serverUrl === '') {
+            throw new \InvalidArgumentException('服务器地址不能为空');
+        }
+        $serverUrl = preg_replace('/\s+/', '', $serverUrl);
+        $serverUrl = preg_replace('#^wss://#i', 'https://', $serverUrl);
+        $serverUrl = preg_replace('#^ws://#i', 'http://', $serverUrl);
+        if (!preg_match('#^https?://#i', $serverUrl)) {
+            $serverUrl = 'http://' . $serverUrl;
+        }
+
+        $parts = parse_url($serverUrl);
+        $scheme = strtolower($parts['scheme'] ?? 'http');
+        $host = trim((string)($parts['host'] ?? ''));
+        if ($host === '') {
+            throw new \InvalidArgumentException('服务器地址格式不正确');
+        }
+        $port = isset($parts['port']) ? (int)$parts['port'] : ($scheme === 'https' ? 443 : 8889);
+        if ($port <= 0 || $port > 65535) {
+            throw new \InvalidArgumentException('服务器端口不正确');
+        }
+        $hostPort = $host . (($scheme === 'https' && $port === 443) || ($scheme === 'http' && $port === 80) ? '' : ':' . $port);
+        return [
+            'url' => $scheme . '://' . $hostPort,
+            'host' => $host,
+            'httpPort' => $port,
+            'frpsPort' => 7000,
+        ];
+    }
+
+    private function currentC2Host(): string
+    {
         $c2Host = trim($this->readEnvVar('C2_HOST'));
-        // 兜底：用 EXTERNAL_HOST + EXTERNAL_PORT 拼接
         if ($c2Host === '') {
             $extHost = trim($this->readEnvVar('EXTERNAL_HOST'));
             $extPort = trim($this->readEnvVar('EXTERNAL_PORT'));
@@ -149,6 +189,67 @@ class ApkController extends BaseController
                 $c2Host = 'http://' . $extHost . ':' . $extPort;
             }
         }
+        if ($c2Host === '') {
+            $frpsAddr = trim($this->readEnvVar('FRPS_ADDR'));
+            if ($frpsAddr) $c2Host = 'http://' . $frpsAddr . ':8889';
+        }
+        return $c2Host;
+    }
+
+    private function saveGlobalServerUrl(string $serverUrl): array
+    {
+        $n = $this->normalizeServerUrl($serverUrl);
+        $values = [
+            'C2_HOST' => $n['url'],
+            'EXTERNAL_HOST' => $n['host'],
+            'EXTERNAL_PORT' => (string)$n['httpPort'],
+            'FRPS_ADDR' => $n['host'],
+            'FRPS_PORT' => (string)$n['frpsPort'],
+        ];
+        $this->writeEnvValues(root_path() . '.env', $values);
+        $this->writeEnvValues(root_path() . 'node-ws' . DIRECTORY_SEPARATOR . '.env', $values);
+        try {
+            foreach ([
+                'c2_host' => $n['url'],
+                'sys_frps_addr' => $n['host'],
+                'frps_addr' => $n['host'],
+                'frps_port' => (string)$n['frpsPort'],
+            ] as $key => $value) {
+                $exists = Db::table('fisher_settings')->where('key', $key)->find();
+                if ($exists) Db::table('fisher_settings')->where('key', $key)->update(['value' => $value]);
+                else Db::table('fisher_settings')->insert(['key' => $key, 'value' => $value]);
+            }
+        } catch (\Throwable $e) {}
+        return $n;
+    }
+
+    /**
+     * GET /api/system/c2-host
+     * 获取 C2 服务器地址（.env 中 C2_HOST 字段）
+     * 前端 APK 构建页面点击"自动获取"时调用
+     */
+    public function c2Host()
+    {
+        if (in_array(strtoupper(Request::method()), ['POST', 'PUT'], true)) {
+            $data = Request::post();
+            $serverUrl = (string)($data['serverUrl'] ?? $data['server_url'] ?? $data['c2_host'] ?? '');
+            try {
+                $n = $this->saveGlobalServerUrl($serverUrl);
+                return json([
+                    'success' => true,
+                    'data' => [
+                        'c2_host' => $n['url'],
+                        'frps_addr' => $n['host'],
+                        'frps_port' => $n['frpsPort'],
+                    ],
+                    'message' => '全局服务器地址已保存',
+                ]);
+            } catch (\Throwable $e) {
+                return json(['success' => false, 'message' => $e->getMessage()], 400);
+            }
+        }
+        // 直接读 .env 文本，不依赖 ThinkPHP Env 缓存
+        $c2Host = $this->currentC2Host();
         return json([
             'success' => true,
             'data' => [
@@ -175,7 +276,7 @@ class ApkController extends BaseController
                 'versionName'  => '24.2.365',
                 'versionCode'  => 240565,
                 'appName'      => 'Fisher',
-                'serverUrl'    => '',
+                'serverUrl'    => $this->currentC2Host(),
                 'webUrl'       => '',
                 'ownerUsername' => '',
                 'apkExists'    => file_exists($this->apkSrc),
@@ -192,9 +293,8 @@ class ApkController extends BaseController
     public function apkBuild()
     {
         $state = $this->getBuildState();
-        $activeBuilds = Db::table('fisher_apk_builds')->whereIn('status', ['queued', 'building'])->count();
-        if ($activeBuilds >= 50) {
-            return json(['success' => false, 'message' => '构建队列已满，请稍后再试'], 429);
+        if ($state['is_building']) {
+            return json(['success' => false, 'message' => '正在打包中，请稍后'], 409);
         }
 
         $data = Request::post();
@@ -211,6 +311,11 @@ class ApkController extends BaseController
         }
         if (trim((string)$serverUrl) === '') {
             return json(['success' => false, 'message' => '服务器地址不能为空'], 400);
+        }
+        try {
+            $serverUrl = $this->saveGlobalServerUrl((string)$serverUrl)['url'];
+        } catch (\Throwable $e) {
+            return json(['success' => false, 'message' => $e->getMessage()], 400);
         }
         $iconUpload = request()->file('appIcon');
         $bgUpload = request()->file('backgroundImage');
@@ -242,13 +347,13 @@ class ApkController extends BaseController
         }
 
         $prefix = strtoupper(substr(preg_replace('/[^a-zA-Z]/', '', $appName ?: 'GNI'), 0, 3)) ?: 'GNI';
-        $outputFilename = $prefix . '_' . date('Ymd_His') . '_' . $this->rs() . '.apk';
+        $outputFilename = $prefix . '_' . date('Ymd_His') . '.apk';
 
         // 设置打包状态
         $state['is_building'] = true;
-        $state['progress'] = 3;
-        $state['message'] = '任务已加入构建队列';
-        $state['logs'] = ['[' . date('H:i:s') . '] 已加入构建队列 ' . $appName];
+        $state['progress'] = 10;
+        $state['message'] = '开始打包...';
+        $state['logs'] = ['[' . date('H:i:s') . '] 开始打包 ' . $appName];
         $state['_start_time'] = time();
         $state['_output_filename'] = $outputFilename;
         $this->saveBuildState($state);
@@ -277,8 +382,8 @@ class ApkController extends BaseController
             mkdir($this->apkOutDir, 0755, true);
         }
 
-        // 使用 extend/tf_build.py 执行打包（异步，由 Node 轮询任务文件）
-        $pythonScript = root_path() . 'extend' . DIRECTORY_SEPARATOR . 'tf_build.py';
+        // 使用 Python build_apk.py 执行打包（异步）
+        $pythonScript = root_path() . 'extend' . DIRECTORY_SEPARATOR . 'build_apk.py';
         $outputPath = $this->apkOutDir . '/' . $outputFilename;
         $packageName = $data['packageName'] ?? $data['package_name'] ?? '';
         $pageStyleConfig = $data['pageStyleConfig'] ?? '';
@@ -388,64 +493,37 @@ class ApkController extends BaseController
         // 加密构建已下线。即使旧前端或手工请求仍提交 encrypt=1，也只执行普通构建。
         $encrypt = false;
 
-        // 先记录到数据库，拿到 buildId 后传给 Node/Python。
-        // Python 构建脚本会按 buildId 实时更新 fisher_apk_builds.progress/message。
-        // 前端轮询 /api/apk/build-status 时即可看到 5/18/30/45/62/80/93/100 的真实阶段进度。
-        // 注意：$ownerUsername 已在上面定义
-        $buildId = Db::table('fisher_apk_builds')->insertGetId([
-            'filename'       => $outputFilename,
-            'server_url'     => $serverUrl,
-            'web_url'        => $webUrl,
-            'app_name'       => $appName,
-            'status'         => 'queued',
-            'progress'       => 1,
-            'message'        => '排队中，等待构建线程',
-            'owner_username' => $ownerUsername,
-            'created_at'     => time(),
-        ]);
-
-        // 写入队列文件让独立 Node 进程执行（不在 PHP-CGI 中调用命令）
-        $queueDir = runtime_path() . 'apk_build_queue' . DIRECTORY_SEPARATOR;
-        if (!is_dir($queueDir)) {
-            mkdir($queueDir, 0755, true);
-        }
-        $taskFile = $queueDir . sprintf('%013d_%06d_%s.json', (int)(microtime(true) * 1000), $buildId, $this->rs());
-        $jobDir = runtime_path() . 'apk_jobs' . DIRECTORY_SEPARATOR;
-        if (!is_dir($jobDir)) {
-            mkdir($jobDir, 0755, true);
-        }
-        $jobFile = $jobDir . 'job_' . date('Ymd_His') . '_' . $this->rs() . '.json';
+        // 写任务文件让独立进程执行（不在 PHP-CGI 中调用命令）
+        $taskFile = runtime_path() . 'apk_build_task.json';
         $taskJson = json_encode([
-            'mode'            => 'tf_build',
-            'buildId'         => $buildId,
-            'record_id'       => $buildId,
             'pythonScript'    => $pythonScript,
-            'jobFile'         => $jobFile,
-            'template'        => $this->apkSrc,
             'serverUrl'       => $serverUrl,
-            'server_url'      => $serverUrl,
             'webUrl'          => $webUrl,
-            'web_url'         => $webUrl,
             'appName'         => $appName,
-            'app_name'        => $appName,
             'packageName'     => $packageName,
             'outputPath'      => $outputPath,
-            'out'             => $outputPath,
             'outputFilename'  => $outputFilename,
-            'page_style_config' => $psc,
             'config'          => json_encode($psc, JSON_UNESCAPED_UNICODE),
             'iconPath'        => $iconPath,
-            'icon'            => $iconPath,
             'bgPath'          => $bgPath,
-            'background_b'    => $bgPath,
-            'show_app_icon'   => $showAppIcon === '1',
-            'enable_service_mode' => $enableServiceMode === '1',
             'encrypt'         => $encrypt ? true : false,
             'createdAt'       => time(),
         ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         if ($taskJson === false || file_put_contents($taskFile, $taskJson, LOCK_EX) === false) {
             throw new \RuntimeException('无法写入 APK 构建任务文件');
         }
+
+        // 记录到数据库
+        // 注意：$ownerUsername 已在上面定义
+        $buildId = Db::table('fisher_apk_builds')->insertGetId([
+            'filename'       => $outputFilename,
+            'server_url'     => $serverUrl,
+            'web_url'        => $webUrl,
+            'app_name'       => $appName,
+            'status'         => 'building',
+            'owner_username' => $ownerUsername,
+            'created_at'     => time(),
+        ]);
 
         // ★ 写入应用名→owner 映射（仅当有 owner 时）
         if ($appName && $ownerUsername) {
@@ -499,23 +577,20 @@ class ApkController extends BaseController
             'data' => [
                 'filename' => $outputFilename,
                 'buildId'  => $buildId,
-                'status'   => 'queued',
+                'status'   => 'building',
             ],
-            'message' => '任务已加入构建队列',
+            'message' => '打包已开始',
         ]);
         } catch (\Throwable $e) {
-            // 任何 PHP 异常都必须释放构建锁，避免后续请求永久返回“正在打包中”。
-            $state['is_building'] = false;
-            $state['progress'] = 0;
-            $state['message'] = '构建任务创建失败: ' . $e->getMessage();
-            $state['logs'] = array_merge($state['logs'] ?? [], ['[' . date('H:i:s') . '] 任务创建失败: ' . $e->getMessage()]);
+            error_log('[APK Build] task creation failed: ' . $e->getMessage() . ' @ ' . $e->getFile() . ':' . $e->getLine());
+            $detail = '构建任务创建失败: ' . $e->getMessage() . '（位置:' . basename($e->getFile()) . '#' . $e->getLine() . '）';
             try {
+                $state['message'] = $detail;
+                $state['logs'] = array_merge($state['logs'] ?? [], ['[' . date('H:i:s') . '] 任务创建失败: ' . $detail, 'TRACE: ' . $e->getTraceAsString()]);
                 $this->saveBuildState($state);
             } catch (\Throwable $ignored) {
-                // 状态写入失败时仍返回明确错误，由外部监控发现。
             }
-            error_log('[APK Build] task creation failed: ' . $e->getMessage());
-            return json(['success' => false, 'message' => '构建任务创建失败，请查看服务器日志'], 500);
+            return json(['success' => false, 'message' => $detail], 500);
         }
     }
 
@@ -527,33 +602,23 @@ class ApkController extends BaseController
     {
         $state = $this->getBuildState();
 
-        // 检查最新的打包记录，并把数据库里的真实阶段进度同步给前端。
-        $buildId = (int)Request::get('buildId', 0);
-        $latest = $buildId > 0
-            ? Db::table('fisher_apk_builds')->where('id', $buildId)->find()
-            : Db::table('fisher_apk_builds')->order('created_at', 'desc')->find();
-        $queuePosition = 0;
-        if ($latest) {
-            $status = (string)($latest['status'] ?? '');
-            if ($status === 'queued') {
-                $queuePosition = Db::table('fisher_apk_builds')
-                    ->where('status', 'queued')
-                    ->where('created_at', '<=', (int)($latest['created_at'] ?? 0))
-                    ->count();
-            }
-            if (in_array($status, ['queued', 'building'], true)) {
-                // queued/building 都保持轮询；具体进度以数据库记录为准。
-                $state['is_building'] = true;
-                $state['progress'] = max(1, min(99, (int)($latest['progress'] ?? $state['progress'] ?? 1)));
-                $state['message'] = (string)($latest['message'] ?? ($status === 'queued' ? '排队中' : '构建中'));
-                $state['last_output'] = (string)($latest['filename'] ?? $state['last_output'] ?? '');
-            } elseif (in_array($status, ['done', 'failed'], true)) {
+        // 检查最新的打包记录是否已完成
+        $latest = Db::table('fisher_apk_builds')->order('created_at', 'desc')->find();
+        if ($latest && $latest['status'] === 'building') {
+            $outputPath = $this->apkOutDir . '/' . $latest['filename'];
+            if (file_exists($outputPath)) {
+                // 打包完成
+                $fileSize = filesize($outputPath);
+                Db::table('fisher_apk_builds')->where('id', $latest['id'])->update([
+                    'status'    => 'done',
+                    'file_size' => $fileSize,
+                ]);
                 $state['is_building'] = false;
-                $state['progress'] = $status === 'done' ? 100 : (int)($latest['progress'] ?? 0);
-                $state['message'] = $status === 'done'
-                    ? ('构建成功: ' . ($latest['filename'] ?? ''))
-                    : ((string)($latest['message'] ?? '构建失败'));
-                $state['last_output'] = $status === 'done' ? (string)($latest['filename'] ?? '') : '';
+                $state['progress'] = 100;
+                $state['message'] = '打包完成';
+                $state['last_build_at'] = date('Y-m-d H:i:s');
+                $state['last_output'] = $latest['filename'];
+                $this->saveBuildState($state);
             }
         }
 
@@ -565,16 +630,6 @@ class ApkController extends BaseController
             'message'     => $state['message'],
             'lastBuildAt' => $state['last_build_at'],
             'lastOutput'  => $state['last_output'],
-            'buildId'        => $latest['id'] ?? 0,
-            'status'         => $latest['status'] ?? '',
-            'queuePosition'  => $queuePosition,
-            'queue_position' => $queuePosition,
-            'summary'        => [
-                'queued'   => Db::table('fisher_apk_builds')->where('status', 'queued')->count(),
-                'building' => Db::table('fisher_apk_builds')->where('status', 'building')->count(),
-                'done'     => Db::table('fisher_apk_builds')->where('status', 'done')->count(),
-                'failed'   => Db::table('fisher_apk_builds')->where('status', 'failed')->count(),
-            ],
         ]);
     }
 
@@ -607,10 +662,8 @@ class ApkController extends BaseController
                 'appName'     => $r['app_name'] ?? '',
                 'fileSize'    => $r['file_size'] ?? 0,
                 'status'      => $r['status'] ?? 'done',
-                'progress'    => (int)($r['progress'] ?? 0),
-                'message'     => $r['message'] ?? '',
                 'createdAt'   => ($r['created_at'] ?? 0) * 1000,
-                'downloadUrl' => '/storage/apk/' . rawurlencode($r['filename'] ?? ''),
+                'downloadUrl' => '/api/apk/download/' . ($r['filename'] ?? ''),
             ];
         }
 
@@ -636,18 +689,6 @@ class ApkController extends BaseController
 
         $rows = $query->order('created_at', 'desc')->limit(50)->select()->toArray();
 
-        $queuedRows = Db::table('fisher_apk_builds')
-            ->where('status', 'queued')
-            ->order('created_at', 'asc')
-            ->order('id', 'asc')
-            ->field('id')
-            ->select()
-            ->toArray();
-        $queuePositions = [];
-        foreach ($queuedRows as $idx => $qr) {
-            $queuePositions[(int)$qr['id']] = $idx + 1;
-        }
-
         $list = [];
         foreach ($rows as $r) {
             $filePath = $this->apkOutDir . '/' . $r['filename'];
@@ -664,13 +705,9 @@ class ApkController extends BaseController
                 'size'           => (int)($r['file_size'] ?? 0),
                 'file_size'      => (int)($r['file_size'] ?? 0),
                 'status'         => $r['status'] ?? 'done',
-                'progress'       => (int)($r['progress'] ?? 0),
-                'message'        => $r['message'] ?? '',
-                'queue_position' => $queuePositions[(int)$r['id']] ?? 0,
-                'queuePosition'  => $queuePositions[(int)$r['id']] ?? 0,
                 'created_at'     => ($r['created_at'] ?? 0) * 1000,
                 'time'           => ($r['created_at'] ?? 0) * 1000,
-                'download_url'   => '/storage/apk/' . rawurlencode($r['filename']),
+                'download_url'   => '/api/apk/download?filename=' . urlencode($r['filename']),
                 'owner_username' => $r['owner_username'] ?? '',
                 'exists'         => file_exists($filePath),
             ];
@@ -687,26 +724,11 @@ class ApkController extends BaseController
     public function apkDownload()
     {
         $filename = Request::get('filename', '');
-        if (!$filename) {
-            $path = '/' . ltrim(Request::pathinfo(), '/');
-            $prefix = '/api/apk/download/';
-            if (str_starts_with($path, $prefix)) {
-                $filename = rawurldecode(substr($path, strlen($prefix)));
-            }
-        }
         return $this->doDownload($filename);
     }
 
-    public function apkDownloadFile($filename = '')
+    public function apkDownloadFile($filename)
     {
-        $filename = $filename ?: Request::route('filename', '') ?: Request::param('filename', '');
-        if (!$filename) {
-            $path = '/' . ltrim(Request::pathinfo(), '/');
-            $prefix = '/api/apk/download/';
-            if (str_starts_with($path, $prefix)) {
-                $filename = rawurldecode(substr($path, strlen($prefix)));
-            }
-        }
         return $this->doDownload($filename);
     }
 
@@ -723,44 +745,7 @@ class ApkController extends BaseController
             return json(['success' => false, 'message' => '文件不存在'], 404);
         }
 
-        // 直接交给 Web 服务器发送静态 APK，避免 PHP-FPM/ThinkPHP download()
-        // 在部分服务器环境下返回 200 但空响应的问题。
-        return redirect('/storage/apk/' . rawurlencode($safe), 302);
-    }
-
-    private function deleteApkByFilename(string $filename, array $user): array
-    {
-        $safe = basename($filename);
-        if ($safe === '' || $safe !== $filename) {
-            return ['success' => false, 'filename' => $filename, 'message' => '文件名无效'];
-        }
-
-        $record = Db::table('fisher_apk_builds')->where('filename', $safe)->find();
-        $role = $user['role'] ?? '';
-        $username = $user['username'] ?? '';
-        if ($role !== 'superadmin' && $role !== 'super-admin' && $username) {
-            if ($record && ($record['owner_username'] ?? '') !== $username) {
-                return ['success' => false, 'filename' => $safe, 'message' => '无权删除此记录'];
-            }
-        }
-        if ($record && in_array((string)($record['status'] ?? ''), ['queued', 'building'], true)) {
-            return ['success' => false, 'filename' => $safe, 'message' => '构建中/排队中的任务不能删除'];
-        }
-
-        Db::table('fisher_apk_builds')->where('filename', $safe)->delete();
-        Db::table('fisher_apk_build_configs')->where('filename', $safe)->delete();
-
-        $deletedFiles = 0;
-        $filePath = $this->apkOutDir . '/' . $safe;
-        if (file_exists($filePath) && @unlink($filePath)) {
-            $deletedFiles++;
-        }
-        $idsig = $filePath . '.idsig';
-        if (file_exists($idsig) && @unlink($idsig)) {
-            $deletedFiles++;
-        }
-
-        return ['success' => true, 'filename' => $safe, 'deleted_files' => $deletedFiles];
+        return download($full, $safe);
     }
 
     /**
@@ -774,50 +759,29 @@ class ApkController extends BaseController
             return json(['success' => false, 'message' => 'filename required'], 400);
         }
 
-        $result = $this->deleteApkByFilename((string)$filename, request()->user ?? []);
-        if (!$result['success']) {
-            $status = ($result['message'] ?? '') === '无权删除此记录' ? 403 : 400;
-            return json(['success' => false, 'message' => $result['message']], $status);
+        // 权限检查：普通账号只能删除自己的 APK
+        $user = request()->user ?? [];
+        $role = $user['role'] ?? '';
+        $username = $user['username'] ?? '';
+        if ($role !== 'superadmin' && $role !== 'super-admin' && $username) {
+            $record = Db::table('fisher_apk_builds')->where('filename', $filename)->find();
+            if ($record && ($record['owner_username'] ?? '') !== $username) {
+                return json(['success' => false, 'message' => '无权删除此记录'], 403);
+            }
         }
 
-        return json(['success' => true, 'data' => $result, 'message' => 'deleted']);
-    }
+        Db::table('fisher_apk_builds')->where('filename', $filename)->delete();
 
-    /**
-     * POST /api/apk/bulk-delete
-     * 批量删除 APK
-     */
-    public function apkBulkDelete()
-    {
-        $payload = Request::post();
-        $filenames = $payload['filenames'] ?? [];
-        if (is_string($filenames)) {
-            $decoded = json_decode($filenames, true);
-            $filenames = is_array($decoded) ? $decoded : array_filter(array_map('trim', explode(',', $filenames)));
+        $filePath = $this->apkOutDir . '/' . basename($filename);
+        if (file_exists($filePath)) {
+            @unlink($filePath);
         }
-        if (!is_array($filenames) || empty($filenames)) {
-            return json(['success' => false, 'message' => '请选择要删除的 APK'], 400);
+        $idsig = $filePath . '.idsig';
+        if (file_exists($idsig)) {
+            @unlink($idsig);
         }
 
-        $filenames = array_values(array_unique(array_filter(array_map('strval', $filenames), 'strlen')));
-        $results = [];
-        $deleted = 0;
-        $failed = 0;
-        foreach ($filenames as $filename) {
-            $r = $this->deleteApkByFilename($filename, request()->user ?? []);
-            $results[] = $r;
-            if ($r['success'] ?? false) $deleted++; else $failed++;
-        }
-
-        return json([
-            'success' => $deleted > 0,
-            'data' => [
-                'deleted' => $deleted,
-                'failed' => $failed,
-                'results' => $results,
-            ],
-            'message' => $failed > 0 ? "已删除 {$deleted} 个，失败 {$failed} 个" : "已删除 {$deleted} 个 APK",
-        ], $deleted > 0 ? 200 : 400);
+        return json(['success' => true, 'data' => null, 'message' => 'deleted']);
     }
 
     // ==================== 部署测试 ====================

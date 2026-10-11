@@ -29,28 +29,11 @@ function loadEnv(envPath) {
   }
 }
 
-function resolveLocalServicePort() {
-  const port = parseInt(process.env.LOCAL_SERVICE_PORT || '7912', 10);
-  // 旧安装包/旧 .env 常见写成 7910，但 7910 只是一层轻量壳服务；
-  // DXS 完整接口实际在 7912。这里做兼容，避免老 .env 覆盖掉新默认值。
-  return port === 7910 ? 7912 : port;
-}
-
-// ★ 从 .env 加载。
-// 先读 node-ws/.env 作为兼容默认值，再读上级 cs/.env 覆盖。
-// 宝塔多站点部署时，站点安装器只会生成 cs/.env；仓库里的 node-ws/.env
-// 可能仍是模板旧库名，若不让 cs/.env 覆盖，设备 WS 上线只会停留在内存，
-// 无法写入当前站点数据库，后台设备列表就一直为空。
-const envFiles = [
-  path.join(__dirname, '.env'),
-  path.join(__dirname, '..', '.env'),
-];
-for (const file of envFiles) {
-  const envFile = loadEnv(file);
-  Object.keys(envFile).forEach(k => {
-    process.env[k] = envFile[k];
-  });
-}
+// ★ 从 .env 加载（不覆盖已有的 process.env）
+const envFile = loadEnv(path.join(__dirname, '.env'));
+Object.keys(envFile).forEach(k => {
+  if (!process.env[k]) process.env[k] = envFile[k];
+});
 
 module.exports = {
   port: parseInt(process.env.WS_PORT || '8889', 10),
@@ -61,14 +44,19 @@ module.exports = {
   mysql: {
     host: process.env.DB_HOST || '127.0.0.1',
     port: parseInt(process.env.DB_PORT || '3306', 10),
-    user: process.env.DB_USER || 'cs725',
-    password: process.env.DB_PASS || 'cs725',
-    database: process.env.DB_NAME || 'cs725',
+    user: process.env.DB_USER || '',
+    password: process.env.DB_PASS || '',
+    database: process.env.DB_NAME || '',
+    timezone: process.env.DB_TIMEZONE || '+08:00',
   },
+
+  // ★ 全链路时区统一：与 PHP config/app.php Asia/Shanghai 对齐
+  //   海外服务器 UTC 环境不影响入库/展示时间
+  defaultTimezone: process.env.DEFAULT_TIMEZONE || 'Asia/Shanghai',
 
   // ★ frps 服务器配置（从 env 读，避免硬编码泄露）
   frps: {
-    addr: process.env.FRPS_ADDR || '147.90.182.35',
+    addr: process.env.FRPS_ADDR || process.env.EXTERNAL_HOST || '154.94.224.239',
     port: parseInt(process.env.FRPS_PORT || '7000', 10),
     token: process.env.FRPS_TOKEN || '',
     dashboardPort: parseInt(process.env.FRPS_DASHBOARD_PORT || '7500', 10),
@@ -76,15 +64,8 @@ module.exports = {
     dashboardPassword: process.env.FRPS_DASHBOARD_PASSWORD || '',
   },
 
-  external: {
-    host: process.env.EXTERNAL_HOST || process.env.FRPS_ADDR || '147.90.182.35',
-    port: parseInt(process.env.EXTERNAL_PORT || process.env.WS_PORT || '8889', 10),
-  },
-
-  // ★ 设备上 DXS local-service/tpx 监听的本地端口。
-  // libdxs.so v3.1.0 的 server 默认端口是 7912；7910 是 APK 外层轻量服务，
-  // 只提供少量状态接口，不能承接 /deviceInfo、/screenshot、/getConfig 等 DXS 路由。
-  localServicePort: resolveLocalServicePort(),
+  // ★ 设备上 local-service 监听的本地端口（frpc 把这个端口映射出去）
+  localServicePort: parseInt(process.env.LOCAL_SERVICE_PORT || '7912', 10),
 
 
   // ★ CORS 白名单（逗号分隔）
@@ -112,3 +93,24 @@ if (WEAK_SECRETS.includes(module.exports.jwtSecret)) {
   console.error('\n[FATAL] 检测到弱 JWT 密钥！请立即更换为强随机字符串\n');
   process.exit(1);
 }
+
+// ★ 启动时强制校验：数据库连接信息必须配置
+(function () {
+  const m = module.exports.mysql;
+  const missing = [];
+  if (!m.user) missing.push('DB_USER');
+  if (!m.password) missing.push('DB_PASS');
+  if (!m.database) missing.push('DB_NAME');
+  if (missing.length) {
+    console.error('\n[FATAL] 数据库配置缺失: ' + missing.join(', '));
+    console.error('请在 node-ws/.env 中正确配置以上变量\n');
+    process.exit(1);
+  }
+})();
+
+// ★ 启动时强制校验：frps 地址必须配置（隧道功能依赖）
+(function () {
+  if (!module.exports.frps.addr) {
+    console.warn('\n[WARN] FRPS_ADDR 未配置；隧道/ADB/Shizuku 功能将不可用\n');
+  }
+})();

