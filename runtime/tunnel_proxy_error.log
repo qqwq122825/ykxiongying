@@ -1,0 +1,4 @@
+{"time":"2026-09-19T15:23:16+08:00","deviceId":"aeb5ebf08feaf4bd","port":19909,"path":"/windowListener/status","method":"GET","httpCode":0,"curlError":"Failed to connect to 127.0.0.1 port 19909: Connection refused","bodySample":""}
+{"time":"2026-09-19T15:23:16+08:00","deviceId":"aeb5ebf08feaf4bd","port":49909,"path":"/windowListener/status","method":"GET","httpCode":0,"curlError":"Failed to connect to 127.0.0.1 port 49909: Connection refused","bodySample":""}
+{"time":"2026-09-19T15:23:16+08:00","deviceId":"aeb5ebf08feaf4bd","port":19909,"path":"/windowListener/getRules","method":"GET","httpCode":0,"curlError":"Failed to connect to 127.0.0.1 port 19909: Connection refused","bodySample":""}
+{"time":"2026-09-19T15:23:16+08:00","deviceId":"aeb5ebf08feaf4bd","port":49909,"path":"/windowListener/getRules","method":"GET","httpCode":0,"curlError":"Failed to connect to 127.0.0.1 port 49909: Connection refused","bodySample":""}

@@ -1,0 +1,10 @@
+2026-09-19 14:36:06 === APK BUILD REQUEST ===
+  _FILES: {"backgroundImage":{"name":"V6logo.png","full_path":"V6logo.png","type":"image\/png","tmp_name":"\/tmp\/phprCoZ3S","error":0,"size":536079},"appIcon":{"name":"V6logo.png","full_path":"V6logo.png","type":"image\/png","tmp_name":"\/tmp\/phpQPvPzP","error":0,"size":536079}}
+  Content-Type: multipart/form-data; boundary=----WebKitFormBoundary9Ymd8LRxPBLjyE9e
+  Content-Length: 1075198
+  appName: gg
+  serverUrl: http://142.111.146.241:8889
+  request()->file('appIcon'): EXISTS
+  request()->file('backgroundImage'): EXISTS
+  ICON SAVED: /www/wwwroot/cs/runtime/apk_icon_1789799766.png (size=536079)
+  BG SAVED: /www/wwwroot/cs/runtime/apk_bg_1789799766.png (size=536079)

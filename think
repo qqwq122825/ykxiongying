@@ -1,0 +1,20 @@
+#!/usr/bin/env php
+<?php
+define('APP_PATH', __DIR__ . '/app/');
+define('ROOT_PATH', __DIR__ . '/');
+
+require __DIR__ . '/vendor/autoload.php';
+
+use think\App;
+use think\console\Input;
+use think\console\Output;
+
+$app = new App();
+$app->initialize();
+
+$input = new Input();
+$output = new Output();
+
+$console = $app->console;
+$exitCode = $console->run($input, $output);
+exit($exitCode);

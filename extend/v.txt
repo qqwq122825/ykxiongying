@@ -1,0 +1,4 @@
+In zipfile: True
+First resources.arsc at CD pos 60041: resources.arsc
+CD entries: 1
+CD size: 64655, total scanned: 64655
