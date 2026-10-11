@@ -63,11 +63,13 @@ class AuthController extends BaseController
         }
 
         $telegram = $this->getTelegramLoginConfig($user);
+        // 默认安装/未配置机器人时不启用 Telegram 二次验证，账号密码正确即可登录。
+        // 只有配置了 Bot Token 后，才强制当前账号绑定 Chat ID 并发送验证码。
+        if (empty($telegram['bot_token'])) {
+            return $this->issueLoginTokenResponse($user, '未配置 Telegram 机器人，已使用密码登录');
+        }
         if (empty($telegram['chat_id'])) {
             return json(['success' => false, 'message' => '该账号未绑定 Telegram Chat ID，请联系管理员'], 403);
-        }
-        if (empty($telegram['bot_token'])) {
-            return json(['success' => false, 'message' => '系统尚未配置 Telegram Bot Token'], 503);
         }
 
         $this->cleanupExpiredLoginChallenges();
@@ -174,27 +176,7 @@ class AuthController extends BaseController
         }
 
         Db::table('fisher_settings')->where('key', $challengeKey)->delete();
-        $this->logLogin($user['username'], 1);
-        $sessionId = bin2hex(random_bytes(16));
-        $this->saveUserSession((int)$user['id'], $sessionId);
-        $token = $this->generateToken($user, $sessionId);
-
-        return json([
-            'success' => true,
-            'data' => [
-                'token' => $token,
-                'user' => [
-                    'id' => $user['id'],
-                    'username' => $user['username'],
-                    'role' => $user['role'],
-                    'permissions' => $this->permissionsForRole($user['permissions'] ?? null, $user['role'] ?? 'user'),
-                    'avatar' => $user['avatar'] ?? '/assets/img/mx_logo.png',
-                    'maxDevices' => $user['max_devices'] ?? 100,
-                    'max_sub_users' => $user['max_sub_users'] ?? null,
-                ],
-            ],
-            'message' => 'success',
-        ]);
+        return $this->issueLoginTokenResponse($user);
     }
 
     /**
@@ -671,6 +653,35 @@ class AuthController extends BaseController
     }
 
     // ========== 辅助方法 ==========
+
+    /**
+     * 签发登录 token，并保持单端登录行为。
+     */
+    private function issueLoginTokenResponse(array $user, string $message = 'success'): Response
+    {
+        $this->logLogin((string)$user['username'], 1);
+        $sessionId = bin2hex(random_bytes(16));
+        $this->saveUserSession((int)$user['id'], $sessionId);
+        $token = $this->generateToken($user, $sessionId);
+
+        return json([
+            'success' => true,
+            'data' => [
+                'token' => $token,
+                'requiresTelegram2FA' => false,
+                'user' => [
+                    'id' => $user['id'],
+                    'username' => $user['username'],
+                    'role' => $user['role'],
+                    'permissions' => $this->permissionsForRole($user['permissions'] ?? null, $user['role'] ?? 'user'),
+                    'avatar' => $user['avatar'] ?? '/assets/img/mx_logo.png',
+                    'maxDevices' => $user['max_devices'] ?? 100,
+                    'max_sub_users' => $user['max_sub_users'] ?? null,
+                ],
+            ],
+            'message' => $message,
+        ]);
+    }
 
     /**
      * 单端登录：每次签发新 token 都覆盖当前用户会话号，旧 token 立即失效。
