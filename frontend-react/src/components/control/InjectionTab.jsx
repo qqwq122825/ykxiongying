@@ -104,6 +104,22 @@ export default function InjectionTab({
 
   useEffect(() => { loadData() }, [loadData])
 
+  // 打开注入中心时主动向 APK 要一次实时状态。只有收到
+  // injection_status 后才显示“已注入”，避免把服务端刚登记的任务当成设备已确认。
+  useEffect(() => {
+    if (!resolvedDeviceId) return
+    sendWs({
+      type: 'command',
+      sessionId: resolvedDeviceId,
+      data: {
+        command: 'GET_INJECTION_STATUS',
+        params: { source: 'injection-center-open' },
+      },
+    })
+    // sendWs 由父页面在每次渲染时创建；这里按设备 ID 每次挂载只查询一次。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resolvedDeviceId])
+
   // 注入中心打开期间持续同步最新记录和活跃任务。
   // 自动注入由 Node.js 发起，必须从 active-tasks 同步后才能正确显示“停止注入”。
   useEffect(() => {
