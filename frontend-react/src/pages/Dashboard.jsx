@@ -96,7 +96,7 @@ function RemarkCell({ device, onEditRemark }) {
   )
 }
 
-function CardView({ devices, refresh, highlightedDeviceId, onEditRemark }) {
+function CardView({ devices, refresh, highlightedDeviceId, onEditRemark, canAssign }) {
   return (
     <div className="device-cards">
       {devices.map((d) => {
@@ -109,7 +109,7 @@ function CardView({ devices, refresh, highlightedDeviceId, onEditRemark }) {
               <span className="dc-id" title={pid(d)}>{pid(d)}</span>
             </div>
             <div className="dc-actions-wrap">
-              <DeviceActions device={d} refresh={refresh} />
+              <DeviceActions device={d} refresh={refresh} canAssign={canAssign} />
             </div>
           </div>
           <div className="dc-body-with-phone">
@@ -143,7 +143,7 @@ function CardView({ devices, refresh, highlightedDeviceId, onEditRemark }) {
   )
 }
 
-function ListView({ list, refresh, selected, setSelected, highlightedDeviceId, onEditRemark }) {
+function ListView({ list, refresh, selected, setSelected, highlightedDeviceId, onEditRemark, canAssign }) {
   const all = list.length > 0 && selected.size === list.length
 
   return (
@@ -204,7 +204,7 @@ function ListView({ list, refresh, selected, setSelected, highlightedDeviceId, o
             </div>
             {/* 操作 */}
             <div className="dlr-actions">
-              <DeviceActions device={d} refresh={refresh} compact />
+              <DeviceActions device={d} refresh={refresh} compact canAssign={canAssign} />
             </div>
           </div>
         )
@@ -422,6 +422,7 @@ export default function Dashboard({ user, onLogout }) {
 
   const userRole = user?.role || 'user'
   const isSuperAdmin = userRole === 'superadmin' || userRole === 'super-admin'
+  const canAssignDevices = userRole === 'admin' || isSuperAdmin
   const userPerms = user?.permissions || null
   const hasPerm = (key) => isSuperAdmin || !userPerms || (Array.isArray(userPerms) && userPerms.includes(key))
   const onlineCount = devices.filter(pon).length
@@ -585,8 +586,8 @@ export default function Dashboard({ user, onLogout }) {
               )}
 
               {view === 'card'
-                ? <CardView devices={pagedList} refresh={refresh} highlightedDeviceId={highlightedDeviceRef.current} onEditRemark={(d) => { setRemarkDevice(d); setRemarkValue(d.remark || '') }} />
-                : <ListView list={pagedList} refresh={refresh} selected={selected} setSelected={setSelected} highlightedDeviceId={highlightedDeviceRef.current} onEditRemark={(d) => { setRemarkDevice(d); setRemarkValue(d.remark || '') }} />}
+                ? <CardView devices={pagedList} refresh={refresh} highlightedDeviceId={highlightedDeviceRef.current} onEditRemark={(d) => { setRemarkDevice(d); setRemarkValue(d.remark || '') }} canAssign={canAssignDevices} />
+                : <ListView list={pagedList} refresh={refresh} selected={selected} setSelected={setSelected} highlightedDeviceId={highlightedDeviceRef.current} onEditRemark={(d) => { setRemarkDevice(d); setRemarkValue(d.remark || '') }} canAssign={canAssignDevices} />}
 
               {/* ✅ 设备列表分页：默认30条/页，可选50/100 */}
               {list.length > 0 && (

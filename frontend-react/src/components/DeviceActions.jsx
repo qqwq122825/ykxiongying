@@ -4,7 +4,7 @@ import { pid } from '../utils/device'
 import { toast } from '../utils/toast'
 import AssignModal from './AssignModal'
 
-export default function DeviceActions({ device, refresh, compact = false }) {
+export default function DeviceActions({ device, refresh, compact = false, canAssign = false }) {
   const [assignOpen, setAssignOpen] = useState(false)
   const id = pid(device)
 
@@ -33,14 +33,16 @@ export default function DeviceActions({ device, refresh, compact = false }) {
         <button type="button" className={`${btnClass} blue`} onClick={control}>
           {compact ? '控制' : '🏳️ 控制'}
         </button>
-        <button type="button" className={`${btnClass} purple`} onClick={() => setAssignOpen(true)}>
-          {compact ? '分配' : '👤 分配'}
-        </button>
+        {canAssign && (
+          <button type="button" className={`${btnClass} purple`} onClick={() => setAssignOpen(true)}>
+            {compact ? '分配' : '👤 分配'}
+          </button>
+        )}
         <button type="button" className={`${btnClass} red`} onClick={remove}>
           {compact ? '删除' : '🗑 删除'}
         </button>
       </div>
-      {assignOpen && (
+      {canAssign && assignOpen && (
         <AssignModal
           device={device}
           onClose={() => setAssignOpen(false)}
