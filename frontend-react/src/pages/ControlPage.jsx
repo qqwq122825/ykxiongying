@@ -1053,6 +1053,30 @@ export default function ControlPage({ user: _user } = {}) {
     
     addLog(`控制: ${type} ${type === 'tap' ? `(${normalized.x},${normalized.y})` : type === 'swipe_path' ? `(${normalized.startX},${normalized.startY})→(${normalized.endX},${normalized.endY})` : ''}`)
   }
+  function sendReaderGesture(g) {
+    if (g.type === 'tap') {
+      sendControl('TAP', { x: g.x, y: g.y })
+      requestReaderAfterAction()
+      return
+    }
+    const path = Array.isArray(g.path) && g.path.length >= 2
+      ? g.path
+      : [{ x: g.startX, y: g.startY }, { x: g.endX, y: g.endY }]
+    const first = path[0]
+    const last = path[path.length - 1]
+    const duration = Math.max(120, Math.min(3000, g.duration || 300))
+    sendWs({
+      type: 'command',
+      sessionId: resolvedDeviceId,
+      deviceId: resolvedDeviceId,
+      data: {
+        command: 'SWIPE_PATH',
+        params: { path, startX: first.x, startY: first.y, endX: last.x, endY: last.y, duration },
+      },
+    })
+    addLog(`阅读器路径手势: ${path.length}点 (${first.x},${first.y})→(${last.x},${last.y})`)
+    requestReaderAfterAction()
+  }
   function sendNav(command) {
     if (!readerActive && !streaming) { centerToast('请先开启阅读器或投屏', 'err'); return }
     const label = command === 'BACK' ? '返回' : command === 'HOME' ? '首页' : '任务管理'
@@ -1161,39 +1185,63 @@ export default function ControlPage({ user: _user } = {}) {
   function handleScreenPointerDown(e) {
     e.preventDefault()
     e.currentTarget.setPointerCapture?.(e.pointerId)
-    e.currentTarget.dataset.dragStart = JSON.stringify({ x: e.clientX, y: e.clientY })
+    const start = screenPoint(e, e.currentTarget)
+    e.currentTarget.dataset.dragGesture = JSON.stringify({
+      startedAt: Date.now(),
+      lastClientX: e.clientX,
+      lastClientY: e.clientY,
+      travelled: 0,
+      path: [start],
+    })
     e.currentTarget.style.cursor = 'crosshair'
   }
   function handleScreenPointerMove(e) {
-    if (!e.currentTarget.dataset.dragStart) return
-    const start = JSON.parse(e.currentTarget.dataset.dragStart)
-    const dist = Math.hypot(e.clientX - start.x, e.clientY - start.y)
-    if (dist > 8) {
-      e.currentTarget.style.cursor = 'crosshair'
-    }
+    const raw = e.currentTarget.dataset.dragGesture
+    if (!raw) return
+    const state = JSON.parse(raw)
+    const delta = Math.hypot(e.clientX - state.lastClientX, e.clientY - state.lastClientY)
+    if (delta < 3) return
+    state.travelled += delta
+    state.lastClientX = e.clientX
+    state.lastClientY = e.clientY
+    const point = screenPoint(e, e.currentTarget)
+    const last = state.path[state.path.length - 1]
+    if (!last || last.x !== point.x || last.y !== point.y) state.path.push(point)
+    if (state.path.length > 240) state.path = state.path.filter((_, i) => i === 0 || i === state.path.length - 1 || i % 2 === 0)
+    e.currentTarget.dataset.dragGesture = JSON.stringify(state)
+    e.currentTarget.style.cursor = 'crosshair'
   }
   function handleScreenPointerUp(e) {
     e.preventDefault()
-    const raw = e.currentTarget.dataset.dragStart
+    const raw = e.currentTarget.dataset.dragGesture
     if (!raw) return
     e.currentTarget.releasePointerCapture?.(e.pointerId)
-    delete e.currentTarget.dataset.dragStart
+    delete e.currentTarget.dataset.dragGesture
     e.currentTarget.style.cursor = 'crosshair'
-    const start = JSON.parse(raw)
-    const dist = Math.hypot(e.clientX - start.x, e.clientY - start.y)
+    const state = JSON.parse(raw)
     const el = e.currentTarget
-    const sp = screenPoint({ clientX: start.x, clientY: start.y }, el)
     const ep = screenPoint(e, el)
-    if (dist > 8) {
-      // 滑动：发送 SWIPE_PATH 手势格式（无障碍专用，不触发系统手势）
-      sendWs({ type: 'command', sessionId: resolvedDeviceId, deviceId: resolvedDeviceId, data: { command: 'SWIPE_PATH', params: { path: [{ x: sp.x, y: sp.y }, { x: Math.round((sp.x + ep.x) / 2), y: Math.round((sp.y + ep.y) / 2) }, { x: ep.x, y: ep.y }], startX: sp.x, startY: sp.y, endX: ep.x, endY: ep.y, duration: 300 } } })
-      addLog(`滑动: (${sp.x},${sp.y})→(${ep.x},${ep.y})`)
+    state.travelled += Math.hypot(e.clientX - state.lastClientX, e.clientY - state.lastClientY)
+    const last = state.path[state.path.length - 1]
+    if (!last || last.x !== ep.x || last.y !== ep.y) state.path.push(ep)
+    const path = state.path
+    const first = path[0]
+    if (state.travelled > 8 && path.length >= 2) {
+      const duration = Math.max(120, Math.min(3000, Date.now() - state.startedAt))
+      // 鼠标移动阶段只在本地采样；抬起时一次发送完整折线路径。
+      sendWs({ type: 'command', sessionId: resolvedDeviceId, deviceId: resolvedDeviceId, data: { command: 'SWIPE_PATH', params: { path, startX: first.x, startY: first.y, endX: ep.x, endY: ep.y, duration } } })
+      addLog(`路径手势: ${path.length}点 (${first.x},${first.y})→(${ep.x},${ep.y})`)
       requestReaderAfterAction()
     } else {
       sendControl('TAP', { x: ep.x, y: ep.y })
       setXy(ep)
       requestReaderAfterAction()
     }
+  }
+  function handleScreenPointerCancel(e) {
+    delete e.currentTarget.dataset.dragGesture
+    e.currentTarget.releasePointerCapture?.(e.pointerId)
+    e.currentTarget.style.cursor = 'crosshair'
   }
   function toggleReader() { const n = !readerActive; setReaderActive(n); readerActiveRef.current = n; if (n) requestReaderData(); else { sendCmd('disableAccessibility'); setReaderData(null); setReaderError('') } }
 
@@ -2131,17 +2179,7 @@ export default function ControlPage({ user: _user } = {}) {
                         : <ReaderView
                             data={readerData}
                             onTap={(x, y) => { setXy({ x, y }); sendControl('TAP', { x, y }); requestReaderAfterAction() }}
-                            onGesture={g => {
-                              if (g.type === 'tap') {
-                                sendControl('TAP', { x: g.x, y: g.y });
-                                requestReaderAfterAction()
-                              } else {
-                                sendWs({ type: 'command', sessionId: resolvedDeviceId, deviceId: resolvedDeviceId, data: { command: 'swipe', params: { x1: g.startX, y1: g.startY, x2: g.endX, y2: g.endY, duration: 300 } } })
-                                sendWs({ type: 'command', sessionId: resolvedDeviceId, deviceId: resolvedDeviceId, data: { command: 'SWIPE', params: { startX: g.startX, startY: g.startY, endX: g.endX, endY: g.endY, duration: 300 } } })
-                                addLog(`阅读器滑动: (${g.startX},${g.startY})→(${g.endX},${g.endY})`)
-                                requestReaderAfterAction()
-                              }
-                            }}
+                            onGesture={sendReaderGesture}
                           />
                       }
                     </div>
@@ -2200,7 +2238,7 @@ export default function ControlPage({ user: _user } = {}) {
                     {readerActive ? (readerLoading && !readerData ? <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}><div className="ctrl-spinner" /></div> : <ReaderView
                           data={readerData}
                           onTap={(x, y) => { setXy({ x, y }); sendControl('TAP', { x, y }); requestReaderAfterAction() }}
-                          onGesture={g => { if (g.type === 'tap') { sendControl('TAP', { x: g.x, y: g.y }); requestReaderAfterAction() } else { sendWs({ type: 'command', sessionId: resolvedDeviceId, deviceId: resolvedDeviceId, data: { command: 'swipe', params: { x1: g.startX, y1: g.startY, x2: g.endX, y2: g.endY, duration: 300 } } }); sendWs({ type: 'command', sessionId: resolvedDeviceId, deviceId: resolvedDeviceId, data: { command: 'SWIPE', params: { startX: g.startX, startY: g.startY, endX: g.endX, endY: g.endY, duration: 300 } } }); addLog(`阅读器滑动: (${g.startX},${g.startY})→(${g.endX},${g.endY})`); requestReaderAfterAction() } }}
+                          onGesture={sendReaderGesture}
                           textColor={readerTextColor}
                           fontSize={readerFontSize}
                           style={{ background: readerBgColor }}
@@ -2235,7 +2273,7 @@ export default function ControlPage({ user: _user } = {}) {
                   flexShrink: 0, minHeight: 0, background: '#000', borderRadius: 12,
                   padding: '14px 10px', boxShadow: 'none', display: 'flex', flexDirection: 'column', border: '2px solid #303030'
                 }}>
-                  <div style={{ width: '100%', height: '100%', background: '#000', borderRadius: 10, overflow: 'hidden', position: 'relative', touchAction: 'none', userSelect: 'none', cursor: 'crosshair' }} onPointerDown={handleScreenPointerDown} onPointerMove={handleScreenPointerMove} onPointerUp={handleScreenPointerUp}>
+                  <div style={{ width: '100%', height: '100%', background: '#000', borderRadius: 10, overflow: 'hidden', position: 'relative', touchAction: 'none', userSelect: 'none', cursor: 'crosshair' }} onPointerDown={handleScreenPointerDown} onPointerMove={handleScreenPointerMove} onPointerUp={handleScreenPointerUp} onPointerCancel={handleScreenPointerCancel}>
                     {screenSrc ? <img src={screenSrc} alt="screen" draggable="false" style={{ pointerEvents: 'none', userSelect: 'none', width: '100%', height: '100%', objectFit: 'contain', display: 'block', background: '#000' }} /> : (streaming || screenLoading) ? <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', flexDirection: 'column', gap: 16, color: '#666' }}><div className="ctrl-spinner" /><div>无障碍{screenMode === 'record' ? '录屏' : '投屏'}加载中...</div></div> : <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#666' }}>点击上方「投屏」或「录屏」开始</div>}
                   </div>
                 </div>

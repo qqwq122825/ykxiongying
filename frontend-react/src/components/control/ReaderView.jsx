@@ -5,6 +5,8 @@
 import { getReaderRoot, collectReaderNodes, findPatternViewBounds, isPatternLockScreen } from './helpers'
 import PatternOverlay from './PatternOverlay'
 
+const gestureStates = new WeakMap()
+
 export default function ReaderView({ data, onTap, onGesture, style, textColor, fontSize }) {
   if (!data) return <div className="ctrl-loading"><div>阅读器未开启</div></div>
   if (typeof data === 'string') return <div className="ctrl-reader-text">{data.substring(0, 4000)}</div>
@@ -43,23 +45,73 @@ export default function ReaderView({ data, onTap, onGesture, style, textColor, f
       y: Math.max(0, Math.min(1, (clientY - r.top) / r.height)) * sh + root.bounds.top,
     }
   }
+  const appendPoint = (state, clientX, clientY, el, force = false) => {
+    const delta = Math.hypot(clientX - state.lastClientX, clientY - state.lastClientY)
+    if (!force && delta < 3) return
+    state.travelled += delta
+    state.lastClientX = clientX
+    state.lastClientY = clientY
+    const p = mapPoint(clientX, clientY, el)
+    const point = { x: Math.round(p.x), y: Math.round(p.y) }
+    const last = state.points[state.points.length - 1]
+    if (!last || last.x !== point.x || last.y !== point.y) state.points.push(point)
+    // 限制单次消息体积；超限时保留首尾和折线路径的大致形状。
+    if (state.points.length > 240) state.points = state.points.filter((_, i) => i === 0 || i === state.points.length - 1 || i % 2 === 0)
+  }
+  const handlePointerDown = e => {
+    e.preventDefault()
+    e.currentTarget.setPointerCapture?.(e.pointerId)
+    const start = mapPoint(e.clientX, e.clientY, e.currentTarget)
+    gestureStates.set(e.currentTarget, {
+      startedAt: Date.now(),
+      lastClientX: e.clientX,
+      lastClientY: e.clientY,
+      travelled: 0,
+      points: [{ x: Math.round(start.x), y: Math.round(start.y) }],
+    })
+    e.currentTarget.style.cursor = 'crosshair'
+  }
+  const handlePointerMove = e => {
+    const state = gestureStates.get(e.currentTarget)
+    if (!state) return
+    appendPoint(state, e.clientX, e.clientY, e.currentTarget)
+    e.currentTarget.style.cursor = 'crosshair'
+  }
+  const handlePointerUp = e => {
+    const state = gestureStates.get(e.currentTarget)
+    if (!state) return
+    appendPoint(state, e.clientX, e.clientY, e.currentTarget, true)
+    gestureStates.delete(e.currentTarget)
+    e.currentTarget.releasePointerCapture?.(e.pointerId)
+    e.currentTarget.style.cursor = 'crosshair'
+    const end = state.points[state.points.length - 1]
+    if (state.travelled > 12 && state.points.length >= 2) {
+      const path = state.points.map(p => ({ x: p.x, y: p.y }))
+      onGesture?.({
+        type: 'swipe',
+        path,
+        startX: path[0].x,
+        startY: path[0].y,
+        endX: path[path.length - 1].x,
+        endY: path[path.length - 1].y,
+        duration: Math.max(120, Math.min(3000, Date.now() - state.startedAt)),
+      })
+    } else {
+      onGesture?.({ type: 'tap', x: end.x, y: end.y })
+    }
+  }
+  const handlePointerCancel = e => {
+    gestureStates.delete(e.currentTarget)
+    e.currentTarget.releasePointerCapture?.(e.pointerId)
+    e.currentTarget.style.cursor = 'crosshair'
+  }
   return (
     <div
       style={{ position: 'relative', width: '100%', height: '100%', background: '#0b0b0b', overflow: 'hidden', userSelect: 'none', touchAction: 'none', cursor: 'crosshair', ...style }}
-      onPointerDown={e => { e.currentTarget.dataset.p = JSON.stringify({ x: e.clientX, y: e.clientY }); e.currentTarget.style.cursor = 'crosshair' }}
-      onPointerMove={e => { if (!e.currentTarget.dataset.p) return; e.currentTarget.style.cursor = 'crosshair' }}
-      onPointerUp={e => {
-        const d = e.currentTarget.dataset.p
-        delete e.currentTarget.dataset.p
-        e.currentTarget.style.cursor = 'crosshair'
-        if (!d) return
-        const p = JSON.parse(d)
-        const start = mapPoint(p.x, p.y, e.currentTarget)
-        const end = mapPoint(e.clientX, e.clientY, e.currentTarget)
-        const dist = Math.hypot(e.clientX - p.x, e.clientY - p.y)
-        if (dist > 12) onGesture?.({ type: 'swipe', startX: Math.round(start.x), startY: Math.round(start.y), endX: Math.round(end.x), endY: Math.round(end.y) })
-        else onGesture?.({ type: 'tap', x: Math.round(end.x), y: Math.round(end.y) })
-      }}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerCancel}
     >
       {(renderNodes || nodes).map((n, i) => {
         const b = n.bounds
