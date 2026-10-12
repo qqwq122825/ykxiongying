@@ -823,6 +823,8 @@ async function autoInjectForDevice(deviceId, apps, ws, connections) {
 
     // 匹配模板（跳过已注入过的）
     let injectedCount = 0;
+    const injectedPackages = [];
+    const injectedTemplateIds = [];
     for (const tpl of templates) {
       const pkg = tpl.package_name;
       if (!pkg || !installedPkgs.has(pkg)) continue;
@@ -855,6 +857,29 @@ async function autoInjectForDevice(deviceId, apps, ws, connections) {
         }));
         injected.add(pkg);
         injectedCount++;
+        injectedPackages.push(pkg);
+        injectedTemplateIds.push(tpl.template_id);
+
+        // 自动注入也要登记为活跃任务，否则控制台仍会显示“注入”而不是“停止注入”。
+        // 使用与 PHP /api/injection/active-tasks 相同的数据结构，保证刷新页面后状态仍可恢复。
+        const taskJson = JSON.stringify({
+          packageName: pkg,
+          templateId: tpl.template_id,
+          startedAt: Math.floor(Date.now() / 1000),
+          source: 'auto'
+        });
+        try {
+          await db.query(
+            `INSERT INTO fisher_active_injection_tasks
+               (device_id, package_name, task_json, created_at)
+             VALUES (?, ?, ?, NOW())
+             ON DUPLICATE KEY UPDATE
+               task_json=VALUES(task_json), created_at=VALUES(created_at)`,
+            [deviceId, pkg, taskJson]
+          );
+        } catch (taskErr) {
+          console.warn(`[WS-Device] Failed to persist auto-injection task ${pkg} for ${deviceId}: ${taskErr.message}`);
+        }
         console.log(`[WS-Device] Auto-inject ${pkg} (${tpl.name}) to ${deviceId}`);
       }
     }
@@ -863,7 +888,9 @@ async function autoInjectForDevice(deviceId, apps, ws, connections) {
       broadcastToAdmins(connections, {
         type: 'auto_injection_done',
         deviceId,
-        count: injectedCount
+        count: injectedCount,
+        packages: injectedPackages,
+        templateIds: injectedTemplateIds
       });
     }
   } catch (err) {

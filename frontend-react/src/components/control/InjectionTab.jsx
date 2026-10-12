@@ -100,18 +100,24 @@ export default function InjectionTab({
 
   useEffect(() => { loadData() }, [loadData])
 
-  // 注入中心打开期间持续同步最新记录；重注的新记录到达后结束“注入中”状态。
+  // 注入中心打开期间持续同步最新记录和活跃任务。
+  // 自动注入由 Node.js 发起，必须从 active-tasks 同步后才能正确显示“停止注入”。
   useEffect(() => {
     if (!resolvedDeviceId) return undefined
     let cancelled = false
 
-    const pollGrabbedData = async () => {
+    const pollInjectionState = async () => {
       try {
-        const res = await api.request(`/api/injection/grabbed-data?deviceId=${encodeURIComponent(resolvedDeviceId)}`)
+        const [res, taskRes] = await Promise.all([
+          api.request(`/api/injection/grabbed-data?deviceId=${encodeURIComponent(resolvedDeviceId)}`),
+          api.request(`/api/injection/active-tasks?deviceId=${encodeURIComponent(resolvedDeviceId)}`),
+        ])
         const list = Array.isArray(res) ? res : (res?.data || res?.items || [])
         if (cancelled || !Array.isArray(list)) return
         const sortedList = [...list].sort(compareGrabbedNewest)
         setInjGrabbed?.(sortedList)
+        setInjActivePkgs?.(new Set(taskRes?.packages || []))
+        setInjActiveIds?.(new Set(taskRes?.templateIds || []))
 
         const completedPackages = Object.entries(reinjectSessions)
           .filter(([pkg, session]) => sortedList.some(item =>
@@ -135,8 +141,8 @@ export default function InjectionTab({
       } catch {}
     }
 
-    pollGrabbedData()
-    const timer = setInterval(pollGrabbedData, 1500)
+    pollInjectionState()
+    const timer = setInterval(pollInjectionState, 1500)
     return () => { cancelled = true; clearInterval(timer) }
   }, [resolvedDeviceId, reinjectSessions, setInjGrabbed, setInjActivePkgs, setInjActiveIds])
 
