@@ -283,7 +283,7 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial;back
 <?php foreach ($errors as $e): ?><div class="box err"><?=h($e)?></div><?php endforeach; ?>
 <?php if ($alreadyLocked): ?>
   <div class="box ok">系统已安装。锁文件：<code>runtime/install.lock</code></div>
-  <div class="box ok">在服务器终端执行一次：<br><code>sudo bash <?=h($root)?>/deploy/install-frps.sh</code></div>
+  <div class="box ok">在服务器终端执行一次：<br><code>sudo bash <?=h($root)?>/deploy/install-frps.sh</code><br>将生成 <code><?=h($root)?>/frps/</code>，可在宝塔 Node 项目中选择 <code>start</code> 启动。</div>
   <p class="small">如需重新安装，请先备份数据，再删除 <code>runtime/install.lock</code> 后访问本页。</p>
   <p><a style="color:#9fd4ff" href="/">进入系统</a></p>
 <?php else: ?>
@@ -314,6 +314,6 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial;back
   </div>
   <button type="submit">开始安装</button>
 </form>
-<p class="small">安装成功后会生成唯一的根目录 <code>.env</code>。再执行页面给出的一条 sudo 命令，即会从项目内置包安装、配置并启动 frps。</p>
+<p class="small">安装成功后会生成唯一的根目录 <code>.env</code>。再执行页面给出的命令，即会从项目内置包生成 <code>frps/</code> 目录。</p>
 <?php endif; ?>
 </main></body></html>

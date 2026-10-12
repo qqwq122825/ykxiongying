@@ -616,9 +616,9 @@ setup_frp() {
         exit 1
     fi
     chmod +x "${installer}"
-    # install-frps.sh 自动识别 amd64/arm64、校验 SHA256、生成配置和 systemd 服务。
+    # install-frps.sh 自动识别 amd64/arm64、校验 SHA256，并将二进制/配置放在项目根目录 frps/ 中。
     bash "${installer}" --env "${INSTALL_ROOT}/.env"
-    log_info "frps 已从项目内置包安装并启动（无需联网下载）"
+    log_info "frps 已从项目内置包生成到 ${INSTALL_ROOT}/frps（无需联网下载）"
 }
 
 # 配置宝塔站点
@@ -794,15 +794,8 @@ WantedBy=multi-user.target
 ENDWS
     sed -i "s|{INSTALL_ROOT}|${INSTALL_ROOT}|g" /etc/systemd/system/fisher-ws.service
     
-    # frps.service 已由项目内置 deploy/install-frps.sh 统一生成；此处只做存在性检查。
-    if [ ! -f /etc/systemd/system/frps.service ]; then
-        log_error "frps.service 不存在，请重新执行 ${INSTALL_ROOT}/deploy/install-frps.sh"
-        exit 1
-    fi
-
     systemctl daemon-reload 2>/dev/null || true
     systemctl enable fisher-ws 2>/dev/null || true
-    systemctl enable frps 2>/dev/null || true
     
     # 启用 pm2 开机自启
     if command -v pm2 &> /dev/null; then

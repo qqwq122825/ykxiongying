@@ -82,26 +82,25 @@ stop_bt_services() {
 
 # 启动 frps
 start_frps() {
-    if [ -f /etc/systemd/system/frps.service ] && command -v systemctl >/dev/null 2>&1; then
-        log_info "通过 systemd 启动项目内置 frps..."
-        systemctl restart frps
-        systemctl is-active --quiet frps && log_info "frps 启动成功"
-    elif [ -x /opt/xingchen/frp/frps ] && [ -f /etc/frp/frps.ini ]; then
-        log_info "直接启动项目内置 frps..."
-        nohup /opt/xingchen/frp/frps -c /etc/frp/frps.ini >/var/log/frp/frps-stdout.log 2>&1 &
-    else
+    FRPS_DIR="${PROJECT_ROOT}/frps"
+    if [ ! -x "${FRPS_DIR}/frps" ] || [ ! -f "${FRPS_DIR}/frps.ini" ]; then
         log_warn "frps 尚未安装，正在调用项目内置安装器"
         bash "${PROJECT_ROOT}/deploy/install-frps.sh" --env "${SHARED_ENV}"
     fi
+    if pgrep -x frps >/dev/null; then
+        log_warn "frps 已在运行，跳过重复启动"
+        return 0
+    fi
+    log_info "启动 ${FRPS_DIR}/frps..."
+    nohup "${FRPS_DIR}/frps" -c "${FRPS_DIR}/frps.ini" >"${FRPS_DIR}/log/frps-stdout.log" 2>&1 &
+    sleep 2
+    pgrep -x frps >/dev/null && log_info "frps 启动成功"
 }
 
 # 停止 frps
 stop_frps() {
     log_info "停止 frps 服务..."
-    if [ -f /etc/systemd/system/frps.service ] && command -v systemctl >/dev/null 2>&1; then
-        systemctl stop frps
-        log_info "frps 已停止"
-    elif pgrep -x "frps" > /dev/null; then
+    if pgrep -x "frps" > /dev/null; then
         pkill -x "frps"
         sleep 1
         if pgrep -x "frps" > /dev/null; then

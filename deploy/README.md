@@ -149,8 +149,13 @@ Linux 版项目已内置 frps v0.61.1 的 amd64/arm64 服务端包，换服务�
 sudo bash /www/wwwroot/<站点目录>/deploy/install-frps.sh
 ```
 
-安装器会校验 SHA256，安装到 `/opt/xingchen/frp/frps`，生成
-`/etc/frp/frps.ini` 和 `frps.service`，然后设为开机自启并立即启动。
+安装器会校验 SHA256，然后在当前项目根目录生成：
+
+- `frps/frps`
+- `frps/frps.ini`
+- `frps/package.json`（用于宝塔 Node 项目图形化启动）
+
+宝塔 Node 项目目录选择 `<站点目录>/frps`，启动选项选择 `start`。
 
 ## 📝 配置项速查（项目根目录唯一 `.env`）
 

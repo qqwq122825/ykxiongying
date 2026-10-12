@@ -6,22 +6,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "${SCRIPT_DIR}")"
 ENV_FILE="${PROJECT_ROOT}/.env"
-INSTALL_DIR="/opt/xingchen/frp"
-CONFIG_DIR="/etc/frp"
-SYSTEMD_DIR="/etc/systemd/system"
-START_SERVICE=1
-ENABLE_SYSTEMD=1
+INSTALL_DIR="${PROJECT_ROOT}/frps"
+CONFIG_DIR="${PROJECT_ROOT}/frps"
 DRY_RUN=0
 
 usage() {
     cat <<'EOF'
-用法: sudo bash deploy/install-frps.sh [选项]
+用法: bash deploy/install-frps.sh [选项]
   --env FILE          指定共享 .env（默认：项目根目录/.env）
-  --prefix DIR        frps 安装目录（默认：/opt/xingchen/frp）
-  --config-dir DIR    配置目录（默认：/etc/frp）
-  --systemd-dir DIR   systemd 单元目录（默认：/etc/systemd/system）
-  --no-systemd        只安装二进制和配置，不写 systemd
-  --no-start          写入配置但暂不启动服务
+  --prefix DIR        frps 安装目录（默认：项目根目录/frps）
+  --config-dir DIR    配置目录（默认：与 frps 安装目录相同）
   --dry-run           只检查配置、架构和内置包
 EOF
 }
@@ -29,11 +23,8 @@ EOF
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --env) ENV_FILE="$2"; shift 2 ;;
-        --prefix) INSTALL_DIR="$2"; shift 2 ;;
+        --prefix) INSTALL_DIR="$2"; CONFIG_DIR="$2"; shift 2 ;;
         --config-dir) CONFIG_DIR="$2"; shift 2 ;;
-        --systemd-dir) SYSTEMD_DIR="$2"; shift 2 ;;
-        --no-systemd) ENABLE_SYSTEMD=0; shift ;;
-        --no-start) START_SERVICE=0; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "[ERROR] 未知参数: $1" >&2; usage >&2; exit 2 ;;
@@ -119,7 +110,7 @@ is_port "${FRPS_PORT}" || die "FRPS_PORT 无效: ${FRPS_PORT}"
 is_port "${DASH_PORT}" || die "FRPS_DASHBOARD_PORT 无效: ${DASH_PORT}"
 is_port "${PORT_MIN}" || die "FRPS_REMOTE_PORT_MIN 无效: ${PORT_MIN}"
 is_port "${PORT_MAX}" || die "FRPS_REMOTE_PORT_MAX 无效: ${PORT_MAX}"
-[ "${PORT_MIN}" -le "${PORT_MAX}" ] || die "隐道端口范围题顺序错误"
+[ "${PORT_MIN}" -le "${PORT_MAX}" ] || die "隐道端口范围顺序错误"
 
 log "内置版本=0.61.1 架构=${ARCH} SHA256=${ACTUAL_SHA}"
 log "配置来源=${ENV_FILE} FRPS_ADDR=${FRPS_ADDR} bind_port=${FRPS_PORT} allow_ports=${PORT_MIN}-${PORT_MAX}"
@@ -129,14 +120,7 @@ if [ "${DRY_RUN}" -eq 1 ]; then
     exit 0
 fi
 
-if [ "${ENABLE_SYSTEMD}" -eq 1 ] && [ "$(id -u)" -ne 0 ]; then
-    die "写入 systemd 需要 root：请使用 sudo bash deploy/install-frps.sh"
-fi
-
-mkdir -p "${INSTALL_DIR}" "${CONFIG_DIR}"
-if [ "$(id -u)" -eq 0 ]; then
-    mkdir -p /var/log/frp
-fi
+mkdir -p "${INSTALL_DIR}" "${CONFIG_DIR}" "${INSTALL_DIR}/log"
 TMP_BIN="${INSTALL_DIR}/.frps.new.$$"
 gzip -dc "${BUNDLE}" > "${TMP_BIN}"
 chmod 0755 "${TMP_BIN}"
@@ -157,13 +141,35 @@ dashboard_addr = ${DASH_HOST}
 dashboard_port = ${DASH_PORT}
 dashboard_user = ${DASH_USER}
 dashboard_pwd = ${DASH_PASSWORD}
-log_file = /var/log/frp/frps.log
+log_file = ${INSTALL_DIR}/log/frps.log
 log_level = info
 log_max_days = 7
 disable_log_color = true
 EOF
 chmod 0600 "${TMP_CONFIG}"
 mv -f "${TMP_CONFIG}" "${CONFIG_DIR}/frps.ini"
+
+cat > "${INSTALL_DIR}/package.json" <<'EOF'
+{
+  "name": "xingchen-frps",
+  "private": true,
+  "version": "0.61.1",
+  "scripts": {
+    "start": "./frps -c ./frps.ini"
+  }
+}
+EOF
+chmod 0644 "${INSTALL_DIR}/package.json"
+
+# 宝塔 Node 项目默认使用 www 账号：只给它读配置和写日志的权限。
+if [ "$(id -u)" -eq 0 ] && getent group www >/dev/null 2>&1; then
+    chown root:www "${INSTALL_DIR}/frps" "${CONFIG_DIR}/frps.ini" "${INSTALL_DIR}/package.json"
+    chown -R www:www "${INSTALL_DIR}/log"
+    chmod 0640 "${CONFIG_DIR}/frps.ini"
+    chmod 0750 "${INSTALL_DIR}/log"
+else
+    chmod 0750 "${INSTALL_DIR}/log"
+fi
 
 if [ "$(id -u)" -eq 0 ]; then
     if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
@@ -180,36 +186,8 @@ if [ "$(id -u)" -eq 0 ]; then
     fi
 fi
 
-if [ "${ENABLE_SYSTEMD}" -eq 1 ]; then
-    mkdir -p "${SYSTEMD_DIR}"
-    cat > "${SYSTEMD_DIR}/frps.service" <<EOF
-[Unit]
-Description=Xingchen bundled frp server
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=root
-ExecStart=${INSTALL_DIR}/frps -c ${CONFIG_DIR}/frps.ini
-Restart=always
-RestartSec=5
-LimitNOFILE=1048576
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    systemctl daemon-reload
-    systemctl enable frps
-    if [ "${START_SERVICE}" -eq 1 ]; then
-        systemctl restart frps
-        systemctl is-active --quiet frps || die "frps 启动失败，请查看: journalctl -u frps -n 100"
-    fi
-fi
-
 log "安装完成: ${INSTALL_DIR}/frps"
 log "配置完成: ${CONFIG_DIR}/frps.ini"
+log "宝塔 Node 项目目录: ${INSTALL_DIR}"
+log "启动选项: start（实际命令 ./frps -c ./frps.ini）"
 log "云服务器安全组必须放行: ${FRPS_PORT}/tcp, ${PORT_MIN}-${PORT_MAX}/tcp"
-if [ "${ENABLE_SYSTEMD}" -eq 1 ] && [ "${START_SERVICE}" -eq 0 ]; then
-    log "启动命令: systemctl restart frps"
-fi
