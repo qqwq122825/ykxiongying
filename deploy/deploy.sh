@@ -554,7 +554,10 @@ FRPS_ADDR = {EXTERNAL_IP}
 FRPS_PORT = 7000
 FRPS_TOKEN = {FRPS_TOKEN}
 DEFAULT_REMOTE_PORT = 19901
+FRPS_REMOTE_PORT_MIN = 19902
+FRPS_REMOTE_PORT_MAX = 29999
 LOCAL_SERVICE_PORT = 7912
+FRPS_DASHBOARD_HOST = 127.0.0.1
 FRPS_DASHBOARD_USER = admin
 FRPS_DASHBOARD_PASSWORD = {FRPS_DASH_PASSWORD}
 FRPS_DASHBOARD_PORT = 7500
@@ -595,7 +598,7 @@ ENDPHPENV
     sed -i "s/{EXTERNAL_IP}/${EXTERNAL_IP}/g" "${PHP_ENV}"
     
     chown www:www "${PHP_ENV}"
-    chmod 644 "${PHP_ENV}"
+    chmod 640 "${PHP_ENV}"
     
     # 兼容仍会查找 node-ws/.env 的旧脚本，但物理上只保留根目录这一份配置。
     ln -sfn ../.env "${INSTALL_ROOT}/node-ws/.env"
@@ -605,81 +608,17 @@ ENDPHPENV
 
 # 创建 frps 配置和下载
 setup_frp() {
-    log_step 10 "安装配置 frp (内网穿透服务)"
-    
-    FRP_VERSION="0.61.1"
-    FRP_DIR="${HOME}/frp"
-    FRP_ARCH="linux_amd64"
-    
-    # 检测架构
-    if [ "$(uname -m)" = "aarch64" ]; then
-        FRP_ARCH="linux_arm64"
+    log_step 10 "安装配置项目内置 frps"
+
+    local installer="${INSTALL_ROOT}/deploy/install-frps.sh"
+    if [ ! -f "${installer}" ]; then
+        log_error "缺少内置 frps 安装器: ${installer}"
+        exit 1
     fi
-    
-    mkdir -p "${FRP_DIR}"
-    
-    # 下载 frp
-    if [ ! -f "${FRP_DIR}/frps" ]; then
-        log_info "下载 frp v${FRP_VERSION} for ${FRP_ARCH}..."
-        FRP_URL="https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}/frp_${FRP_VERSION}_${FRP_ARCH}.tar.gz"
-        if wget -O /tmp/frp.tar.gz "$FRP_URL" 2>/dev/null; then
-            tar -xzf /tmp/frp.tar.gz -C /tmp
-            cp /tmp/frp_${FRP_VERSION}_${FRP_ARCH}/frps "${FRP_DIR}/"
-            cp /tmp/frp_${FRP_VERSION}_${FRP_ARCH}/frpc "${FRP_DIR}/"
-            chmod +x "${FRP_DIR}/frps" "${FRP_DIR}/frpc"
-            rm -rf /tmp/frp_${FRP_VERSION}_${FRP_ARCH} /tmp/frp.tar.gz
-            log_info "frp 安装完成"
-        else
-            log_warn "自动下载 frp 失败，请手动下载"
-            log_info "  下载地址: https://github.com/fatedier/frp/releases"
-            log_info "  放置位置: ${FRP_DIR}/frps 和 ${FRP_DIR}/frpc"
-        fi
-    fi
-    
-    # 生成 frps 配置 —— ★ 强制使用 INI 格式 (frps.ini)
-    # ★★★ 重大修复：FRP v0.61.x 等版本 TOML 里存在 "unknown field allowPorts" 致命问题导致 7000 端口起不来
-    #   所以完全放弃 TOML，改用 100% 所有 FRP 版本都认识的 INI 格式！
-    #   INI 白名单字段名是 allow_ports (下划线) 不是 TOML 的 allowPorts (小驼峰)！
-    # ★ allow_ports 范围与 Node-WS/config.js PORT_MIN=19902 / PORT_MAX=29999 严格对齐
-    FRP_DIR="${HOME}/frp"
-    FRPS_CONFIG="${FRP_DIR}/frps.ini"
-    mkdir -p "${FRP_DIR}" /var/log/frp
-    log_info "生成 frps 配置 (INI格式 极限兼容): ${FRPS_CONFIG}"
-    cat > "${FRPS_CONFIG}" << 'ENDFRPS_INI'
-[common]
-bind_port = 7000
-vhost_http_port = 7400
-vhost_https_port = 7401
-
-# 鉴权 token（必须与 frpc 和项目根目录 .env 完全一致）
-authentication_method = token
-token = {FRPS_TOKEN}
-
-# ★ 设备独立隧道端口白名单（FRP INI 格式，100% 所有版本都认识）
-#   注意：INI 里叫 allow_ports（下划线），与 Node-WS 19902-29999 严格对齐
-allow_ports = 19902-29999
-max_ports_per_client = 8
-max_pool_count = 50
-
-# Web Dashboard (7500)
-dashboard_addr = 0.0.0.0
-dashboard_port = 7500
-dashboard_user = admin
-dashboard_pwd = {FRPS_DASH_PASSWORD}
-
-# 日志
-log_file = /var/log/frp/frps.log
-log_level = info
-log_max_days = 7
-disable_log_color = true
-ENDFRPS_INI
-    sed -i "s/{FRPS_TOKEN}/${FRPS_TOKEN}/g" "${FRPS_CONFIG}"
-    sed -i "s/{FRPS_DASH_PASSWORD}/${FRPS_DASH_PASSWORD//\//\\/}/g" "${FRPS_CONFIG}"
-    
-    # ★ 同时把旧的 frps.toml 删掉防止启动时误读
-    rm -f "${FRP_DIR}/frps.toml" 2>/dev/null || true
-    
-    log_info "frp 配置完成 (INI frps.ini，已删除旧frps.toml避免冲突)"
+    chmod +x "${installer}"
+    # install-frps.sh 自动识别 amd64/arm64、校验 SHA256、生成配置和 systemd 服务。
+    bash "${installer}" --env "${INSTALL_ROOT}/.env"
+    log_info "frps 已从项目内置包安装并启动（无需联网下载）"
 }
 
 # 配置宝塔站点
@@ -855,34 +794,12 @@ WantedBy=multi-user.target
 ENDWS
     sed -i "s|{INSTALL_ROOT}|${INSTALL_ROOT}|g" /etc/systemd/system/fisher-ws.service
     
-    # systemd service for frps
-    if [ -f "${HOME}/frp/frps" ] || [ -x "/usr/bin/frps" ] || [ -x "/usr/local/bin/frps" ]; then
-        cat > /etc/systemd/system/frps.service << 'ENDFRPS'
-[Unit]
-Description=frp Server (frps)
-After=network.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory={FRP_DIR}
-# ★ 2026-09-18 修复：FRP v0.61.x TOML unknown field，改用 INI frps.ini
-ExecStart={FRP_BIN} -c {FRP_DIR}/frps.ini
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-ENDFRPS
-        FRP_BIN_PATH="${HOME}/frp/frps"
-        [ -x "/usr/bin/frps" ] && FRP_BIN_PATH="/usr/bin/frps"
-        [ -x "/usr/local/bin/frps" ] && FRP_BIN_PATH="/usr/local/bin/frps"
-        sed -i "s|{FRP_DIR}|${HOME}/frp|g" /etc/systemd/system/frps.service
-        sed -i "s|{FRP_BIN}|${FRP_BIN_PATH}|g" /etc/systemd/system/frps.service
-        # 旧的 frps.toml 删掉，防止误读
-        rm -f "${HOME}/frp/frps.toml" 2>/dev/null || true
+    # frps.service 已由项目内置 deploy/install-frps.sh 统一生成；此处只做存在性检查。
+    if [ ! -f /etc/systemd/system/frps.service ]; then
+        log_error "frps.service 不存在，请重新执行 ${INSTALL_ROOT}/deploy/install-frps.sh"
+        exit 1
     fi
-    
+
     systemctl daemon-reload 2>/dev/null || true
     systemctl enable fisher-ws 2>/dev/null || true
     systemctl enable frps 2>/dev/null || true
@@ -994,14 +911,14 @@ show_summary() {
     echo "  │                 bash ${INSTALL_ROOT}/node-ws/stop.sh"
     echo "  │                 bash ${INSTALL_ROOT}/node-ws/restart.sh"
     echo "  ├─────────────────────────────────────────────────────────┤"
-    echo "  │  防火墙端口:    80, 443, 8888, 8889, 7000, 7500"
+    echo "  │  防火墙端口:    80, 443, 8888, 8889, 7000, 19902-29999"
     echo "  │  MySQL: 3306, Redis: 6379 (建议不对外开放)"
     echo "  └─────────────────────────────────────────────────────────┘"
     echo ""
     echo "  ⚠️   部署后必做:"
     echo "   1. 修改数据库密码和所有密钥（已自动生成强随机密钥）"
     echo "   2. 在宝塔面板绑定域名并配置 HTTPS 证书"
-    echo "   3. 在云服务器安全组/防火墙开放端口: 80, 443, 8888, 8889, 7000, 7500"
+    echo "   3. 在云服务器安全组/防火墙开放端口: 80, 443, 8888, 8889, 7000, 19902-29999"
     echo "   4. 修改宝塔面板默认端口和安全入口"
     echo ""
     echo "  📝  状态文件: ${STATE_FILE} (删除可重跑整个部署)"

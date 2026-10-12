@@ -140,6 +140,18 @@ C:\wwwroot\cs\
 | frp 连不上 | token/端口错 | 检查 frps.toml 和 .env |
 | 设备 WS 不连 | serverAddr 错 | 调 `setServerAddr` API |
 
+## Linux 内置 frps
+
+Linux 版项目已内置 frps v0.61.1 的 amd64/arm64 服务端包，换服务器时不需要
+临时访问 GitHub 下载。先访问 `/install/` 生成项目根目录 `.env`，再执行：
+
+```bash
+sudo bash /www/wwwroot/<站点目录>/deploy/install-frps.sh
+```
+
+安装器会校验 SHA256，安装到 `/opt/xingchen/frp/frps`，生成
+`/etc/frp/frps.ini` 和 `frps.service`，然后设为开机自启并立即启动。
+
 ## 📝 配置项速查（项目根目录唯一 `.env`）
 
 PHP、Node.js、Bridge 与 FRPS 管理逻辑共用项目根目录 `.env`；`node-ws/.env` 仅作为指向根 `.env` 的兼容软链接。安装时会要求填写当前服务器公网 IP 或域名。

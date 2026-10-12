@@ -82,50 +82,26 @@ stop_bt_services() {
 
 # 启动 frps
 start_frps() {
-    FRPS_DIR="${HOME}/frp"
-    FRPS_BIN="${FRPS_DIR}/frps"
-    # ★ 2026-09-18 修复：FRP v0.61.x 起 TOML 报 unknown field，统一改用 INI 格式 frps.ini
-    FRPS_CONFIG="${FRPS_DIR}/frps.ini"
-
-    if [ ! -f "${FRPS_BIN}" ]; then
-        # 尝试常见位置（宝塔/系统自带等）
-        FRPS_BIN="$(command -v frps 2>/dev/null || true)"
-        [ -z "${FRPS_BIN}" ] && [ -x "/usr/bin/frps" ] && FRPS_BIN="/usr/bin/frps"
-        [ -z "${FRPS_BIN}" ] && [ -x "/usr/local/bin/frps" ] && FRPS_BIN="/usr/local/bin/frps"
-        FRPS_CONFIG="/etc/frp/frps.ini"
-    fi
-
-    # 如果 frps.ini 不存在但 frps.toml 存在，保留兜底但优先 INI
-    if [ ! -f "${FRPS_CONFIG}" ] && [ -f "${FRPS_DIR}/frps.toml" ]; then
-        FRPS_CONFIG="${FRPS_DIR}/frps.toml"
-    fi
-
-    if [ -f "${FRPS_BIN}" ] && [ -f "${FRPS_CONFIG}" ]; then
-        log_info "启动 frps 服务 (bin=${FRPS_BIN}, conf=${FRPS_CONFIG})..."
-        # 检查是否已在运行
-        if pgrep -x "frps" > /dev/null; then
-            log_warn "frps 已在运行，跳过启动"
-        else
-            nohup "${FRPS_BIN}" -c "${FRPS_CONFIG}" > "${FRPS_DIR}/frps.log" 2>&1 &
-            sleep 2
-            if pgrep -x "frps" > /dev/null; then
-                log_info "frps 启动成功 (PID: $(pgrep -x frps))"
-            else
-                log_error "frps 启动失败，请检查日志: ${FRPS_DIR}/frps.log"
-            fi
-        fi
+    if [ -f /etc/systemd/system/frps.service ] && command -v systemctl >/dev/null 2>&1; then
+        log_info "通过 systemd 启动项目内置 frps..."
+        systemctl restart frps
+        systemctl is-active --quiet frps && log_info "frps 启动成功"
+    elif [ -x /opt/xingchen/frp/frps ] && [ -f /etc/frp/frps.ini ]; then
+        log_info "直接启动项目内置 frps..."
+        nohup /opt/xingchen/frp/frps -c /etc/frp/frps.ini >/var/log/frp/frps-stdout.log 2>&1 &
     else
-        log_warn "未找到 frps 可执行文件或配置"
-        log_info "  预期位置:"
-        log_info "    ${FRPS_DIR}/frps + ${FRPS_DIR}/frps.ini"
-        log_info "    或 /usr/bin/frps + /etc/frp/frps.ini"
+        log_warn "frps 尚未安装，正在调用项目内置安装器"
+        bash "${PROJECT_ROOT}/deploy/install-frps.sh" --env "${SHARED_ENV}"
     fi
 }
 
 # 停止 frps
 stop_frps() {
     log_info "停止 frps 服务..."
-    if pgrep -x "frps" > /dev/null; then
+    if [ -f /etc/systemd/system/frps.service ] && command -v systemctl >/dev/null 2>&1; then
+        systemctl stop frps
+        log_info "frps 已停止"
+    elif pgrep -x "frps" > /dev/null; then
         pkill -x "frps"
         sleep 1
         if pgrep -x "frps" > /dev/null; then
