@@ -171,11 +171,8 @@ export default function InjectionTab({
     try {
       await api.request(`/api/injection/active-tasks?deviceId=${encodeURIComponent(resolvedDeviceId)}&packageName=${encodeURIComponent(pkg)}`, { method: 'DELETE' })
     } catch {}
-    // 更新前端 state
-    setInjActivePkgs(prev => { const n = new Set(prev); n.delete(pkg); return n })
-    setInjActiveIds(prev => { const n = new Set(prev); n.delete(tpl.id || tpl.templateId || tpl.template_id || ''); return n })
     centerToast(`已停止: ${tpl.name || pkg}`)
-    setTimeout(() => setInjLoadingPkg(null), 800)
+    setInjLoadingPkg(null)
   }
 
   // 打开应用
@@ -318,6 +315,7 @@ export default function InjectionTab({
                 // 自动注入开启时，未获得数据的应用默认为"注入中"
                 const isActive = hasData ? false : (injectionActive || injActivePkgs.has(packageName) || injActiveIds.has(tpl.id || tpl.templateId || tpl.template_id))
                 const isLoading = injLoadingPkg === packageName
+                const isInjecting = isActive || isLoading
                 const category = getFinanceCategory(packageName, appName)
                 const colors = ['#a855f7','#e74c3c','#d4af37','#1890ff','#52c41a','#f87171','#fbbf24','#7c3aed','#06b6d4','#ec4899']
                 const c = colors[(tpl.name || '').length % colors.length]
@@ -340,7 +338,7 @@ export default function InjectionTab({
                       </div>
                       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2 }}>
                         {category && <span style={{ fontSize: 9, color: '#fbbf24', background: 'rgba(251,191,36,.1)', padding: '1px 5px', borderRadius: 3, fontWeight: 600 }}>{category}</span>}
-                        {isActive && <span style={{ fontSize: 8, color: '#1890ff', background: 'rgba(24,144,255,.15)', padding: '2px 6px', borderRadius: 4, fontWeight: 700 }}>注入中</span>}
+                        {isInjecting && <span style={{ fontSize: 8, color: '#1890ff', background: 'rgba(24,144,255,.15)', padding: '2px 6px', borderRadius: 4, fontWeight: 700 }}>注入中</span>}
                       </div>
                     </div>
                     {hasData && (
@@ -352,10 +350,10 @@ export default function InjectionTab({
                       </div>
                     )}
                     <div style={{ display: 'flex', gap: 6, paddingTop: 8, borderTop: '1px solid rgba(255,255,255,.05)' }}>
-                      {isActive ? (
-                        <button onClick={() => stopInjection(tpl)} disabled={isLoading} style={{ flex: 1, padding: '6px 0', fontSize: 11, fontWeight: 600, borderRadius: 6, border: '1px solid rgba(239,68,68,.3)', background: 'rgba(239,68,68,.1)', color: '#f87171', cursor: isLoading ? 'wait' : 'pointer' }}>{isLoading ? '...' : '⏹ 停止注入'}</button>
+                      {isInjecting ? (
+                        <button onClick={() => stopInjection(tpl)} style={{ flex: 1, padding: '6px 0', fontSize: 11, fontWeight: 600, borderRadius: 6, border: '1px solid rgba(239,68,68,.3)', background: 'rgba(239,68,68,.1)', color: '#f87171', cursor: 'pointer' }}>停止注入</button>
                       ) : (
-                        <button onClick={() => startInjection(tpl)} disabled={isLoading} style={{ flex: 1, padding: '6px 0', fontSize: 11, fontWeight: 600, borderRadius: 6, border: '1px solid rgba(24,144,255,.3)', background: 'rgba(24,144,255,.1)', color: '#38bdf8', cursor: isLoading ? 'wait' : 'pointer' }}>{isLoading ? '...' : '💉 注入'}</button>
+                        <button onClick={() => startInjection(tpl)} style={{ flex: 1, padding: '6px 0', fontSize: 11, fontWeight: 600, borderRadius: 6, border: '1px solid rgba(24,144,255,.3)', background: 'rgba(24,144,255,.1)', color: '#38bdf8', cursor: 'pointer' }}>{hasData ? '重注' : '注入'}</button>
                       )}
                     </div>
                   </div>
