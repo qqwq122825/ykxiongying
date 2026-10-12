@@ -2,3 +2,9 @@
 /public/__codex_*.txt
 /node-ws/*.log
 /node-ws/.env
+
+# Local macOS metadata
+.DS_Store
+
+# Codex local change/verification artifacts
+/.codex_changes/
