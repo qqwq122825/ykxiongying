@@ -765,6 +765,7 @@ class InjectionController extends BaseController
         $tasks = [];
         $packages = [];
         $templateIds = [];
+        $stateAvailable = true;
 
         if ($deviceId) {
             try {
@@ -786,10 +787,22 @@ class InjectionController extends BaseController
                 }
             } catch (\Exception $e) {
                 $tasks = [];
+                $stateAvailable = false;
+                DebugController::recordEvent('php', 'injection.active_task.query_error', (string)$deviceId, [
+                    'actor' => (string)(request()->user['username'] ?? ''),
+                    'message' => $e->getMessage(),
+                ], 'error');
             }
         }
 
-        return json(['success' => true, 'data' => $tasks, 'packages' => $packages, 'templateIds' => $templateIds, 'message' => 'success']);
+        return json([
+            'success' => true,
+            'data' => $tasks,
+            'packages' => $packages,
+            'templateIds' => $templateIds,
+            'stateAvailable' => $stateAvailable,
+            'message' => $stateAvailable ? 'success' : 'active task state unavailable',
+        ]);
     }
 
     /**

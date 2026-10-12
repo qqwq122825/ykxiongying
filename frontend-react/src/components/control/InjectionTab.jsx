@@ -116,8 +116,12 @@ export default function InjectionTab({
         if (cancelled || !Array.isArray(list)) return
         const sortedList = [...list].sort(compareGrabbedNewest)
         setInjGrabbed?.(sortedList)
-        setInjActivePkgs?.(new Set(taskRes?.packages || []))
-        setInjActiveIds?.(new Set(taskRes?.templateIds || []))
+        // 后端查询失败时保留 WS injection_status 刚刚同步的状态，
+        // 不把“停止注入”误覆盖成“注入”。
+        if (taskRes?.stateAvailable !== false) {
+          setInjActivePkgs?.(new Set(taskRes?.packages || []))
+          setInjActiveIds?.(new Set(taskRes?.templateIds || []))
+        }
 
         const completedPackages = Object.entries(reinjectSessions)
           .filter(([pkg, session]) => sortedList.some(item =>
