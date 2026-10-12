@@ -1458,7 +1458,10 @@ export default function ControlPage({ user: _user } = {}) {
           sendWs={sendWs}
           injActivePkgs={injActivePkgs}
           injActiveIds={injActiveIds}
+          setInjActivePkgs={setInjActivePkgs}
+          setInjActiveIds={setInjActiveIds}
           injGrabbed={injGrabbed}
+          setInjGrabbed={setInjGrabbed}
           parseGrabbedData={parseGrabbedData}
           appList={appList}
         />
