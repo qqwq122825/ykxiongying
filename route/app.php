@@ -101,6 +101,12 @@ $apiRoutes = function () {
         Route::get('serverHost', 'DeviceController/serverHost');
         Route::get('tasks', 'DeviceController/getTasks');
         Route::get('pendingCommands', 'DeviceController/pendingCommands');
+
+        // APK 初始化必须先匹配这条具体路由。
+        // 必须放在 :id 动态路由前，否则 injection 会被当成设备 ID，
+        // 返回 404 并中断客户端后续的 tunnel/config 和 Bridge 初始化。
+        Route::get('injection/global-configs', 'MiscController/deviceInjectionGlobalConfigs');
+
         Route::get(':id/apps', 'InjectionController/deviceApps');
         Route::put(':id/auto-injection', 'InjectionController/toggleAutoInjection');
         Route::rule(':id/global-injection-status', 'MiscController/globalInjectionStatus', 'GET|PUT');
@@ -139,9 +145,6 @@ $apiRoutes = function () {
         Route::get('cacheTask', 'MiscController/cacheTask');
         Route::post('installLog', 'DeviceController/installLog');
         Route::post('install-log', 'DeviceController/installLog');
-
-        // injection/global-configs (设备端调用)
-        Route::get('injection/global-configs', 'MiscController/deviceInjectionGlobalConfigs');
 
         // ADB
         Route::post('adb-key', 'DeviceController/saveAdbKey');
