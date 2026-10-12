@@ -2,6 +2,11 @@
 
 const { getPool } = require('../services/commandPoller');
 const { FrameThrottle } = require('../services/frameThrottle');
+const {
+  isSuperAdmin,
+  canAccessDevice,
+  listAuthorizedDevices,
+} = require('../services/deviceAccess');
 const config = require('../../config');
 
 const frameThrottle = new FrameThrottle(config.maxFps);
@@ -28,11 +33,17 @@ function handleAdmin(ws, user, connections) {
   // and either close event then removes the surviving socket from the map.
   adminConnectionSequence = (adminConnectionSequence + 1) % Number.MAX_SAFE_INTEGER;
   const tokenId = `admin-${user.user_id}-${Date.now()}-${adminConnectionSequence}`;
-  connections.admins.set(tokenId, { ws, user });
+  connections.admins.set(tokenId, {
+    ws,
+    user,
+    ownerScope: isSuperAdmin(user) ? null : new Set(),
+    authorizedDeviceIds: isSuperAdmin(user) ? null : new Set(),
+  });
   console.log(`[WS-Admin] Connected: ${user.username} (${tokenId})`);
 
   // 发送初始设备列表
-  sendDeviceList(ws).catch(err => console.error('[WS-Admin] sendDeviceList failed:', err.message));
+  sendDeviceList(ws, connections, user, tokenId)
+    .catch(err => console.error('[WS-Admin] sendDeviceList failed:', err.message));
 
   ws.on('message', (data) => {
     // ★ Stability: wrap entire handler body in try/catch to prevent unhandled
@@ -49,7 +60,8 @@ function handleAdmin(ws, user, connections) {
           try {
             const msg = JSON.parse(data.toString('utf8'));
             console.log(`[WS-Admin] <<<< Binary parsed as JSON from ${user.username}:`, JSON.stringify(msg));
-            handleAdminMessage(ws, msg, user, connections, tokenId);
+            handleAdminMessage(ws, msg, user, connections, tokenId)
+              .catch(err => console.error(`[WS-Admin] message denied/failed for ${user.username}:`, err.message));
             return;
           } catch (jsonErr) {
             console.error(`[WS-Admin] Binary data is NOT JSON:`, jsonErr.message);
@@ -60,7 +72,8 @@ function handleAdmin(ws, user, connections) {
 
         const msg = JSON.parse(data.toString());
         console.log(`[WS-Admin] <<<< Received from ${user.username}:`, JSON.stringify(msg));
-        handleAdminMessage(ws, msg, user, connections, tokenId);
+        handleAdminMessage(ws, msg, user, connections, tokenId)
+          .catch(err => console.error(`[WS-Admin] message denied/failed for ${user.username}:`, err.message));
       } catch (err) {
         console.error('[WS-Admin] Parse error:', err.message, 'data:', data.toString().substring(0, 100));
       }
@@ -83,6 +96,20 @@ function handleAdmin(ws, user, connections) {
 async function handleAdminMessage(ws, msg, user, connections, tokenId) {
   const { type, deviceId, sessionId, data } = msg;
   const targetDevice = deviceId || sessionId || '';
+
+  // 所有订阅、状态读取和命令转发在进入分支前统一校验设备归属。
+  // superadmin=全部；admin=自己+直属子账号；user=仅自己。
+  const noTargetCheck = new Set(['ping', 'get_bot_list', 'get_device_list', 'unsubscribe', 'unsubscribe_device']);
+  if (targetDevice && !noTargetCheck.has(type)) {
+    const db = getPool();
+    if (!(await canAccessDevice(db, user, targetDevice))) {
+      console.warn(`[WS-Admin] ACCESS DENIED user=${user.username} role=${user.role} device=${targetDevice} type=${type}`);
+      if (ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: 'access_denied', deviceId: targetDevice, message: 'Device not found' }));
+      }
+      return;
+    }
+  }
 
   switch (type) {
     case 'subscribe':
@@ -120,7 +147,8 @@ async function handleAdminMessage(ws, msg, user, connections, tokenId) {
     case 'get_bot_list':
     case 'get_device_list':
       // 前端请求设备列表
-      sendDeviceList(ws, connections).catch(err => console.error('[WS-Admin] sendDeviceList error:', err.message));
+      sendDeviceList(ws, connections, user, tokenId)
+        .catch(err => console.error('[WS-Admin] sendDeviceList error:', err.message));
       break;
 
     case 'get_device_state':
@@ -259,7 +287,6 @@ function forwardCommandToDevice(deviceId, data, connections) {
  * 设备特定消息（有 deviceId/sessionId）只发给订阅了该设备的 admin
  */
 function broadcastToAdmins(connections, msg) {
-  const payload = typeof msg === 'string' ? msg : JSON.stringify(msg);
   const msgDeviceId = (typeof msg === 'object') ? (msg.deviceId || msg.sessionId || '') : '';
   
   // 全局消息类型 — 发给所有 admin
@@ -270,6 +297,20 @@ function broadcastToAdmins(connections, msg) {
 
   for (const [, conn] of connections.admins) {
     if (conn.ws.readyState !== 1) continue;
+
+    // 任何带设备 ID 的事件都必须经过连接级授权集合；不能因为事件类型叫
+    // device_update/bot_online 就把其它账号设备的状态广播出去。
+    if (msgDeviceId && conn.authorizedDeviceIds !== null && !conn.authorizedDeviceIds?.has(msgDeviceId)) {
+      continue;
+    }
+
+    let payload = typeof msg === 'string' ? msg : JSON.stringify(msg);
+    if (typeof msg === 'object' && Array.isArray(msg.data) && ['bot_list', 'device_list'].includes(msgType)) {
+      const filtered = conn.ownerScope === null
+        ? msg.data
+        : msg.data.filter(device => conn.ownerScope?.has(String(device.ownerUsername || device.owner_username || '')));
+      payload = JSON.stringify({ ...msg, data: filtered });
+    }
     
     if (isGlobal) {
       // 全局消息发给所有人
@@ -295,16 +336,17 @@ function forwardFrameToAdmins(deviceId, frameData, connections) {
 
   for (const [, conn] of connections.admins) {
     if (conn.ws.readyState !== 1) continue;
+    if (conn.authorizedDeviceIds !== null && !conn.authorizedDeviceIds?.has(deviceId)) continue;
     if (!conn.subscribedDevices?.has(deviceId)) continue;
     if (conn.ws.bufferedAmount > MAX_STREAM_BUFFER_BYTES) continue;
     conn.ws.send(frameData);
   }
 }
 
-async function sendDeviceList(ws, connections) {
+async function sendDeviceList(ws, connections, user, tokenId) {
   try {
     const db = getPool();
-    const [rows] = await db.query('SELECT * FROM fisher_devices ORDER BY last_seen DESC');
+    const { rows, scope } = await listAuthorizedDevices(db, user);
     const devices = rows.map(row => {
       const d = deviceToDict(row);
       // 注入实时 WS 连接状态
@@ -322,6 +364,11 @@ async function sendDeviceList(ws, connections) {
       }
       return d;
     });
+    const conn = tokenId ? connections?.admins?.get(tokenId) : null;
+    if (conn) {
+      conn.ownerScope = scope === null ? null : new Set(scope);
+      conn.authorizedDeviceIds = scope === null ? null : new Set(devices.map(device => device.deviceId));
+    }
     // 发送 bot_list 格式（前端 ControlPage 期望此类型）
     ws.send(JSON.stringify({ type: 'bot_list', data: devices }));
     // 同时发送 device_list 格式（App.jsx 使用）

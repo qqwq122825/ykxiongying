@@ -227,6 +227,8 @@ class DeviceController extends BaseController
                     'scope_count' => count($scope ?: []),
                     'actor' => $user['username'] ?? '',
                 ]);
+                // 权限字段缺失时必须 fail closed。旧逻辑继续执行无条件查询会让普通账号看到全部设备。
+                return json(['success' => true, 'data' => [], 'message' => 'device ownership unavailable']);
             }
 
             $orderColumn = $this->tableHasColumn('fisher_devices', 'last_seen') ? 'last_seen' : 'device_id';

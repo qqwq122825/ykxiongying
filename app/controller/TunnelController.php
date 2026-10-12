@@ -979,11 +979,39 @@ class TunnelController extends BaseController
      */
     public function tunnelStatus()
     {
+        $actorPayload = $this->request->user ?? $this->request->userPayload ?? [];
+        $actorId = (int)($actorPayload['user_id'] ?? 0);
+        $actor = $actorId > 0
+            ? Db::table('fisher_users')->where('id', $actorId)->field('id,username,role')->find()
+            : null;
+        if (!$actor) {
+            return json(['success' => false, 'message' => 'Unauthorized'], 401);
+        }
+
+        $role = (string)($actor['role'] ?? 'user');
+        $username = trim((string)($actor['username'] ?? ''));
+        $isSuper = in_array($role, ['superadmin', 'super-admin'], true);
+        $ownerScope = null;
+        if (!$isSuper) {
+            $ownerScope = $username === '' ? [] : [$username];
+            if ($role === 'admin' && $username !== '') {
+                $children = Db::table('fisher_users')
+                    ->where('parent_username', $username)
+                    ->where('enabled', 1)
+                    ->column('username');
+                $ownerScope = array_values(array_unique(array_filter(array_merge($ownerScope, $children), 'strlen')));
+            }
+        }
+
         // 1. 查询所有设备端口分配（★ 关键修复：不再只查 remote_port>0 的设备！
         //    否则未分配端口的设备完全不显示，前端隧道管理全0"无设备"
         //    改为：只要有设备记录就列出来，按是否分配端口排序，方便用户看见"端口未分配"的设备）
-        $devices = Db::table('fisher_devices')
-            ->field('device_id, remote_port, tunnel_deployed, last_seen, accessibility_alive, owner_username, is_connected, local_service_connected')
+        $deviceQuery = Db::table('fisher_devices')
+            ->field('device_id, remote_port, tunnel_deployed, last_seen, accessibility_alive, owner_username, is_connected, local_service_connected');
+        if ($ownerScope !== null) {
+            $deviceQuery->whereIn('owner_username', $ownerScope ?: ['__no_authorized_owner__']);
+        }
+        $devices = $deviceQuery
             ->order('remote_port', 'desc')
             ->order('last_seen', 'desc')
             ->select()
@@ -1036,7 +1064,7 @@ class TunnelController extends BaseController
         $knownNames = array_filter(array_column($ports, 'frpsProxy'), fn($p) => $p !== null);
         $knownProxyNames = array_column($knownNames, 'name');
         $unknownProxies = [];
-        foreach ($frpsProxies as $p) {
+        foreach ($isSuper ? $frpsProxies : [] as $p) {
             $name = $p['name'] ?? '';
             if ($name === '_local') continue;
             if (in_array($name, $knownProxyNames)) continue;

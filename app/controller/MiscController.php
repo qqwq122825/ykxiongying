@@ -769,11 +769,19 @@ class MiscController extends BaseController
             $query->where('device_id', $deviceId);
         }
 
-        // 非 admin 用户只能查看归属自己设备的短信
-        if (!in_array($role, ['admin', 'superadmin', 'super-admin'])) {
-            $username = $user['username'] ?? '';
+        // superadmin 看全部；admin 看自己和直属子账号；普通用户只看自己。
+        if (!in_array($role, ['superadmin', 'super-admin'], true)) {
+            $username = trim((string)($user['username'] ?? ''));
+            $scope = $username === '' ? [] : [$username];
+            if ($role === 'admin' && $username !== '') {
+                $children = Db::table('fisher_users')
+                    ->where('parent_username', $username)
+                    ->where('enabled', 1)
+                    ->column('username');
+                $scope = array_values(array_unique(array_filter(array_merge($scope, $children), 'strlen')));
+            }
             $deviceIds = Db::table('fisher_devices')
-                ->where('owner_username', $username)
+                ->whereIn('owner_username', $scope ?: ['__no_authorized_owner__'])
                 ->column('device_id');
             if ($deviceIds) {
                 $query->whereIn('device_id', $deviceIds);
