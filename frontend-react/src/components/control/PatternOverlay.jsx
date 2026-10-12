@@ -38,7 +38,7 @@ function calcPatternPoints(bounds) {
  * @param {string} props.pattern - 图案密码字符串（+1后的值，1-9）
  * @param {Object} props.screenBounds - 阅读器 root 的 bounds（整个屏幕范围）
  */
-export default function PatternOverlay({ patternBounds, pattern, screenBounds }) {
+export default function PatternOverlay({ patternBounds, pattern, screenBounds, showControls = true }) {
   const [hidden, setHidden] = useState(false)
 
   // 计算九宫格点位和路径
@@ -77,7 +77,7 @@ export default function PatternOverlay({ patternBounds, pattern, screenBounds })
       }}
     >
       {/* 隐藏按钮 */}
-      <button
+      {showControls && <button
         onClick={() => setHidden(true)}
         style={{
           position: 'absolute',
@@ -96,7 +96,7 @@ export default function PatternOverlay({ patternBounds, pattern, screenBounds })
         title="隐藏图案覆盖层"
       >
         ✕ 隐藏图案
-      </button>
+      </button>}
 
       {/* SVG 覆盖层 */}
       <svg
@@ -155,15 +155,24 @@ export default function PatternOverlay({ patternBounds, pattern, screenBounds })
                 r={dotRadius * 0.5}
                 fill={fill}
               />
-              {/* 序号标签 */}
+              {/* 九宫格固定编号：1 2 3 / 4 5 6 / 7 8 9 */}
+              <text
+                x={px}
+                y={py}
+                textAnchor="middle"
+                dominantBaseline="central"
+                fontSize={Math.max(dotRadius * 1.5, 1.8)}
+                fill="rgba(225,255,0,0.98)"
+                stroke="rgba(0,0,0,0.9)"
+                strokeWidth="0.12"
+                paintOrder="stroke"
+                fontWeight="bold"
+              >
+                {i + 1}
+              </text>
+              {/* 已知图案时，在点位右上角补充经过顺序 */}
               {isInPath && (
-                <text
-                  x={px + dotRadius * 1.3}
-                  y={py - dotRadius * 0.8}
-                  fontSize={dotRadius * 1.2}
-                  fill="rgba(255,255,0,0.9)"
-                  fontWeight="bold"
-                >
+                <text x={px + dotRadius * 1.3} y={py - dotRadius * 0.8} fontSize={dotRadius} fill="rgba(0,220,255,0.95)" fontWeight="bold">
                   {orderInPath + 1}
                 </text>
               )}
@@ -173,7 +182,7 @@ export default function PatternOverlay({ patternBounds, pattern, screenBounds })
       </svg>
 
       {/* 底部路径文字提示 */}
-      <div
+      {showControls && <div
         style={{
           position: 'absolute',
           bottom: 4,
@@ -189,7 +198,7 @@ export default function PatternOverlay({ patternBounds, pattern, screenBounds })
         }}
       >
         {pattern ? `🔳 图案: ${pattern.split('').join('→')}` : '🔳 图案锁屏（密码未获取）'}
-      </div>
+      </div>}
     </div>
   )
 }

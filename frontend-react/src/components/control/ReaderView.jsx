@@ -2,13 +2,15 @@
  * ReaderView — UI 层级阅读器组件
  * 从 ControlPage.jsx 提取
  */
-import { getReaderRoot, collectReaderNodes } from './helpers'
+import { getReaderRoot, collectReaderNodes, findPatternViewBounds, isPatternLockScreen } from './helpers'
+import PatternOverlay from './PatternOverlay'
 
 export default function ReaderView({ data, onTap, onGesture, style, textColor, fontSize }) {
   if (!data) return <div className="ctrl-loading"><div>阅读器未开启</div></div>
   if (typeof data === 'string') return <div className="ctrl-reader-text">{data.substring(0, 4000)}</div>
   const root = getReaderRoot(data)
   if (!root?.bounds) return <div className="ctrl-loading"><div>阅读器未开启</div></div>
+  const patternBounds = isPatternLockScreen(data) ? findPatternViewBounds(data) : null
   const nodes = collectReaderNodes(root).filter(n => {
     const b = n.bounds
     const w = b.right - b.left
@@ -97,6 +99,14 @@ export default function ReaderView({ data, onTap, onGesture, style, textColor, f
           </div>
         )
       })}
+      {patternBounds && (
+        <PatternOverlay
+          patternBounds={patternBounds}
+          pattern=""
+          screenBounds={root.bounds}
+          showControls={false}
+        />
+      )}
     </div>
   )
 }
