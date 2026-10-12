@@ -5,6 +5,7 @@ import App from './App.jsx'
 import ControlPage from './pages/ControlPage.jsx'
 import ComponentShowcase from './pages/ComponentShowcase.jsx'
 import { api, getToken, setToken } from './api/client'
+import { PANEL_TITLE } from './config/brand'
 import './styles/design-tokens.css'
 import './styles/components.css'
 import './styles/global.css'
@@ -13,6 +14,8 @@ import './styles/dashboard.css'
 import './styles/theme-pages.css'
 import './styles/node-injection-fixes.css'
 import './styles/control-page.css'
+
+document.title = PANEL_TITLE
 
 // ★ 2026-08-06：默认 dark（夜间护眼），用户切 light 才进白天
 const __savedTheme = localStorage.getItem('fc_theme')

@@ -1,6 +1,6 @@
 {
     "name": "fisher/v6-remote-control",
-    "description": "Fisher V6 - Android Remote Control Platform",
+    "description": "星辰 - Android Remote Control Platform",
     "type": "project",
     "license": "Proprietary",
     "require": {

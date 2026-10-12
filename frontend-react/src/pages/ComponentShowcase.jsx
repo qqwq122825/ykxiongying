@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react'
+import { BRAND_NAME } from '../config/brand'
 
 /**
- * 组件示例页 · V6设计系统 v2.0
+ * 组件示例页 · 星辰设计系统 v2.0
  * 用于验证 design-tokens.css + components.css 的视觉效果
  * 访问路径：?page=showcase
  *
@@ -485,7 +486,7 @@ export default function ComponentShowcase() {
         borderTop: '1px solid var(--fc-border-soft)',
         marginTop: 'var(--fc-space-9)',
       }}>
-        V6 · 设备管理后台 · 设计系统 v2.0
+        {BRAND_NAME} · 设备管理后台 · 设计系统 v2.0
       </footer>
     </div>
   )

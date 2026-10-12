@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-// Fisher/V6 one-page installer. Delete or lock this file after installation.
+// 星辰 one-page installer. Delete or lock this file after installation.
 error_reporting(E_ALL);
 ini_set('display_errors', '1');
 
@@ -206,11 +206,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$alreadyLocked) {
 ?>
 <!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>V6 安装向导</title>
+<title>星辰 安装向导</title>
 <style>
 body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial;background:#16001f;color:#f8f3ff}.wrap{max-width:860px;margin:36px auto;padding:28px;background:rgba(255,255,255,.06);border:1px solid rgba(190,80,255,.35);border-radius:18px;box-shadow:0 20px 60px rgba(0,0,0,.35)}h1{margin:0 0 8px;font-size:30px}.hint{color:#cbb6ff;margin-bottom:22px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}label{display:block;font-size:14px;color:#d8c7ff;margin-bottom:6px}input{box-sizing:border-box;width:100%;padding:12px;border-radius:10px;border:1px solid #5b356d;background:#21062d;color:#fff}button{margin-top:18px;width:100%;padding:14px;border:0;border-radius:12px;background:linear-gradient(90deg,#2673ff,#a43df5);color:#fff;font-weight:700;font-size:16px}.box{padding:12px;border-radius:10px;margin:10px 0}.ok{background:#08351f;color:#bdf8d4}.err{background:#4b1111;color:#ffd4d4}.full{grid-column:1/-1}.small{font-size:13px;color:#bba7db}.disabled{opacity:.65}code{color:#ffd479}@media(max-width:720px){.grid{grid-template-columns:1fr}.wrap{margin:12px}}</style>
 </head><body><main class="wrap">
-<h1>V6 安装向导</h1><div class="hint">初始化数据库、管理员账号、Telegram 机器人 Token 和管理员通知 Chat ID。</div>
+<h1>星辰 安装向导</h1><div class="hint">初始化数据库、管理员账号、Telegram 机器人 Token 和管理员通知 Chat ID。</div>
 <?php foreach ($messages as $m): ?><div class="box ok"><?=h($m)?></div><?php endforeach; ?>
 <?php foreach ($errors as $e): ?><div class="box err"><?=h($e)?></div><?php endforeach; ?>
 <?php if ($alreadyLocked): ?>

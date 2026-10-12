@@ -10,6 +10,7 @@ import ApkPage from './ApkPage'
 import TunnelMonitor from './TunnelMonitor'
 import { androidVersion, appVersion, appName, battery, batteryLevel, country, deviceName, deviceStatus, formatTime, installTime, ip, lastHeartbeat, lastSeen, model, owner, pid, pname, pon, statusText, today } from '../utils/device'
 import { toast } from '../utils/toast'
+import { BRAND_NAME } from '../config/brand'
 
 const STAT_ICONS = {
   red: '📱',
@@ -467,9 +468,9 @@ export default function Dashboard({ user, onLogout }) {
       <div className="rc-shell">
         <aside className="rc-sidebar">
           <div className="rc-brand">
-            <img src="/hdkj.png" alt="V6" className="rc-brand-logo" style={{width:'44px',height:'44px',borderRadius:'12px',objectFit:'cover',flexShrink:0,display:'block'}}/>
+            <img src="/hdkj.png" alt={BRAND_NAME} className="rc-brand-logo" style={{width:'44px',height:'44px',borderRadius:'12px',objectFit:'cover',flexShrink:0,display:'block'}}/>
             <div>
-              <div className="rc-logo">V6</div>
+              <div className="rc-logo">{BRAND_NAME}</div>
               <div className="rc-sub">设备管理后台</div>
             </div>
           </div>

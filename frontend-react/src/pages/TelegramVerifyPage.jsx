@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react'
+import { PANEL_FOOTER, PANEL_TITLE } from '../config/brand'
 
-const V6Logo = () => (
+const BrandLogo = () => (
   <div style={{ width: 96, height: 96, margin: '0 auto 14px', borderRadius: 22, background: '#000', display: 'flex', alignItems: 'center', justifyContent: 'center', border: '1px solid rgba(167,139,250,0.45)', boxShadow: '0 0 40px rgba(56,189,248,0.25)' }}>
     <svg viewBox="0 0 100 100" width="64" height="64" fill="none" xmlns="http://www.w3.org/2000/svg">
       <circle cx="50" cy="48" r="40" stroke="#22d3ee" strokeWidth="5" fill="none" />
@@ -99,10 +100,10 @@ export default function TelegramVerifyPage({ account, challengeId, expiresIn = 3
       <div className="login-grid" />
 
       <div style={{ position: 'relative', zIndex: 2, height: '100vh', overflowY: 'auto', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '40px 20px', boxSizing: 'border-box' }}>
-        <V6Logo />
+        <BrandLogo />
 
         <h1 className="login-title" style={{ textAlign: 'center', margin: '0 0 4px', fontSize: 34, fontWeight: 800, background: 'linear-gradient(135deg,#fb923c 0%,#ef4444 35%,#d946ef 70%,#a78bfa 100%)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', backgroundClip: 'text', letterSpacing: 2 }}>
-          V6-设备管理后台
+          {PANEL_TITLE}
         </h1>
         <div className="login-subtitle" style={{ textAlign: 'center', color: '#a78bfa', fontSize: 13, letterSpacing: 4, marginBottom: 26, fontWeight: 500, opacity: 0.95 }}>
           DEVICE MANAGEMENT SYSTEM
@@ -223,7 +224,7 @@ export default function TelegramVerifyPage({ account, challengeId, expiresIn = 3
           </div>
 
           <div className="login-foot" style={{ textAlign: 'center', fontSize: 11, color: 'rgba(148,163,184,0.6)', letterSpacing: 2, padding: '6px 0 2px' }}>
-            ENCRYPTED · V6 设备管理后台
+            {PANEL_FOOTER}
           </div>
         </div>
       </div>

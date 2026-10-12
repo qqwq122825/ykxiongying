@@ -1,6 +1,6 @@
 #!/bin/bash
 # ================================================================
-# Fisher V6 服务器端一键修复脚本（2026-09-18 v3 - 含FRPS allowPorts致命修复）
+# 星辰服务器端一键修复脚本（2026-09-18 v3 - 含FRPS allowPorts致命修复）
 # 解决：
 #   ①投屏 502 Tunnel error or timeout → ★ 新增v3致命修复：FRPS allowPorts缺少19902-29999
 #   ②隧道管理页面全0 "无设备"（之前SQL仅查remote_port>0，隐藏所有设备）
