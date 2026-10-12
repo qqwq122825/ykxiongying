@@ -693,7 +693,7 @@ CREATE TABLE IF NOT EXISTS `fisher_users` (
   `max_sub_users` int unsigned NOT NULL DEFAULT '0',
   `parent_username` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '',
   `enabled` tinyint unsigned NOT NULL DEFAULT '1',
-  `allow_multi_login` tinyint unsigned NOT NULL DEFAULT '1',
+  `allow_multi_login` tinyint unsigned NOT NULL DEFAULT '0',
   `expire_at` int unsigned NOT NULL DEFAULT '0',
   `avatar` varchar(512) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '',
   `telegram_chat_id` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '',

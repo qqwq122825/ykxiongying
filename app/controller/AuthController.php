@@ -210,8 +210,8 @@ class AuthController extends BaseController
                     'avatar' => $dbUser['avatar'] ?? '/assets/img/mx_logo.png',
                     'maxDevices' => $dbUser['max_devices'] ?? 100,
                     'max_sub_users' => $dbUser['max_sub_users'] ?? null,
-                    'allow_multi_login' => !array_key_exists('allow_multi_login', $dbUser)
-                        || !in_array($dbUser['allow_multi_login'], [0, '0', false], true),
+                    'allow_multi_login' => array_key_exists('allow_multi_login', $dbUser)
+                        && !in_array($dbUser['allow_multi_login'], [0, '0', false], true),
                 ],
             ],
             'role' => $dbUser['role'],
@@ -674,8 +674,8 @@ class AuthController extends BaseController
     {
         $this->logLogin((string)$user['username'], 1);
         $sessionId = bin2hex(random_bytes(16));
-        $allowMultiLogin = !array_key_exists('allow_multi_login', $user)
-            || !in_array($user['allow_multi_login'], [0, '0', false], true);
+        $allowMultiLogin = array_key_exists('allow_multi_login', $user)
+            && !in_array($user['allow_multi_login'], [0, '0', false], true);
         if (!$allowMultiLogin) {
             $this->saveUserSession((int)$user['id'], $sessionId);
         }

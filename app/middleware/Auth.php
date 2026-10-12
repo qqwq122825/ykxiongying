@@ -149,9 +149,9 @@ class Auth
             return json(['success' => false, 'message' => '该账号已过期，请联系管理员续期'], 403);
         }
         // 账号级多开控制：开启时所有合法 token 可并行使用；
-        // 关闭时只允许 fisher_settings 中记录的最新 sid。旧库没有该字段时按开启处理。
-        $allowMultiLogin = !array_key_exists('allow_multi_login', $dbUser)
-            || !in_array($dbUser['allow_multi_login'], [0, '0', false], true);
+        // 关闭时只允许 fisher_settings 中记录的最新 sid。旧库没有该字段时也按关闭处理。
+        $allowMultiLogin = array_key_exists('allow_multi_login', $dbUser)
+            && !in_array($dbUser['allow_multi_login'], [0, '0', false], true);
         if (!$allowMultiLogin) {
             $sid = (string)($user['sid'] ?? '');
             $sessionKey = 'auth_session_' . (int)$user['user_id'];

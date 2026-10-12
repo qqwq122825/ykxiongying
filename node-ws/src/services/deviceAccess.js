@@ -28,7 +28,8 @@ async function loadCurrentActor(db, tokenUser) {
   const row = rows?.[0];
   if (!row || !isEnabled(row.enabled) || isExpired(row.expire_at)) return null;
 
-  const allowMultiLogin = isEnabled(row.allow_multi_login);
+  const allowMultiLogin = Object.prototype.hasOwnProperty.call(row, 'allow_multi_login')
+    && isEnabled(row.allow_multi_login);
   if (!allowMultiLogin) {
     const sid = String(tokenUser?.sid || '');
     if (!sid) return null;

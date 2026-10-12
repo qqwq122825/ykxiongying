@@ -32,7 +32,7 @@ class UserController extends BaseController
 
     /**
      * 旧环境在首次打开账号管理时自动补齐字段。
-     * 默认开启多开，保持升级前“同一账号可多端在线”的行为不变。
+     * 默认关闭多开，新账号只允许最新一次登录的会话继续使用。
      */
     private function ensureAllowMultiLoginColumn(): bool
     {
@@ -42,7 +42,10 @@ class UserController extends BaseController
         try {
             $rows = Db::query("SHOW COLUMNS FROM fisher_users LIKE 'allow_multi_login'");
             if (empty($rows)) {
-                Db::execute("ALTER TABLE fisher_users ADD COLUMN allow_multi_login TINYINT UNSIGNED NOT NULL DEFAULT 1 AFTER enabled");
+                Db::execute("ALTER TABLE fisher_users ADD COLUMN allow_multi_login TINYINT UNSIGNED NOT NULL DEFAULT 0 AFTER enabled");
+            } elseif ((string)($rows[0]['Default'] ?? $rows[0]['default'] ?? '') !== '0') {
+                // 只修正列默认值，不覆盖管理员已手动设置的账号状态。
+                Db::execute("ALTER TABLE fisher_users MODIFY COLUMN allow_multi_login TINYINT UNSIGNED NOT NULL DEFAULT 0");
             }
             $this->hasAllowMultiLoginColumn = true;
         } catch (\Throwable $e) {
@@ -210,8 +213,8 @@ class UserController extends BaseController
             $r['permissions'] = $this->normalizePermissions($r['permissions'] ?? null, $uRole);
             $r['accounts_locked'] = $uRole === 'user';
             $r['allow_multi_login'] = $hasAllowMultiLogin
-                ? (int)($r['allow_multi_login'] ?? 1)
-                : 1;
+                ? (int)($r['allow_multi_login'] ?? 0)
+                : 0;
 
             // 格式化时间
             if (!empty($r['created_at']) && is_numeric($r['created_at']) && $r['created_at'] > 0) {
@@ -318,7 +321,7 @@ class UserController extends BaseController
         if ($this->ensureAllowMultiLoginColumn()) {
             $insert['allow_multi_login'] = array_key_exists('allow_multi_login', $data)
                 ? ($data['allow_multi_login'] ? 1 : 0)
-                : 1;
+                : 0;
         }
 
         $newUserId = Db::table('fisher_users')->insertGetId($insert);
