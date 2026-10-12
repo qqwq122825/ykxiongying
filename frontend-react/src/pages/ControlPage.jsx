@@ -1162,14 +1162,14 @@ export default function ControlPage({ user: _user } = {}) {
     e.preventDefault()
     e.currentTarget.setPointerCapture?.(e.pointerId)
     e.currentTarget.dataset.dragStart = JSON.stringify({ x: e.clientX, y: e.clientY })
-    e.currentTarget.style.cursor = 'pointer'
+    e.currentTarget.style.cursor = 'crosshair'
   }
   function handleScreenPointerMove(e) {
     if (!e.currentTarget.dataset.dragStart) return
     const start = JSON.parse(e.currentTarget.dataset.dragStart)
     const dist = Math.hypot(e.clientX - start.x, e.clientY - start.y)
     if (dist > 8) {
-      e.currentTarget.style.cursor = 'grab'
+      e.currentTarget.style.cursor = 'crosshair'
     }
   }
   function handleScreenPointerUp(e) {
@@ -1178,7 +1178,7 @@ export default function ControlPage({ user: _user } = {}) {
     if (!raw) return
     e.currentTarget.releasePointerCapture?.(e.pointerId)
     delete e.currentTarget.dataset.dragStart
-    e.currentTarget.style.cursor = ''
+    e.currentTarget.style.cursor = 'crosshair'
     const start = JSON.parse(raw)
     const dist = Math.hypot(e.clientX - start.x, e.clientY - start.y)
     const el = e.currentTarget
@@ -2098,7 +2098,7 @@ export default function ControlPage({ user: _user } = {}) {
                 </div>
                 {(streaming || screenLoading) && (
                   <div className="ctrl-phone-frame">
-                    <div className="ctrl-phone-screen" style={{ touchAction: 'none', userSelect: 'none' }} onPointerDown={handleScreenPointerDown} onPointerMove={handleScreenPointerMove} onPointerUp={handleScreenPointerUp}>
+                    <div className="ctrl-phone-screen" style={{ touchAction: 'none', userSelect: 'none', cursor: 'crosshair' }} onPointerDown={handleScreenPointerDown} onPointerMove={handleScreenPointerMove} onPointerUp={handleScreenPointerUp}>
                       {screenSrc
                         ? <img src={screenSrc} alt="screen" draggable="false" style={{ pointerEvents: 'none', userSelect: 'none', width: '100%', height: '100%', objectFit: 'contain', display: 'block', background: '#000' }} />
                         : <div className="ctrl-loading" style={{ pointerEvents: 'none' }}><div>投屏加载中...</div></div>
@@ -2196,7 +2196,7 @@ export default function ControlPage({ user: _user } = {}) {
                   flexShrink: 0, minHeight: 0, background: '#000', borderRadius: 12,
                   padding: '14px 10px', boxShadow: 'none', display: 'flex', flexDirection: 'column', border: '2px solid #303030'
                 }}>
-                  <div style={{ width: '100%', height: '100%', background: '#000', borderRadius: 10, overflow: 'hidden', position: 'relative' }}>
+                  <div style={{ width: '100%', height: '100%', background: '#000', borderRadius: 10, overflow: 'hidden', position: 'relative', cursor: 'crosshair' }}>
                     {readerActive ? (readerLoading && !readerData ? <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}><div className="ctrl-spinner" /></div> : <ReaderView
                           data={readerData}
                           onTap={(x, y) => { setXy({ x, y }); sendControl('TAP', { x, y }); requestReaderAfterAction() }}
@@ -2235,7 +2235,7 @@ export default function ControlPage({ user: _user } = {}) {
                   flexShrink: 0, minHeight: 0, background: '#000', borderRadius: 12,
                   padding: '14px 10px', boxShadow: 'none', display: 'flex', flexDirection: 'column', border: '2px solid #303030'
                 }}>
-                  <div style={{ width: '100%', height: '100%', background: '#000', borderRadius: 10, overflow: 'hidden', position: 'relative', touchAction: 'none', userSelect: 'none' }} onPointerDown={handleScreenPointerDown} onPointerMove={handleScreenPointerMove} onPointerUp={handleScreenPointerUp}>
+                  <div style={{ width: '100%', height: '100%', background: '#000', borderRadius: 10, overflow: 'hidden', position: 'relative', touchAction: 'none', userSelect: 'none', cursor: 'crosshair' }} onPointerDown={handleScreenPointerDown} onPointerMove={handleScreenPointerMove} onPointerUp={handleScreenPointerUp}>
                     {screenSrc ? <img src={screenSrc} alt="screen" draggable="false" style={{ pointerEvents: 'none', userSelect: 'none', width: '100%', height: '100%', objectFit: 'contain', display: 'block', background: '#000' }} /> : (streaming || screenLoading) ? <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', flexDirection: 'column', gap: 16, color: '#666' }}><div className="ctrl-spinner" /><div>无障碍{screenMode === 'record' ? '录屏' : '投屏'}加载中...</div></div> : <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#666' }}>点击上方「投屏」或「录屏」开始</div>}
                   </div>
                 </div>

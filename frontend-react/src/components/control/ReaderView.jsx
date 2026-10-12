@@ -45,13 +45,13 @@ export default function ReaderView({ data, onTap, onGesture, style, textColor, f
   }
   return (
     <div
-      style={{ position: 'relative', width: '100%', height: '100%', background: '#0b0b0b', overflow: 'hidden', userSelect: 'none', touchAction: 'none', ...style }}
-      onPointerDown={e => { e.currentTarget.dataset.p = JSON.stringify({ x: e.clientX, y: e.clientY }); e.currentTarget.style.cursor = 'pointer' }}
-      onPointerMove={e => { if (!e.currentTarget.dataset.p) return; const p = JSON.parse(e.currentTarget.dataset.p); const dist = Math.hypot(e.clientX - p.x, e.clientY - p.y); if (dist > 8) e.currentTarget.style.cursor = 'grab' }}
+      style={{ position: 'relative', width: '100%', height: '100%', background: '#0b0b0b', overflow: 'hidden', userSelect: 'none', touchAction: 'none', cursor: 'crosshair', ...style }}
+      onPointerDown={e => { e.currentTarget.dataset.p = JSON.stringify({ x: e.clientX, y: e.clientY }); e.currentTarget.style.cursor = 'crosshair' }}
+      onPointerMove={e => { if (!e.currentTarget.dataset.p) return; e.currentTarget.style.cursor = 'crosshair' }}
       onPointerUp={e => {
         const d = e.currentTarget.dataset.p
         delete e.currentTarget.dataset.p
-        e.currentTarget.style.cursor = ''
+        e.currentTarget.style.cursor = 'crosshair'
         if (!d) return
         const p = JSON.parse(d)
         const start = mapPoint(p.x, p.y, e.currentTarget)
