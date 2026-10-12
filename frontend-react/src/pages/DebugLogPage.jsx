@@ -110,7 +110,7 @@ export default function DebugLogPage() {
       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'center', flexWrap: 'wrap', marginBottom: 16 }}>
         <div>
           <div style={{ fontSize: 18, fontWeight: 700, color: '#fff' }}>🧾 新设备接入调试日志</div>
-          <div style={{ marginTop: 5, fontSize: 12, color: '#94a3b8' }}>记录 HTTP 注册、WS 连接/心跳、数据库写入、应用列表和自动注入的真实先后顺序。</div>
+          <div style={{ marginTop: 5, fontSize: 12, color: '#94a3b8' }}>记录 HTTP 注册、WS 连接/心跳、应用列表，以及自动/手动注入的 STOP、SHOW、表单上报、入库和完成停止顺序。</div>
         </div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           {!state.enabled

