@@ -89,7 +89,13 @@ class DeviceController extends BaseController
     private function tableHasColumn(string $table, string $column): bool
     {
         try {
-            $rows = Db::query('SHOW COLUMNS FROM `' . str_replace('`', '', $table) . '` LIKE ?', [$column]);
+            // MySQL 的 SHOW COLUMNS ... LIKE 不接受 PDO 占位符；旧写法会抛出
+            // 1064 并被误判为“列不存在”，导致非超级管理员的设备列表 fail closed 为空。
+            // 表名/列名均只允许 SQL 标识符，再拼入 SHOW 语句。
+            if (!preg_match('/^[A-Za-z0-9_]+$/', $table) || !preg_match('/^[A-Za-z0-9_]+$/', $column)) {
+                return false;
+            }
+            $rows = Db::query("SHOW COLUMNS FROM `{$table}` LIKE '{$column}'");
             return !empty($rows);
         } catch (\Throwable $e) {
             return false;
