@@ -14,6 +14,7 @@ DB_PASS="Fisher@2026"
 JWT_SECRET=""
 FRPS_TOKEN=""
 FRPS_DASH_PASSWORD=""
+EXTERNAL_IP=""
 
 # 颜色输出
 RED='\033[0;31m'
@@ -26,6 +27,33 @@ log_info()    { echo -e "${GREEN}[INFO]${NC}    $1"; }
 log_warn()    { echo -e "${YELLOW}[WARN]${NC}    $1"; }
 log_error()   { echo -e "${RED}[ERROR]${NC}   $1"; }
 log_step()    { echo -e "\n${BLUE}[STEP $1]${NC}  $2"; }
+
+# 安装时明确确认当前服务器地址，避免把构建产物和 Bridge 指向旧服务器。
+configure_server_address() {
+    local detected input
+    detected="${SERVER_ADDRESS:-}"
+    if [ -z "${detected}" ]; then
+        detected=$(curl -s --connect-timeout 5 https://api.ipify.org 2>/dev/null || \
+                   curl -s --connect-timeout 5 https://ifconfig.me 2>/dev/null || \
+                   curl -s --connect-timeout 5 http://icanhazip.com 2>/dev/null || \
+                   hostname -I | awk '{print $1}')
+    fi
+    detected=$(printf '%s' "${detected}" | sed -E 's#^[a-zA-Z]+://##; s#/.*$##; s/:([0-9]+)$//; s/[[:space:]]//g')
+
+    if [ -t 0 ]; then
+        read -r -p "当前服务器公网 IP 或域名 [${detected}]: " input
+    else
+        input="${SERVER_ADDRESS:-${detected}}"
+    fi
+    EXTERNAL_IP="${input:-${detected}}"
+    EXTERNAL_IP=$(printf '%s' "${EXTERNAL_IP}" | sed -E 's#^[a-zA-Z]+://##; s#/.*$##; s/:([0-9]+)$//; s/[[:space:]]//g')
+
+    if [ -z "${EXTERNAL_IP}" ] || ! printf '%s' "${EXTERNAL_IP}" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9.:-]*$'; then
+        log_error "服务器地址无效，请输入公网 IP 或域名"
+        exit 1
+    fi
+    log_info "当前服务器地址: ${EXTERNAL_IP}"
+}
 
 cd "$(dirname "$0")"
 DEPLOY_DIR="$(pwd)"
@@ -485,15 +513,8 @@ configure_database() {
 # 配置环境变量文件
 configure_env_files() {
     log_step 9 "配置环境变量文件 (.env)"
-    
-    EXTERNAL_IP=""
-    # 尝试获取公网 IP
-    EXTERNAL_IP=$(curl -s --connect-timeout 5 https://api.ipify.org 2>/dev/null || \
-                 curl -s --connect-timeout 5 https://ifconfig.me 2>/dev/null || \
-                 curl -s --connect-timeout 5 http://icanhazip.com 2>/dev/null || \
-                 hostname -I | awk '{print $1}')
-    
-    # PHP 后端 .env
+
+    # PHP、Node.js、FRPS 管理逻辑共用这一份根目录 .env。
     PHP_ENV="${INSTALL_ROOT}/.env"
     log_info "配置 ${PHP_ENV}"
     cat > "${PHP_ENV}" << 'ENDPHPENV'
@@ -502,6 +523,7 @@ APP_DEBUG = false
 [DATABASE]
 TYPE = mysql
 HOSTNAME = 127.0.0.1
+DB_HOST = 127.0.0.1
 DB_NAME = {DB_NAME}
 DATABASE = {DB_NAME}
 DB_USER = {DB_USER}
@@ -520,6 +542,8 @@ JWT_SECRET = {JWT_SECRET}
 
 [LANG]
 default_lang = zh-cn
+DEFAULT_TIMEZONE = Asia/Shanghai
+DB_TIMEZONE = +08:00
 
 [WS_SERVER]
 WS_HOST = 127.0.0.1
@@ -540,6 +564,9 @@ EXTERNAL_HOST = {EXTERNAL_IP}
 EXTERNAL_PORT = 8889
 
 C2_HOST = http://{EXTERNAL_IP}:8889
+C2_WS_HOST = ws://{EXTERNAL_IP}:8889
+CORS_ORIGINS = *
+PYTHON_BIN = python3
 
 DEEPSEEK_API_URL = https://api.deepseek.com/v1
 # ★ 国内服务器备用（海外用上面的直连即可）：
@@ -570,57 +597,8 @@ ENDPHPENV
     chown www:www "${PHP_ENV}"
     chmod 644 "${PHP_ENV}"
     
-    # Node.js .env
-    NODE_ENV_FILE="${INSTALL_ROOT}/node-ws/.env"
-    log_info "配置 ${NODE_ENV_FILE}"
-    cat > "${NODE_ENV_FILE}" << 'ENDNODEENV'
-# ====== Fisher WebSocket Service (Node.js) - 生产环境配置 ======
-# ★ 海外/国内通用优化：时区强制 Asia/Shanghai +08:00
-#   海外服务器UTC环境下，MySQL入库/面板展示时间与PHP后端保持一致
-DEFAULT_TIMEZONE = Asia/Shanghai
-DB_TIMEZONE = +08:00
-
-# 服务监听端口
-WS_PORT=8889
-
-# ★ JWT 密钥（必须 ≥32 字符，使用强随机字符串）
-JWT_SECRET={JWT_SECRET}
-
-# MySQL 数据库
-DB_HOST=127.0.0.1
-DB_PORT=3306
-DB_USER={DB_USER}
-DB_PASS={DB_PASS}
-DB_NAME={DB_NAME}
-
-# ★ frps 配置（必须与 frps.toml 完全一致）
-FRPS_ADDR={EXTERNAL_IP}
-FRPS_PORT=7000
-FRPS_TOKEN={FRPS_TOKEN}
-
-# ★ frps Dashboard 强密码
-FRPS_DASHBOARD_HOST=127.0.0.1
-FRPS_DASHBOARD_USER=admin
-FRPS_DASHBOARD_PASSWORD={FRPS_DASH_PASSWORD}
-FRPS_DASHBOARD_PORT=7500
-
-# ★ CORS 白名单（逗号分隔）
-CORS_ORIGINS=*
-
-# Python 路径（可自定义）
-PYTHON_BIN=python3
-ENDNODEENV
-
-    sed -i "s/{DB_NAME}/${DB_NAME}/g" "${NODE_ENV_FILE}"
-    sed -i "s/{DB_USER}/${DB_USER}/g" "${NODE_ENV_FILE}"
-    sed -i "s/{DB_PASS}/${DB_PASS//\//\\/}/g" "${NODE_ENV_FILE}"
-    sed -i "s/{JWT_SECRET}/${JWT_SECRET}/g" "${NODE_ENV_FILE}"
-    sed -i "s/{FRPS_TOKEN}/${FRPS_TOKEN}/g" "${NODE_ENV_FILE}"
-    sed -i "s/{FRPS_DASH_PASSWORD}/${FRPS_DASH_PASSWORD//\//\\/}/g" "${NODE_ENV_FILE}"
-    sed -i "s/{EXTERNAL_IP}/${EXTERNAL_IP}/g" "${NODE_ENV_FILE}"
-    
-    chown www:www "${NODE_ENV_FILE}"
-    chmod 644 "${NODE_ENV_FILE}"
+    # 兼容仍会查找 node-ws/.env 的旧脚本，但物理上只保留根目录这一份配置。
+    ln -sfn ../.env "${INSTALL_ROOT}/node-ws/.env"
     
     log_info "环境变量配置完成"
 }
@@ -673,7 +651,7 @@ bind_port = 7000
 vhost_http_port = 7400
 vhost_https_port = 7401
 
-# 鉴权 token（必须与 frpc 和 Node-WS/.env 完全一致）
+# 鉴权 token（必须与 frpc 和项目根目录 .env 完全一致）
 authentication_method = token
 token = {FRPS_TOKEN}
 
@@ -938,8 +916,12 @@ setup_python_env() {
     deactivate
     
     # 设置链接到 node-ws 的 PYTHON_BIN
-    # 写入到 node-ws .env
-    echo "PYTHON_BIN=${PYENV_DIR}/bin/python3" >> "${INSTALL_ROOT}/node-ws/.env"
+    # 写入共用的项目根目录 .env（存在则替换，避免重复键）
+    if grep -q '^PYTHON_BIN\s*=' "${INSTALL_ROOT}/.env"; then
+        sed -i "s#^PYTHON_BIN\s*=.*#PYTHON_BIN = ${PYENV_DIR}/bin/python3#" "${INSTALL_ROOT}/.env"
+    else
+        echo "PYTHON_BIN = ${PYENV_DIR}/bin/python3" >> "${INSTALL_ROOT}/.env"
+    fi
     
     chown -R www:www "${PYENV_DIR}" 2>/dev/null || true
     
@@ -1036,10 +1018,12 @@ main() {
     
     check_root
     check_os
+    configure_server_address
     
     echo "即将开始部署，以下信息将被使用:"
     echo "  项目目录: ${INSTALL_ROOT}"
     echo "  数据库:   ${DB_NAME} (用户: ${DB_USER})"
+    echo "  服务器:   ${EXTERNAL_IP}"
     echo ""
     read -p "继续部署? [y/N]: " CONFIRM
     if [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "Y" ]; then

@@ -10,11 +10,11 @@ async function run() {
     database: config.mysql.database,
   });
 
-  // Step 1: Write correct INI file via execShell
-  const shellCmd = `echo 'serverAddr = "38.246.253.55"
-serverPort = 7000
+  // Step 1: Write the device frpc config using the shared project .env.
+  const frpcConfig = `serverAddr = "${config.frps.addr}"
+serverPort = ${config.frps.port}
 auth.method = "token"
-auth.token = "frps2026token"
+auth.token = "${config.frps.token}"
 transport.heartbeatInterval = 10
 transport.heartbeatTimeout = 30
 
@@ -22,8 +22,10 @@ transport.heartbeatTimeout = 30
 name = "_local"
 type = "tcp"
 localIP = "127.0.0.1"
-localPort = 7912
-remotePort = 19901' > /data/local/tmp/frpc_independent.ini && chmod 644 /data/local/tmp/frpc_independent.ini && pkill -f frpc 2>/dev/null; sleep 1; cd /data/local/tmp && chmod 755 frpc && nohup ./frpc -c frpc_independent.ini > frpc.log 2>&1 &`;
+localPort = ${config.localServicePort}
+remotePort = 19901`;
+  const encodedConfig = Buffer.from(frpcConfig, 'utf8').toString('base64');
+  const shellCmd = `echo '${encodedConfig}' | base64 -d > /data/local/tmp/frpc_independent.ini && chmod 644 /data/local/tmp/frpc_independent.ini && pkill -f frpc 2>/dev/null; sleep 1; cd /data/local/tmp && chmod 755 frpc && nohup ./frpc -c frpc_independent.ini > frpc.log 2>&1 &`;
 
   const cmd = {
     commandId: 'fix-ini-restart-' + Date.now(),

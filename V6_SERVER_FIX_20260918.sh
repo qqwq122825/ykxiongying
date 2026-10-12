@@ -11,7 +11,7 @@
 # 执行方式：上传到服务器后 cd /www/wwwroot/cs && bash V6_SERVER_FIX_20260918.sh
 # ================================================================
 set +e
-cd /www/wwwroot/cs
+cd "$(dirname "$0")"
 
 echo ""
 echo "============================================================"
@@ -27,6 +27,8 @@ if [ -z "$DB_NAME" ]; then DB_NAME=yuankong07; fi
 # 读.env里的FRPS凭据，和frps.toml严格对齐100%
 FRPS_TOKEN=$(grep -E '^\s*FRPS_TOKEN\s*=' .env | head -1 | sed -E 's/.*=\s*//' | tr -d '\r')
 FRPS_DASH_PASS=$(grep -E '^\s*FRPS_DASHBOARD_PASSWORD\s*=' .env | head -1 | sed -E 's/.*=\s*//' | tr -d '\r')
+EXTERNAL_HOST=$(grep -E '^\s*EXTERNAL_HOST\s*=' .env | head -1 | sed -E 's/.*=\s*//' | tr -d '\r')
+[ -z "$EXTERNAL_HOST" ] && EXTERNAL_HOST=$(grep -E '^\s*FRPS_ADDR\s*=' .env | head -1 | sed -E 's/.*=\s*//' | tr -d '\r')
 [ -z "$FRPS_TOKEN" ] && FRPS_TOKEN="7dada9fcde41757e1ca50047b95bc4aaa68cb900bad654ef50d7a87ea5de3d98"
 [ -z "$FRPS_DASH_PASS" ] && FRPS_DASH_PASS="6c1e337416a215105551a2d7c8bbf2e5"
 echo "  DB_USER=$DB_USER  DB_NAME=$DB_NAME"
@@ -154,7 +156,7 @@ TDEV=$($MYSQL -N -B -e "SELECT device_id FROM fisher_devices ORDER BY last_seen 
 echo "  用最新活跃设备 deviceId=${TDEV:0:16} 测试："
 echo -n "  curl /api/tunnel/frpc-config 无JWT仅X-Device-ID → HTTP "
 curl -sS -o /tmp/_frpc_out.json -w "%{http_code}\n" "http://127.0.0.1:80/api/tunnel/frpc-config?deviceId=$TDEV" -H "X-Device-ID: $TDEV"
-echo "  → configINI 前200字符（必须有serverAddr=\"142.111.146.241\" serverPort=7000）："
+echo "  → configINI 前200字符（必须有serverAddr=\"${EXTERNAL_HOST}\" serverPort=7000）："
 python3 -c "import json;d=json.load(open('/tmp/_frpc_out.json'));c=d.get('data',{}).get('configINI','EMPTY');print(c[:300])" 2>/dev/null || head -c 300 /tmp/_frpc_out.json; echo ""
 
 echo ""

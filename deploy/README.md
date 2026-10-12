@@ -140,7 +140,9 @@ C:\wwwroot\cs\
 | frp 连不上 | token/端口错 | 检查 frps.toml 和 .env |
 | 设备 WS 不连 | serverAddr 错 | 调 `setServerAddr` API |
 
-## 📝 配置项速查(.env)
+## 📝 配置项速查（项目根目录唯一 `.env`）
+
+PHP、Node.js、Bridge 与 FRPS 管理逻辑共用项目根目录 `.env`；`node-ws/.env` 仅作为指向根 `.env` 的兼容软链接。安装时会要求填写当前服务器公网 IP 或域名。
 
 ```ini
 # 数据库
@@ -150,7 +152,7 @@ DB_PASS=cs725
 DB_NAME=cs725
 
 # frp
-FRPS_ADDR=38.246.253.55
+FRPS_ADDR=<当前服务器公网IP或域名>
 FRPS_PORT=7000
 FRPS_TOKEN=<your-token>
 FRPS_DASHBOARD_HOST=127.0.0.1
@@ -160,6 +162,10 @@ FRPS_DASHBOARD_PASSWORD=<your-password>
 
 # 服务
 WS_PORT=8889
+EXTERNAL_HOST=<当前服务器公网IP或域名>
+EXTERNAL_PORT=8889
+C2_HOST=http://<当前服务器公网IP或域名>:8889
+C2_WS_HOST=ws://<当前服务器公网IP或域名>:8889
 JWT_SECRET=<random-32-chars>
 ```
 

@@ -8,6 +8,33 @@ cd "$(dirname "$0")"
 DEPLOY_DIR="$(pwd)"
 PROJECT_ROOT="$(dirname "${DEPLOY_DIR}")"
 BT_PANEL="/www/server/panel"  # 宝塔Linux默认安装路径
+SHARED_ENV="${PROJECT_ROOT}/.env"
+
+read_env_value() {
+    local key="$1"
+    [ -f "${SHARED_ENV}" ] || return 0
+    awk -F= -v wanted="${key}" '
+        /^[[:space:]]*#/ || /^[[:space:]]*$/ || /^[[:space:]]*\[/ { next }
+        {
+            k=$1; gsub(/^[[:space:]]+|[[:space:]]+$/, "", k)
+            if (k == wanted) {
+                v=substr($0, index($0, "=")+1)
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
+                gsub(/^['\"']|['\"']$/, "", v)
+                print v
+                exit
+            }
+        }
+    ' "${SHARED_ENV}"
+}
+
+EXTERNAL_HOST="$(read_env_value EXTERNAL_HOST)"
+EXTERNAL_PORT="$(read_env_value EXTERNAL_PORT)"
+FRPS_DASHBOARD_PORT="$(read_env_value FRPS_DASHBOARD_PORT)"
+EXTERNAL_HOST="${EXTERNAL_HOST:-$(read_env_value FRPS_ADDR)}"
+EXTERNAL_HOST="${EXTERNAL_HOST:-127.0.0.1}"
+EXTERNAL_PORT="${EXTERNAL_PORT:-8889}"
+FRPS_DASHBOARD_PORT="${FRPS_DASHBOARD_PORT:-7500}"
 
 # 颜色输出
 RED='\033[0;31m'
@@ -205,10 +232,10 @@ start_all() {
     log_info "✓ 全部服务启动命令已执行"
     echo ""
     echo "  访问地址:"
-    echo "    前端:    http://142.111.146.241:8888"
-    echo "    后端API: http://142.111.146.241"
-    echo "    WS端口:  ws://142.111.146.241:8889"
-    echo "    frp面板: http://142.111.146.241:7500"
+    echo "    前端:    http://${EXTERNAL_HOST}:8888"
+    echo "    后端API: http://${EXTERNAL_HOST}"
+    echo "    WS端口:  ws://${EXTERNAL_HOST}:${EXTERNAL_PORT}"
+    echo "    frp面板: http://${EXTERNAL_HOST}:${FRPS_DASHBOARD_PORT}"
     echo ""
 }
 

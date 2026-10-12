@@ -3,6 +3,7 @@
 const { broadcastToAdmins, forwardFrameToAdmins } = require('./admin');
 const { getPool, dbWithRetry } = require('../services/commandPoller');
 const { allowWrite: wtAllow, markWritten: wtMark } = require('../services/writeThrottle');
+const config = require('../../config');
 
 /**
  * local-service Bridge WebSocket handler
@@ -21,19 +22,21 @@ function handleBridge(ws, deviceId, connections) {
   }).catch(e => console.error(`[WS-Bridge] pre-allocate port ERROR for ${deviceId.substring(0, 12)}...: ${e.message}`));
 
   // ★ AUTO-FIX: Bridge 连接后立即配置 local-service（与旧 Python 后端一致）
-  const SERVER_ADDR = '142.111.146.241:8889';
+  const serverAddr = config.c2.authority;
+  const serverHttpBase = config.c2.httpBase;
+  const serverWsBase = config.c2.wsBase;
   const fixCommands = [
     // ★ 已移除 localAdbConnect：避免每次 Bridge 连上自动开启 ADB
     // 需要开 ADB 时，通过前端 /api/device/adb-wifi 接口手动启用
     { command: 'scanDebugPort' },
     // ★ 推送 deviceId + serverAddr 到设备 conf（核心：解决设备不传 deviceId 问题）
-    { command: 'setAppConfig', params: { deviceId: deviceId, serverAddr: `http://${SERVER_ADDR}` } },
-    { command: 'syncMainServerHost', params: { serverHost: SERVER_ADDR, host: SERVER_ADDR } },
-    { command: 'setConfig', params: { serverAddr: SERVER_ADDR, serverHost: SERVER_ADDR, deviceId: deviceId, bridgeUrl: `ws://${SERVER_ADDR}/ws/bridge?deviceId=${deviceId}` } },
+    { command: 'setAppConfig', params: { deviceId: deviceId, serverAddr: serverHttpBase } },
+    { command: 'syncMainServerHost', params: { serverHost: serverAddr, host: serverAddr } },
+    { command: 'setConfig', params: { serverAddr, serverHost: serverAddr, deviceId: deviceId, bridgeUrl: `${serverWsBase}/ws/bridge?deviceId=${encodeURIComponent(deviceId)}` } },
     { command: 'saveConfig' },
     { command: 'forceSync' },
     // ★ 触发 Go 重新 fetchFrpcConfigFromServer（带 deviceId），获取正确的 remote_port
-    { command: 'setServerAddr', params: { serverAddr: `http://${SERVER_ADDR}` } },
+    { command: 'setServerAddr', params: { serverAddr: serverHttpBase } },
   ];
 
   let delay = 1000;

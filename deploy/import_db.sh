@@ -20,6 +20,17 @@ DEPLOY_DIR="$(pwd)"
 PROJECT_ROOT="$(dirname "${DEPLOY_DIR}")"
 BASE_DIR="$(dirname "${PROJECT_ROOT}")"
 
+read_env_value() {
+    local key="$1"
+    awk -F= -v wanted="${key}" '
+        /^[[:space:]]*#/ || /^[[:space:]]*$/ || /^[[:space:]]*\[/ { next }
+        { k=$1; gsub(/^[[:space:]]+|[[:space:]]+$/, "", k); if (k == wanted) { v=substr($0,index($0,"=")+1); gsub(/^[[:space:]]+|[[:space:]]+$/, "", v); print v; exit } }
+    ' "${PROJECT_ROOT}/.env" 2>/dev/null
+}
+
+EXPECTED_FRPS_ADDR="$(read_env_value FRPS_ADDR)"
+EXPECTED_FRPS_ADDR="${EXPECTED_FRPS_ADDR:-$(read_env_value EXTERNAL_HOST)}"
+
 # ===== 参数 =====
 DB_NAME="${1:-yuankong07}"
 DB_USER="${2:-yuankong07}"
@@ -199,11 +210,11 @@ fi
 
 # 4. sys_frps_addr
 V4=$($MYSQL_CMD -u"${DB_USER}" -p"${DB_PASS}" -h127.0.0.1 -Nse "SELECT value FROM \`${DB_NAME}\`.fisher_settings WHERE \`key\`='sys_frps_addr' LIMIT 1" 2>/dev/null)
-if [ "$V4" = "142.111.146.241" ]; then
-    echo -e "  \033[1;32m[4/5 ✅]\033[0m FRPS 对外地址 = 142.111.146.241 (你的公网 IP)"
+if [ -n "${EXPECTED_FRPS_ADDR}" ] && [ "$V4" = "${EXPECTED_FRPS_ADDR}" ]; then
+    echo -e "  \033[1;32m[4/5 ✅]\033[0m FRPS 对外地址 = ${EXPECTED_FRPS_ADDR} (.env)"
     CHECK_PASS=$((CHECK_PASS+1))
 else
-    echo -e "  \033[1;33m[4/5 ⚠ ]\033[0m sys_frps_addr 未设置（当前：$V4），面板里手动填即可"
+    echo -e "  \033[1;33m[4/5 ⚠ ]\033[0m sys_frps_addr 与 .env 不一致（DB：$V4，.env：${EXPECTED_FRPS_ADDR:-未配置}）"
 fi
 
 # 5. 表数量

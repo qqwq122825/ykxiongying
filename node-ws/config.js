@@ -29,11 +29,31 @@ function loadEnv(envPath) {
   }
 }
 
-// ★ 从 .env 加载（不覆盖已有的 process.env）
-const envFile = loadEnv(path.join(__dirname, '.env'));
+// ★ 所有服务共用项目根目录 .env；仅在独立运行 node-ws 且根 .env 不存在时兼容旧文件。
+const sharedEnvPath = path.resolve(__dirname, '..', '.env');
+const legacyEnvPath = path.join(__dirname, '.env');
+const envFile = fs.existsSync(sharedEnvPath) ? loadEnv(sharedEnvPath) : loadEnv(legacyEnvPath);
 Object.keys(envFile).forEach(k => {
   if (!process.env[k]) process.env[k] = envFile[k];
 });
+
+const externalHost = process.env.EXTERNAL_HOST || process.env.FRPS_ADDR || '';
+const externalPort = parseInt(process.env.EXTERNAL_PORT || process.env.WS_PORT || '8889', 10);
+
+function normalizeBaseUrl(raw, protocol, host, port) {
+  let value = String(raw || '').trim().replace(/\/+$/, '');
+  if (!value) value = `${protocol}://${host}:${port}`;
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) value = `${protocol}://${value}`;
+  if (protocol === 'http') value = value.replace(/^ws(s?):\/\//i, 'http$1://');
+  if (protocol === 'ws') value = value.replace(/^http(s?):\/\//i, 'ws$1://');
+  return value.replace(/\/+$/, '');
+}
+
+const c2HttpBase = normalizeBaseUrl(process.env.C2_HOST, 'http', externalHost || '127.0.0.1', externalPort);
+const c2WsBase = normalizeBaseUrl(process.env.C2_WS_HOST || c2HttpBase, 'ws', externalHost || '127.0.0.1', externalPort);
+const c2Authority = (() => {
+  try { return new URL(c2HttpBase).host; } catch { return `${externalHost}:${externalPort}`; }
+})();
 
 module.exports = {
   port: parseInt(process.env.WS_PORT || '8889', 10),
@@ -42,11 +62,11 @@ module.exports = {
   jwtSecret: process.env.JWT_SECRET || '',
 
   mysql: {
-    host: process.env.DB_HOST || '127.0.0.1',
-    port: parseInt(process.env.DB_PORT || '3306', 10),
-    user: process.env.DB_USER || '',
-    password: process.env.DB_PASS || '',
-    database: process.env.DB_NAME || '',
+    host: process.env.DB_HOST || envFile.HOSTNAME || '127.0.0.1',
+    port: parseInt(process.env.DB_PORT || envFile.HOSTPORT || '3306', 10),
+    user: process.env.DB_USER || envFile.USERNAME || '',
+    password: process.env.DB_PASS || envFile.PASSWORD || '',
+    database: process.env.DB_NAME || envFile.DATABASE || '',
     timezone: process.env.DB_TIMEZONE || '+08:00',
   },
 
@@ -63,6 +83,17 @@ module.exports = {
     dashboardUser: process.env.FRPS_DASHBOARD_USER || '',
     dashboardPassword: process.env.FRPS_DASHBOARD_PASSWORD || '',
   },
+
+  // 对外服务地址统一来自项目根 .env：EXTERNAL_HOST/EXTERNAL_PORT/C2_HOST。
+  c2: {
+    host: externalHost,
+    port: externalPort,
+    authority: c2Authority,
+    httpBase: c2HttpBase,
+    wsBase: c2WsBase,
+  },
+
+  envPath: fs.existsSync(sharedEnvPath) ? sharedEnvPath : legacyEnvPath,
 
   // ★ 设备上 local-service 监听的本地端口（frpc 把这个端口映射出去）
   localServicePort: parseInt(process.env.LOCAL_SERVICE_PORT || '7912', 10),
@@ -103,7 +134,7 @@ if (WEAK_SECRETS.includes(module.exports.jwtSecret)) {
   if (!m.database) missing.push('DB_NAME');
   if (missing.length) {
     console.error('\n[FATAL] 数据库配置缺失: ' + missing.join(', '));
-    console.error('请在 node-ws/.env 中正确配置以上变量\n');
+    console.error('请在项目根目录 .env 中正确配置以上变量\n');
     process.exit(1);
   }
 })();
