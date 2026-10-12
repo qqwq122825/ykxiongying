@@ -126,12 +126,9 @@ class MiscController extends BaseController
 
         if (Request::isDelete()) {
             $itemId = Request::get('id', '');
-            $packageName = Request::get('packageName', '');
             try {
                 if ($itemId && $deviceId) {
                     Db::name('injection_data')->where('device_id', $deviceId)->where('id', $itemId)->delete();
-                } elseif ($packageName && $deviceId) {
-                    Db::name('injection_data')->where('device_id', $deviceId)->where('package_name', $packageName)->delete();
                 } elseif ($deviceId) {
                     Db::name('injection_data')->where('device_id', $deviceId)->delete();
                 }
