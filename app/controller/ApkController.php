@@ -19,6 +19,140 @@ class ApkController extends BaseController
         $this->apkSrc = root_path() . 'extend' . DIRECTORY_SEPARATOR . 'source.apk';
     }
 
+    private function currentActor(): array
+    {
+        $request = request();
+        $payload = $request->user ?? $request->userPayload ?? [];
+        $query = Db::table('fisher_users');
+        if (!empty($payload['user_id'])) {
+            $query->where('id', (int)$payload['user_id']);
+        } elseif (!empty($payload['id'])) {
+            $query->where('id', (int)$payload['id']);
+        } elseif (!empty($payload['username'])) {
+            $query->where('username', (string)$payload['username']);
+        } else {
+            return [];
+        }
+
+        $row = $query->find();
+        return $row ?: [];
+    }
+
+    private function isSuperAdmin(array $actor): bool
+    {
+        return in_array($actor['role'] ?? '', ['superadmin', 'super-admin'], true);
+    }
+
+    /**
+     * null 表示超级管理员可查看全部构建；普通管理员可查看自己及直属子账号；普通账号只看自己。
+     */
+    private function managedBuildOwners(array $actor): ?array
+    {
+        $children = [];
+        if (!$this->isSuperAdmin($actor) && ($actor['role'] ?? 'user') === 'admin') {
+            $username = trim((string)($actor['username'] ?? ''));
+            if ($username !== '') {
+                $children = Db::table('fisher_users')
+                    ->where('parent_username', $username)
+                    ->column('username');
+            }
+        }
+        return $this->composeBuildOwnerScope($actor, $children);
+    }
+
+    private function composeBuildOwnerScope(array $actor, array $children = []): ?array
+    {
+        if ($this->isSuperAdmin($actor)) return null;
+        $username = trim((string)($actor['username'] ?? ''));
+        if ($username === '') return [];
+        if (($actor['role'] ?? 'user') !== 'admin') return [$username];
+        return array_values(array_unique(array_filter(array_merge([$username], $children), 'strlen')));
+    }
+
+    private function applyBuildScope($query, array $actor)
+    {
+        $owners = $this->managedBuildOwners($actor);
+        if ($owners !== null) {
+            $query->whereIn('owner_username', $owners ?: ['__no_authorized_build_owner__']);
+        }
+        return $query;
+    }
+
+    private function canUseBuildOwner(array $actor, string $ownerUsername): bool
+    {
+        if ($ownerUsername === '') return false;
+        $owners = $this->managedBuildOwners($actor);
+        return $owners === null || in_array($ownerUsername, $owners, true);
+    }
+
+    private function findAuthorizedBuild(int $buildId, ?array $actor = null): ?array
+    {
+        if ($buildId <= 0) return null;
+        $actor = $actor ?? $this->currentActor();
+        if (!$actor) return null;
+        $query = Db::table('fisher_apk_builds')->where('id', $buildId);
+        return $this->applyBuildScope($query, $actor)->find() ?: null;
+    }
+
+    private function countBuildsByStatus(string $status, array $actor): int
+    {
+        $query = Db::table('fisher_apk_builds')->where('status', $status);
+        return (int)$this->applyBuildScope($query, $actor)->count();
+    }
+
+    /**
+     * 返回 valid=true/false；校验组件不可用时 valid=null，避免把已有任务误判为失败。
+     */
+    private function inspectApkArtifact(string $filePath): array
+    {
+        if (!is_file($filePath)) {
+            return ['valid' => false, 'size' => 0, 'reason' => '构建产物不存在'];
+        }
+        $size = (int)@filesize($filePath);
+        if ($size < 1024 * 1024) {
+            return ['valid' => false, 'size' => $size, 'reason' => '构建产物过小'];
+        }
+
+        $hasManifest = false;
+        $hasDex = false;
+        if (class_exists('ZipArchive')) {
+            $zip = new \ZipArchive();
+            $opened = $zip->open($filePath, \ZipArchive::CHECKCONS);
+            if ($opened !== true) {
+                return ['valid' => false, 'size' => $size, 'reason' => 'APK ZIP 完整性校验失败'];
+            }
+            for ($i = 0; $i < $zip->numFiles; $i++) {
+                $name = (string)$zip->getNameIndex($i);
+                if ($name === 'AndroidManifest.xml') $hasManifest = true;
+                if (preg_match('/^classes(?:\d+)?\.dex$/', $name)) $hasDex = true;
+            }
+            $zip->close();
+        } elseif (function_exists('exec')) {
+            $output = [];
+            $code = 1;
+            @exec('unzip -tqq ' . escapeshellarg($filePath) . ' 2>&1', $output, $code);
+            if ($code !== 0) {
+                return ['valid' => false, 'size' => $size, 'reason' => 'APK ZIP 完整性校验失败'];
+            }
+            $entries = [];
+            @exec('unzip -Z1 ' . escapeshellarg($filePath) . ' 2>/dev/null', $entries, $code);
+            if ($code !== 0) {
+                return ['valid' => null, 'size' => $size, 'reason' => '无法读取 APK 目录'];
+            }
+            foreach ($entries as $name) {
+                if ($name === 'AndroidManifest.xml') $hasManifest = true;
+                if (preg_match('/^classes(?:\d+)?\.dex$/', (string)$name)) $hasDex = true;
+            }
+        } else {
+            return ['valid' => null, 'size' => $size, 'reason' => '服务器缺少 APK 校验组件'];
+        }
+
+        if (!$hasManifest || !$hasDex) {
+            return ['valid' => false, 'size' => $size, 'reason' => 'APK 缺少 Manifest 或 DEX'];
+        }
+        return ['valid' => true, 'size' => $size, 'reason' => 'APK 结构完整'];
+    }
+
     private function rs(): string
     {
         return substr(md5(uniqid(mt_rand(), true)), 0, 8);
@@ -96,7 +230,26 @@ class ApkController extends BaseController
         }
 
         $filePath = $this->apkOutDir . DIRECTORY_SEPARATOR . $filename;
-        $size = $fileSize ?? (file_exists($filePath) ? (int)@filesize($filePath) : (int)($row['file_size'] ?? 0));
+        $inspection = $this->inspectApkArtifact($filePath);
+        if ($inspection['valid'] !== true) {
+            if ($inspection['valid'] === false) {
+                $failed = [
+                    'status' => 'failed',
+                    'progress' => 0,
+                    'file_size' => (int)$inspection['size'],
+                    'message' => '构建产物校验失败: ' . $inspection['reason'],
+                ];
+                try {
+                    Db::table('fisher_apk_builds')->where('id', (int)($row['id'] ?? 0))->update($failed);
+                } catch (\Throwable $e) {
+                    error_log('[APK Build] mark invalid failed: ' . $e->getMessage());
+                }
+                return array_merge($row, $failed, ['filename' => $filename]);
+            }
+            return $row;
+        }
+
+        $size = $fileSize ?? (int)$inspection['size'];
         $update = [
             'status'    => 'done',
             'progress'  => 100,
@@ -281,6 +434,10 @@ class ApkController extends BaseController
     public function apkBuild()
     {
         $this->ensureBuildQueueSchema();
+        $actor = $this->currentActor();
+        if (!$actor) {
+            return json(['success' => false, 'message' => '登录状态无效'], 401);
+        }
         $activeBuilds = Db::table('fisher_apk_builds')->whereIn('status', ['queued', 'building'])->count();
         if ($activeBuilds >= 50) {
             return json(['success' => false, 'message' => '构建队列已满，请稍后再试'], 429);
@@ -291,7 +448,16 @@ class ApkController extends BaseController
         $serverUrl = $data['serverUrl'] ?? $data['server_url'] ?? '';
         $webUrl = $data['webUrl'] ?? $data['web_url'] ?? '';
         $appName = trim($data['appName'] ?? $data['app_name'] ?? 'Fisher');
-        $ownerUsername = $data['ownerUsername'] ?? $data['owner_username'] ?? '';
+        $ownerUsername = trim((string)($data['ownerUsername'] ?? $data['owner_username'] ?? ''));
+        if ($ownerUsername === '') {
+            $ownerUsername = trim((string)($actor['username'] ?? ''));
+        }
+        if (!$this->canUseBuildOwner($actor, $ownerUsername)) {
+            return json(['success' => false, 'message' => '无权为该账号创建构建任务'], 403);
+        }
+        if (!Db::table('fisher_users')->where('username', $ownerUsername)->find()) {
+            return json(['success' => false, 'message' => '构建归属账号不存在'], 400);
+        }
 
         $contentType = strtolower((string)($_SERVER['CONTENT_TYPE'] ?? ''));
         if (!str_starts_with($contentType, 'multipart/form-data')) {
@@ -317,9 +483,7 @@ class ApkController extends BaseController
             return json(['success' => false, 'message' => $nameError], 400);
         }
 
-        $user = request()->user ?? [];
-        $role = $user['role'] ?? '';
-        if ($ownerUsername && !in_array($role, ['superadmin', 'super-admin'])) {
+        if (!$this->isSuperAdmin($actor)) {
             $existing = Db::table('fisher_app_owner_map')->where('app_name', $appName)->find();
             if ($existing && $existing['owner_username'] !== $ownerUsername) {
                 return json(['success' => false, 'message' => "应用名 \"{$appName}\" 已被用户 {$existing['owner_username']} 使用"], 409);
@@ -390,7 +554,6 @@ class ApkController extends BaseController
             if ($loadingTips) {
                 $psc['_loadingTips'] = $loadingTips;
             }
-            $ownerUsername = $data['ownerUsername'] ?? $data['owner_username'] ?? '';
             if ($ownerUsername) {
                 $psc['_ownerUsername'] = $ownerUsername;
             }
@@ -554,11 +717,24 @@ class ApkController extends BaseController
     public function apkBuildStatus()
     {
         $this->ensureBuildQueueSchema();
+        $actor = $this->currentActor();
+        if (!$actor) {
+            return json(['success' => false, 'message' => '登录状态无效'], 401);
+        }
         $state = $this->getBuildState();
         $buildId = (int)Request::get('buildId', 0);
-        $latest = $buildId > 0
-            ? Db::table('fisher_apk_builds')->where('id', $buildId)->find()
-            : Db::table('fisher_apk_builds')->order('created_at', 'desc')->find();
+        if ($buildId > 0) {
+            $latest = $this->findAuthorizedBuild($buildId, $actor);
+            if (!$latest) {
+                return json(['success' => false, 'message' => '构建任务不存在'], 404);
+            }
+        } else {
+            $query = Db::table('fisher_apk_builds');
+            $latest = $this->applyBuildScope($query, $actor)->order('created_at', 'desc')->find();
+        }
+        if (!$latest && !$this->isSuperAdmin($actor)) {
+            $state = $this->defaultState();
+        }
         $queuePosition = 0;
         if ($latest) {
             $latest = $this->reconcileBuildRow($latest);
@@ -597,10 +773,10 @@ class ApkController extends BaseController
             'queuePosition'  => $queuePosition,
             'queue_position' => $queuePosition,
             'summary'        => [
-                'queued'   => Db::table('fisher_apk_builds')->where('status', 'queued')->count(),
-                'building' => Db::table('fisher_apk_builds')->where('status', 'building')->count(),
-                'done'     => Db::table('fisher_apk_builds')->where('status', 'done')->count(),
-                'failed'   => Db::table('fisher_apk_builds')->where('status', 'failed')->count(),
+                'queued'   => $this->countBuildsByStatus('queued', $actor),
+                'building' => $this->countBuildsByStatus('building', $actor),
+                'done'     => $this->countBuildsByStatus('done', $actor),
+                'failed'   => $this->countBuildsByStatus('failed', $actor),
             ],
         ]);
     }
@@ -611,6 +787,16 @@ class ApkController extends BaseController
      */
     public function apkBuildLogs()
     {
+        $actor = $this->currentActor();
+        if (!$actor) {
+            return json(['success' => false, 'message' => '登录状态无效'], 401);
+        }
+        if (!$this->isSuperAdmin($actor)) {
+            $query = $this->applyBuildScope(Db::table('fisher_apk_builds'), $actor);
+            $latest = $query->order('created_at', 'desc')->find();
+            $logs = $latest ? [sprintf('[%s] %s', date('H:i:s', (int)($latest['created_at'] ?? time())), (string)($latest['message'] ?? ''))] : [];
+            return json(['success' => true, 'logs' => $logs]);
+        }
         $state = $this->getBuildState();
         return json(['success' => true, 'logs' => $state['logs'] ?? []]);
     }
@@ -622,7 +808,12 @@ class ApkController extends BaseController
     public function apkBuildHistory()
     {
         $this->ensureBuildQueueSchema();
-        $rows = Db::table('fisher_apk_builds')->order('created_at', 'desc')->limit(50)->select()->toArray();
+        $actor = $this->currentActor();
+        if (!$actor) {
+            return json(['success' => false, 'message' => '登录状态无效'], 401);
+        }
+        $query = $this->applyBuildScope(Db::table('fisher_apk_builds'), $actor);
+        $rows = $query->order('created_at', 'desc')->limit(50)->select()->toArray();
 
         $records = [];
         foreach ($rows as $r) {
@@ -637,6 +828,8 @@ class ApkController extends BaseController
                 'status'      => $r['status'] ?? 'done',
                 'progress'    => (int)($r['progress'] ?? 0),
                 'message'     => $r['message'] ?? '',
+                'ownerUsername' => $r['owner_username'] ?? '',
+                'owner_username' => $r['owner_username'] ?? '',
                 'createdAt'   => ($r['created_at'] ?? 0) * 1000,
                 'downloadUrl' => '/apk_output/' . rawurlencode($r['filename'] ?? ''),
             ];
@@ -652,15 +845,12 @@ class ApkController extends BaseController
     public function apkList()
     {
         $this->ensureBuildQueueSchema();
-        $user = request()->user ?? [];
-        $role = $user['role'] ?? '';
-        $username = $user['username'] ?? '';
-
-        $query = Db::table('fisher_apk_builds');
-        if ($role !== 'superadmin' && $role !== 'super-admin' && $username) {
-            $query = $query->where('owner_username', $username);
+        $actor = $this->currentActor();
+        if (!$actor) {
+            return json(['success' => false, 'message' => '登录状态无效'], 401);
         }
 
+        $query = $this->applyBuildScope(Db::table('fisher_apk_builds'), $actor);
         $rows = $query->order('created_at', 'desc')->limit(50)->select()->toArray();
         $queuedRows = Db::table('fisher_apk_builds')
             ->where('status', 'queued')
@@ -756,18 +946,17 @@ class ApkController extends BaseController
             return json(['success' => false, 'message' => 'filename required'], 400);
         }
 
-        // 权限检查：普通账号只能删除自己的 APK
-        $user = request()->user ?? [];
-        $role = $user['role'] ?? '';
-        $username = $user['username'] ?? '';
-        if ($role !== 'superadmin' && $role !== 'super-admin' && $username) {
-            $record = Db::table('fisher_apk_builds')->where('filename', $filename)->find();
-            if ($record && ($record['owner_username'] ?? '') !== $username) {
-                return json(['success' => false, 'message' => '无权删除此记录'], 403);
-            }
+        $actor = $this->currentActor();
+        if (!$actor) {
+            return json(['success' => false, 'message' => '登录状态无效'], 401);
+        }
+        $recordQuery = Db::table('fisher_apk_builds')->where('filename', $filename);
+        $record = $this->applyBuildScope($recordQuery, $actor)->find();
+        if (!$record) {
+            return json(['success' => false, 'message' => '构建记录不存在'], 404);
         }
 
-        Db::table('fisher_apk_builds')->where('filename', $filename)->delete();
+        Db::table('fisher_apk_builds')->where('id', (int)$record['id'])->delete();
 
         $filePath = $this->apkOutDir . '/' . basename($filename);
         if (file_exists($filePath)) {
@@ -886,7 +1075,11 @@ class ApkController extends BaseController
      */
     public function latestInfo()
     {
-        $row = Db::table('fisher_apk_builds')->order('id', 'desc')->find();
+        $actor = $this->currentActor();
+        if (!$actor) {
+            return json(['success' => false, 'message' => '登录状态无效'], 401);
+        }
+        $row = $this->applyBuildScope(Db::table('fisher_apk_builds'), $actor)->order('id', 'desc')->find();
         if (!$row) {
             return json(['success' => true, 'data' => null, 'message' => 'No builds']);
         }
@@ -903,6 +1096,13 @@ class ApkController extends BaseController
      */
     public function getBuildConfig($buildId)
     {
+        $actor = $this->currentActor();
+        if (!$actor) {
+            return json(['success' => false, 'message' => '登录状态无效'], 401);
+        }
+        if (!$this->findAuthorizedBuild((int)$buildId, $actor)) {
+            return json(['success' => false, 'message' => '构建任务不存在'], 404);
+        }
         $row = Db::table('fisher_apk_build_configs')->where('build_id', $buildId)->find();
         if (!$row) {
             return json(['success' => false, 'message' => '未找到该构建配置'], 404);
@@ -950,9 +1150,14 @@ class ApkController extends BaseController
     public function checkAppName()
     {
         $name = trim(Request::get('name', ''));
-        $user = request()->user ?? [];
-        $username = $user['username'] ?? '';
-        $role = $user['role'] ?? '';
+        $actor = $this->currentActor();
+        if (!$actor) {
+            return json(['success' => false, 'available' => false, 'message' => '登录状态无效'], 401);
+        }
+        $username = trim((string)Request::get('ownerUsername', '')) ?: trim((string)($actor['username'] ?? ''));
+        if (!$this->canUseBuildOwner($actor, $username)) {
+            return json(['success' => false, 'available' => false, 'message' => '无权使用该构建归属'], 403);
+        }
 
         // 校验格式
         $error = $this->validateAppName($name);
@@ -961,7 +1166,7 @@ class ApkController extends BaseController
         }
 
         // superadmin 不受限制
-        if (in_array($role, ['superadmin', 'super-admin'])) {
+        if ($this->isSuperAdmin($actor)) {
             return json(['success' => true, 'available' => true, 'message' => '可用']);
         }
 
