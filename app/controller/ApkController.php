@@ -285,7 +285,17 @@ class ApkController extends BaseController
         $status = (string)($row['status'] ?? '');
         $progress = (int)($row['progress'] ?? 0);
         $size = (int)@filesize($filePath);
-        if (in_array($status, ['queued', 'building'], true) || $progress < 100 || (int)($row['file_size'] ?? 0) !== $size) {
+
+        // Node 构建线程是 queued/building 状态的唯一完成判定者。构建脚本会在最终
+        // 输出路径上经历打包、图标替换、背景替换和重新签名；此时文件虽已存在，
+        // 但 ZIP 中央目录可能尚未写完。列表轮询不得提前读取并把任务误判为失败。
+        if (in_array($status, ['queued', 'building'], true)) {
+            return $row;
+        }
+
+        // 仅兼容已经完成或没有状态的历史记录；失败记录保持 Node 的最终结论。
+        if (($status === 'done' || $status === '')
+            && ($progress < 100 || (int)($row['file_size'] ?? 0) !== $size)) {
             return $this->markBuildDone($row, $size);
         }
 
@@ -943,8 +953,11 @@ class ApkController extends BaseController
         foreach ($rows as $r) {
             $r = $this->reconcileBuildRow($r);
             $filePath = $this->apkOutDir . '/' . $r['filename'];
-            $actualFileSize = file_exists($filePath) ? (int)@filesize($filePath) : (int)($r['file_size'] ?? 0);
-            if (file_exists($filePath) && (int)($r['file_size'] ?? 0) !== $actualFileSize) {
+            $isActiveBuild = in_array((string)($r['status'] ?? ''), ['queued', 'building'], true);
+            $actualFileSize = (!$isActiveBuild && file_exists($filePath))
+                ? (int)@filesize($filePath)
+                : (int)($r['file_size'] ?? 0);
+            if (!$isActiveBuild && file_exists($filePath) && (int)($r['file_size'] ?? 0) !== $actualFileSize) {
                 try {
                     Db::table('fisher_apk_builds')->where('id', (int)$r['id'])->update(['file_size' => $actualFileSize]);
                 } catch (\Throwable $e) {
