@@ -104,8 +104,8 @@ function write_env_file(string $envFile, array $cfg): void {
     $content .= "[EXTERNAL]\n";
     $content .= "EXTERNAL_HOST = {$cfg['frps_addr']}\n";
     $content .= "EXTERNAL_PORT = 8889\n";
-    $content .= "C2_HOST = http://{$cfg['frps_addr']}:8889\n";
-    $content .= "C2_WS_HOST = ws://{$cfg['frps_addr']}:8889\n";
+    $content .= "C2_HOST = {$cfg['node_ws_url']}\n";
+    $content .= "C2_WS_HOST = {$cfg['node_ws_url']}\n";
     if (file_put_contents($envFile, $content, LOCK_EX) === false) {
         throw new RuntimeException('写入项目根目录 .env 失败');
     }
@@ -138,7 +138,7 @@ $defaults = [
     'api_proxy' => '',
     'frontend_url' => (isset($_SERVER['HTTPS']) ? 'https://' : 'http://') . ($_SERVER['HTTP_HOST'] ?? ''),
     'backend_url' => (isset($_SERVER['HTTPS']) ? 'https://' : 'http://') . ($_SERVER['HTTP_HOST'] ?? ''),
-    'node_ws_url' => ((isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'wss://' : 'ws://') . ($_SERVER['HTTP_HOST'] ?? '') . '/ws/',
+    'node_ws_url' => ((isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'wss://' : 'ws://') . ($_SERVER['HTTP_HOST'] ?? ''),
     'frps_addr' => preg_replace('/:\d+$/', '', (string)($_SERVER['HTTP_HOST'] ?? '')),
     'frps_port' => '7000',
     'frps_token' => random_secret(),
@@ -159,6 +159,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$alreadyLocked) {
     if (strlen(postv('admin_pass')) < 6) $errors[] = '管理员密码至少 6 位';
     if (!valid_bot_token(postv('bot_token'))) $errors[] = '机器人 Token 格式不正确';
     if (!valid_chat_id(postv('chat_id'))) $errors[] = 'Telegram 用户 Chat ID 格式不正确';
+    if (!preg_match('#^wss?://[^\\s/]+/?$#i', postv('node_ws_url'))) $errors[] = 'Node WebSocket 地址格式不正确，应类似 wss://example.com';
     if (!valid_server_host(postv('frps_addr'))) $errors[] = 'FRPS 对外地址只能填公网 IP 或域名，不要带 http:// 和端口';
     foreach (['frps_port','frps_remote_port_min','frps_remote_port_max','frps_dashboard_port'] as $key) {
         if (!valid_port(postv($key))) $errors[] = $key . ' 不是有效端口';
@@ -181,6 +182,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$alreadyLocked) {
                 'db_user' => postv('db_user'),
                 'db_pass' => postv('db_pass'),
                 'jwt_secret' => random_secret(),
+                'node_ws_url' => rtrim(postv('node_ws_url'), '/'),
                 'frps_addr' => postv('frps_addr'),
                 'frps_port' => postv('frps_port'),
                 'frps_token' => postv('frps_token'),

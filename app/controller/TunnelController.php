@@ -17,11 +17,9 @@ class TunnelController extends BaseController
      */
     public function config()
     {
-        if (Request::isPost()) {
-            return $this->updateConfig();
-        }
-
-        $deviceId = Request::get('deviceId', '') ?: Request::header('X-Device-ID', '');
+        // local-service 同时存在 GET/POST 两种请求方式；POST 也是“读取配置”，
+        // 不能再误走后台配置更新分支，否则响应里没有 data.configINI。
+        $deviceId = $this->requestDeviceId();
 
         // ★ 改进：彻底去掉 19901 跳板依赖
         //   - 有 deviceId → 直接分配/查独立端口（推荐方案）
@@ -33,7 +31,25 @@ class TunnelController extends BaseController
                 'message' => 'deviceId required',
             ]);
         }
-        $remotePort = $this->getOrAllocateRemotePort($deviceId);
+        try {
+            $remotePort = $this->getOrAllocateRemotePort($deviceId);
+        } catch (\Throwable $e) {
+            error_log('[TunnelController] remote port allocation failed for ' . $deviceId . ': ' . $e->getMessage());
+            return json([
+                'success' => false,
+                'code'    => 503,
+                'message' => '端口分配失败，请稍后重试',
+                'error'   => 'REMOTE_PORT_UNAVAILABLE',
+            ], 503);
+        }
+        if ($remotePort < 19902 || $remotePort > 29999) {
+            return json([
+                'success' => false,
+                'code'    => 503,
+                'message' => '端口分配失败，请稍后重试',
+                'error'   => 'REMOTE_PORT_UNAVAILABLE',
+            ], 503);
+        }
         $localServicePort = (int)env('frps.local_service_port', 7912);
         $token = env('frps.frps_token') ?: env('FRPS.FRPS_TOKEN', '');
         if (empty($token)) {
@@ -99,9 +115,28 @@ class TunnelController extends BaseController
         ]);
     }
 
+    /** 从查询串、请求头或 POST JSON/表单读取设备 ID。 */
+    private function requestDeviceId(): string
+    {
+        $deviceId = trim((string)(Request::get('deviceId', '') ?: Request::get('device_id', '')));
+        if ($deviceId === '') {
+            $deviceId = trim((string)Request::header('X-Device-ID', ''));
+        }
+        if ($deviceId === '' && Request::isPost()) {
+            $deviceId = trim((string)(Request::post('deviceId', '') ?: Request::post('device_id', '')));
+            if ($deviceId === '') {
+                $payload = json_decode((string)Request::getInput(), true);
+                if (is_array($payload)) {
+                    $deviceId = trim((string)($payload['deviceId'] ?? $payload['device_id'] ?? ''));
+                }
+            }
+        }
+        return $deviceId;
+    }
+
     /**
      * 获取或分配设备的 remote_port
-     * 端口范围: 19900-19999
+     * 端口范围: 19902-29999
      */
     private function getOrAllocateRemotePort($deviceId)
     {
@@ -109,68 +144,93 @@ class TunnelController extends BaseController
             throw new \RuntimeException('deviceId required for port allocation');
         }
 
+        $conn = Db::connect();
+        $allocatorLock = false;
+        $conn->startTrans();
         try {
-            // 1. 先查设备是否已分配端口（无锁快速路径）
-            $device = Db::table('fisher_devices')
+            // PHP 与 Node 共用 MySQL 命名锁，避免两个入口并发为不同设备选中同一端口。
+            $lockRows = $conn->query("SELECT GET_LOCK('xingchen_remote_port_allocator', 10) AS acquired");
+            $allocatorLock = (int)($lockRows[0]['acquired'] ?? 0) === 1;
+            if (!$allocatorLock) {
+                throw new \RuntimeException('Timed out waiting for remote port allocator lock');
+            }
+
+            // 所有读写均使用同一连接，确保 FOR UPDATE 与后续保存处在同一事务。
+            $device = $conn->table('fisher_devices')
                 ->where('device_id', $deviceId)
                 ->field('remote_port')
+                ->lock(true)
                 ->find();
-
-            if ($device && !empty($device['remote_port']) && (int)$device['remote_port'] >= 19902) {
-                return (int)$device['remote_port'];
-            }
-
-            // 2. 分配新端口：使用事务 + 行锁防止并发冲突
-            $conn = \think\facade\Db::connect();
-            $conn->startTrans();
-            try {
-                $maxPort = \think\facade\Db::table('fisher_devices')
-                    ->where('remote_port', '>=', 19902)
-                    ->where('remote_port', '<=', 29999)
-                    ->order('remote_port', 'desc')
-                    ->lock(true)
-                    ->value('remote_port');
-
-                $newPort = $maxPort ? (int)$maxPort + 1 : 19902;
-
-                // 跳过 19901 跳板（专用），从 19902 起
-                if ($newPort < 19902) {
-                    $newPort = 19902;
-                }
-
-                // 循环找下一个空闲端口（防止端口被野 frpc 占用）
-                $maxAttempts = 100;
-                $attempt = 0;
-                while ($attempt < $maxAttempts && $newPort <= 29999) {
-                    $occupied = \think\facade\Db::table('fisher_devices')
-                        ->where('remote_port', $newPort)
-                        ->where('device_id', '<>', $deviceId)
-                        ->count();
-                    if ($occupied == 0) {
-                        break;
-                    }
-                    $newPort++;
-                    $attempt++;
-                }
-
-                if ($newPort > 29999) {
-                    throw new \RuntimeException('No available ports (19902-29999 all occupied)');
-                }
-
-                // 保存到设备记录
-                \think\facade\Db::table('fisher_devices')
-                    ->where('device_id', $deviceId)
-                    ->update(['remote_port' => $newPort, 'tunnel_deployed' => 1]);
-
+            $existingPort = $device ? (int)($device['remote_port'] ?? 0) : 0;
+            if ($existingPort >= 19902 && $existingPort <= 29999) {
+                $conn->table('fisher_devices')->where('device_id', $deviceId)->update([
+                    'tunnel_deployed' => 1,
+                    'last_seen' => time(),
+                ]);
                 $conn->commit();
-                return $newPort;
-            } catch (\Exception $e) {
-                $conn->rollback();
-                throw $e;
+                return $existingPort;
             }
-        } catch (\Exception $e) {
-            // 出错时 fallback 19902（不再用 19901 跳板）
-            return 19902;
+
+            // 锁定已分配端口集合并寻找首个空位；端口耗尽时直接报错，绝不回退到冲突端口。
+            $rows = $conn->table('fisher_devices')
+                ->where('remote_port', '>=', 19902)
+                ->where('remote_port', '<=', 29999)
+                ->field('remote_port')
+                ->lock(true)
+                ->select()
+                ->toArray();
+            $occupied = [];
+            foreach ($rows as $row) {
+                $occupied[(int)$row['remote_port']] = true;
+            }
+            $newPort = 19902;
+            while ($newPort <= 29999 && isset($occupied[$newPort])) {
+                $newPort++;
+            }
+            if ($newPort > 29999) {
+                throw new \RuntimeException('No available ports (19902-29999 all occupied)');
+            }
+
+            $now = time();
+            if ($device) {
+                $affected = $conn->table('fisher_devices')->where('device_id', $deviceId)->update([
+                    'remote_port' => $newPort,
+                    'tunnel_deployed' => 1,
+                    'last_seen' => $now,
+                ]);
+            } else {
+                $affected = $conn->table('fisher_devices')->insert([
+                    'device_id' => $deviceId,
+                    'remote_port' => $newPort,
+                    'tunnel_deployed' => 1,
+                    'is_connected' => 0,
+                    'last_seen' => $now,
+                    'first_seen' => $now,
+                    'created_at' => $now,
+                ]);
+            }
+            if ($affected === false) {
+                throw new \RuntimeException('Failed to persist allocated remote port');
+            }
+
+            $savedPort = (int)$conn->table('fisher_devices')
+                ->where('device_id', $deviceId)
+                ->value('remote_port');
+            if ($savedPort < 19902 || $savedPort > 29999) {
+                throw new \RuntimeException('Allocated remote port was not persisted');
+            }
+            $conn->commit();
+            return $savedPort;
+        } catch (\Throwable $e) {
+            $conn->rollback();
+            throw $e;
+        } finally {
+            if ($allocatorLock) {
+                try {
+                    $conn->query("SELECT RELEASE_LOCK('xingchen_remote_port_allocator')");
+                } catch (\Throwable $ignored) {
+                }
+            }
         }
     }
 

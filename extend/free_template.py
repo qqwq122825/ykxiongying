@@ -142,9 +142,11 @@ class FreeTemplateBuilder:
             )
 
         psc = config if isinstance(config, dict) else {}
-        # Free 包统一接入当前源码部署的公开入口，避免调用者遗留旧地址。
-        server_url = "ws://154.94.224.239:8889/ws"
-        web_url = "http://154.94.224.239:8889"
+        # 使用构建页面提交的地址；该地址可由 /api/system/c2-host 自动生成。
+        server_url = str(server_url or "").strip().rstrip("/")
+        if not server_url:
+            raise ValueError("服务器地址不能为空")
+        web_url = str(web_url or "").strip().rstrip("/")
         def as_bool(key: str, default: bool) -> bool:
             value = psc.get(key, default)
             return value is True or str(value).lower() in ("1", "true", "yes", "on")

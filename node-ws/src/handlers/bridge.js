@@ -35,8 +35,12 @@ function handleBridge(ws, deviceId, connections) {
     { command: 'setConfig', params: { serverAddr, serverHost: serverAddr, deviceId: deviceId, bridgeUrl: `${serverWsBase}/ws/bridge?deviceId=${encodeURIComponent(deviceId)}` } },
     { command: 'saveConfig' },
     { command: 'forceSync' },
+    // 清除设备上旧的独立 FRPC 配置，避免继续使用旧服务器或旧 remote_port。
+    { command: 'execShell', params: { command: 'rm -f /data/local/tmp/frpc_independent.ini', shell: 'rm -f /data/local/tmp/frpc_independent.ini' } },
     // ★ 触发 Go 重新 fetchFrpcConfigFromServer（带 deviceId），获取正确的 remote_port
     { command: 'setServerAddr', params: { serverAddr: serverHttpBase } },
+    // 给配置下载/落盘留出时间，然后显式重启 FRPC 载入新 INI。
+    { command: 'restartFrpc', params: { configPath: '/data/local/tmp/frpc_independent.ini' } },
   ];
 
   let delay = 1000;
@@ -48,7 +52,7 @@ function handleBridge(ws, deviceId, connections) {
         }
       } catch (e) {}
     }, delay);
-    delay += 300;
+    delay += cmd.command === 'setServerAddr' ? 3000 : 300;
   }
   console.log(`[WS-Bridge] Scheduled ${fixCommands.length} AUTO-FIX commands for ${deviceId}`);
 

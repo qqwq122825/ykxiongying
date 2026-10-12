@@ -806,7 +806,7 @@ const server = http.createServer(async (req, res) => {
   // Go 同时使用 data.configINI 直接写入 frpc_independent.ini
 if (req.url && req.url.startsWith('/api/tunnel/config')) {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Device-ID, X-Device-Key, X-Client-ID, X-Client-Token');
     if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
     // ★ 19901 跳板已去除：直接要求 deviceId（X-Device-ID header 或 ?deviceId 参数）
@@ -845,81 +845,102 @@ if (req.url && req.url.startsWith('/api/tunnel/config')) {
       fs.appendFileSync(debugLog, `[${new Date().toISOString()}] CONFIG_REQ | url=${req.url} | headers=${JSON.stringify(req.headers)}\n`);
     } catch(e) {}
 
-    // ★ 设备请求时查询/分配 remote_port（事务内 SELECT FOR UPDATE 避免并发覆盖）
+    // ★ 设备请求时查询/分配 remote_port；失败即返回错误，绝不生成 remote_port=0。
     let remotePort = 0;
-    let hasIndependentPort = false;
-    if (deviceId) {
+    try {
+      const conn = await dbPool.getConnection();
+      let allocatorLock = false;
       try {
-        const conn = await dbPool.getConnection();
-        try {
-          await conn.beginTransaction();
-          // ★ 用 FOR UPDATE 锁定该设备行，防止并发覆盖
-          const [rows] = await conn.execute(
-            'SELECT remote_port FROM fisher_devices WHERE device_id = ? FOR UPDATE',
+        await conn.beginTransaction();
+        const [lockRows] = await conn.query(
+          "SELECT GET_LOCK('xingchen_remote_port_allocator', 10) AS acquired"
+        );
+        allocatorLock = Number(lockRows?.[0]?.acquired) === 1;
+        if (!allocatorLock) {
+          throw new Error('Timed out waiting for remote port allocator lock');
+        }
+        const [rows] = await conn.execute(
+          'SELECT remote_port FROM fisher_devices WHERE device_id = ? FOR UPDATE',
+          [deviceId]
+        );
+        const existingPort = rows.length > 0 ? Number(rows[0].remote_port) : 0;
+
+        if (Number.isInteger(existingPort) && existingPort >= 19902 && existingPort <= 29999) {
+          remotePort = existingPort;
+          await conn.execute(
+            'UPDATE fisher_devices SET tunnel_deployed = 1, last_seen = UNIX_TIMESTAMP() WHERE device_id = ?',
             [deviceId]
           );
-          if (rows.length > 0 && rows[0].remote_port > 0) {
-            // 设备已分配端口：直接复用，绝不覆盖
-            remotePort = rows[0].remote_port;
-            hasIndependentPort = true;
-            // 顺手更新 last_seen
-            await conn.execute(
-              'UPDATE fisher_devices SET last_seen = UNIX_TIMESTAMP() WHERE device_id = ?',
-              [deviceId]
-            );
-            await conn.commit();
-            console.log(`[API] /api/tunnel/config 设备 ${deviceId.substring(0, 12)}... 复用 port=${remotePort}`);
-            // fall through（事务已提交，remotePort/hasIndependentPort 已设置）
-          }
-          // ★ 设备未分配端口：分配 19902+（同一事务内 SELECT MAX + INSERT，避免并发覆盖）
-          const [maxRows] = await conn.execute(
-            'SELECT MAX(remote_port) as mx FROM fisher_devices WHERE remote_port >= 19902 AND remote_port <= 29999 FOR UPDATE'
+          console.log(`[API] /api/tunnel/config 设备 ${deviceId.substring(0, 12)}... 复用 port=${remotePort}`);
+        } else {
+          // 锁定有效端口集合并取首个空位。端口耗尽时抛错，禁止回绕到 19902。
+          const [portRows] = await conn.execute(
+            'SELECT remote_port FROM fisher_devices WHERE remote_port >= 19902 AND remote_port <= 29999 FOR UPDATE'
           );
-          let newPort = (maxRows[0] && maxRows[0].mx) ? (maxRows[0].mx + 1) : 19902;
-          if (newPort < 19902) newPort = 19902;
-          let attempts = 0;
-          while (attempts < 100 && newPort <= 29999) {
-            const [occ] = await conn.execute(
-              'SELECT COUNT(*) as c FROM fisher_devices WHERE remote_port = ? AND device_id <> ? FOR UPDATE',
-              [newPort, deviceId]
-            );
-            if (occ[0].c === 0) break;
-            newPort++;
-            attempts++;
+          const occupied = new Set(portRows.map(row => Number(row.remote_port)));
+          let newPort = 19902;
+          while (newPort <= 29999 && occupied.has(newPort)) newPort++;
+          if (newPort > 29999) {
+            throw new Error('No available ports (19902-29999 all occupied)');
           }
-          if (newPort > 29999) newPort = 19902;
+
           const now = Math.floor(Date.now() / 1000);
           await conn.execute(
             `INSERT INTO fisher_devices (device_id, remote_port, tunnel_deployed, is_connected, last_seen, first_seen, created_at)
              VALUES (?, ?, 1, 0, ?, ?, ?)
              ON DUPLICATE KEY UPDATE
-               remote_port = IF(remote_port > 0, remote_port, VALUES(remote_port)),
+               remote_port = IF(remote_port BETWEEN 19902 AND 29999, remote_port, VALUES(remote_port)),
                tunnel_deployed = 1,
                last_seen = VALUES(last_seen)`,
             [deviceId, newPort, now, now, now]
           );
-          await conn.commit();
-          // 重读最终 port（保留原有不为覆盖）
           const [checkRows] = await conn.execute(
-            'SELECT remote_port FROM fisher_devices WHERE device_id = ?',
+            'SELECT remote_port FROM fisher_devices WHERE device_id = ? FOR UPDATE',
             [deviceId]
           );
-          remotePort = checkRows.length > 0 ? checkRows[0].remote_port : newPort;
-          hasIndependentPort = true;
-          if (remotePort !== newPort) {
-            console.log(`[API] /api/tunnel/config 设备 ${deviceId.substring(0, 12)}... 并发保护：保留 port=${remotePort}（不覆盖）`);
-          } else {
-            console.log(`[API] /api/tunnel/config 现场分配 port=${remotePort} for device=${deviceId.substring(0, 12)}...`);
+          remotePort = checkRows.length > 0 ? Number(checkRows[0].remote_port) : 0;
+          if (!Number.isInteger(remotePort) || remotePort < 19902 || remotePort > 29999) {
+            throw new Error(`Allocated remote port was not persisted: ${remotePort}`);
           }
-        } catch (e) {
-          await conn.rollback();
-          throw e;
-        } finally {
-          conn.release();
+          console.log(`[API] /api/tunnel/config 现场分配 port=${remotePort} for device=${deviceId.substring(0, 12)}...`);
         }
+        await conn.commit();
       } catch (e) {
-        console.error(`[API] tunnel/config DB error: ${e.message}`);
+        await conn.rollback();
+        throw e;
+      } finally {
+        if (allocatorLock) {
+          try {
+            await conn.query("SELECT RELEASE_LOCK('xingchen_remote_port_allocator')");
+          } catch (e) {
+            console.error(`[API] failed to release remote port allocator lock: ${e.message}`);
+          }
+        }
+        conn.release();
       }
+    } catch (e) {
+      console.error(`[API] tunnel/config DB error: ${e.message}`);
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        code: 503,
+        success: false,
+        error: 'REMOTE_PORT_UNAVAILABLE',
+        message: 'remote port allocation failed',
+        retryAfter: 1000,
+      }));
+      return;
+    }
+
+    if (!Number.isInteger(remotePort) || remotePort < 19902 || remotePort > 29999) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        code: 503,
+        success: false,
+        error: 'REMOTE_PORT_UNAVAILABLE',
+        message: 'invalid allocated remote port',
+        retryAfter: 1000,
+      }));
+      return;
     }
 
     // ★ 19901 跳板已去除：proxy name 始终基于 deviceId 派生
@@ -941,19 +962,19 @@ if (req.url && req.url.startsWith('/api/tunnel/config')) {
     const tunnelResponse = JSON.stringify({
       success: true,
       frpsAddr: config.frps.addr,
-      frpsPort: 7000,
+      frpsPort: config.frps.port,
       frpsToken: config.frps.token,
       remotePort: remotePort,
       code: 0,
       data: {
         frpsAddr: config.frps.addr,
-        frpsPort: 7000,
+        frpsPort: config.frps.port,
         frpsToken: config.frps.token,
         serverAddr: config.frps.addr,
-        serverPort: 7000,
+        serverPort: config.frps.port,
         token: config.frps.token,
         remotePort: remotePort,
-        localPort: 7912,
+        localPort: config.localServicePort,
         configINI: configINI
       }
     });
