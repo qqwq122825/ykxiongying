@@ -58,6 +58,7 @@ export default function AccountsPage() {
   const [tab, setTab] = useState("all")
   const [q, setQ] = useState("")
   const [currentUser, setCurrentUser] = useState(getCurrentUser())
+  const [multiLoginBusy, setMultiLoginBusy] = useState(null)
   const myRole = currentUser?.role || 'user'
   const isSuperAdmin = myRole === 'superadmin' || myRole === 'super-admin'
   const isAdmin = myRole === 'admin'
@@ -92,6 +93,21 @@ export default function AccountsPage() {
       await api.request("/api/users/" + u.id, { method: "PUT", body: JSON.stringify({ enabled: u.enabled === 0 || u.enabled === false }) })
       load()
     } catch (e) { toast(e.message, "error") }
+  }
+
+  async function toggleMultiLogin(u) {
+    if (!isSuperAdmin || multiLoginBusy != null) return
+    const enabled = !(u.allow_multi_login === 1 || u.allow_multi_login === true || u.allow_multi_login === '1')
+    setMultiLoginBusy(u.id)
+    try {
+      await api.request("/api/users/" + u.id, {
+        method: "PUT",
+        body: JSON.stringify({ allow_multi_login: enabled })
+      })
+      toast(enabled ? `已允许「${u.username}」多窗口同时登录` : `已关闭「${u.username}」多开，下次登录后仅保留最新会话`)
+      await load()
+    } catch (e) { toast(e.message, "error") }
+    finally { setMultiLoginBusy(null) }
   }
 
   function copyId(id) { navigator.clipboard.writeText("" + id); toast("已复制编号: " + id) }
@@ -167,12 +183,13 @@ export default function AccountsPage() {
     {showAdd && <AddModal setShowAdd={setShowAdd} isSuperAdmin={isSuperAdmin} load={load} addOpts={addOpts} currentUser={currentUser} />}
 
     <div className="rc-table-wrap"><table className="rc-table"><thead><tr>
-      <th style={{ width: 60 }}>编号</th><th>用户名</th><th>角色类型</th><th>设备数</th><th>有效期</th><th>创建时间</th><th>状态</th><th style={{ width: 120 }}>操作</th>
+      <th style={{ width: 60 }}>编号</th><th>用户名</th><th>角色类型</th><th>设备数</th><th>有效期</th><th>创建时间</th><th>状态</th><th>允许多开</th><th style={{ width: 120 }}>操作</th>
     </tr></thead><tbody>
-      {loading ? <tr><td colSpan={8} style={{ textAlign: "center", padding: 40, color: "#8b949e" }}>加载中...</td></tr> :
-        filtered.length === 0 ? <tr><td colSpan={8} style={{ textAlign: "center", padding: 40, color: "#8b949e" }}>暂无数据</td></tr> :
+      {loading ? <tr><td colSpan={9} style={{ textAlign: "center", padding: 40, color: "#8b949e" }}>加载中...</td></tr> :
+        filtered.length === 0 ? <tr><td colSpan={9} style={{ textAlign: "center", padding: 40, color: "#8b949e" }}>暂无数据</td></tr> :
           filtered.map(u => {
             const exp = expireStatus(u)
+            const allowMultiLogin = u.allow_multi_login === 1 || u.allow_multi_login === true || u.allow_multi_login === '1'
             return <tr key={u.id}>
               <td><span className="copy-id" onClick={() => copyId(u.id)} title="点击复制">{u.id}</span></td>
               <td><b>{u.username}</b></td>
@@ -181,6 +198,20 @@ export default function AccountsPage() {
               <td><span className={"status-badge " + exp.cls}>{exp.text}</span></td>
               <td style={{ fontSize: "13px", color: "#8870a0" }}>{u.created_at || "-"}</td>
               <td><span className={(u.enabled !== 0 && u.enabled !== false) ? "status-badge online" : "status-badge offline"}>{(u.enabled !== 0 && u.enabled !== false) ? "正常" : "禁用"}</span></td>
+              <td><button
+                type="button"
+                aria-pressed={allowMultiLogin}
+                disabled={!isSuperAdmin || multiLoginBusy === u.id}
+                onClick={() => toggleMultiLogin(u)}
+                title={allowMultiLogin ? "已允许同一账号多窗口同时登录，点击关闭" : "当前仅允许最新会话，点击允许多开"}
+                style={{
+                  minWidth: 72, height: 30, borderRadius: 16, padding: '0 12px', cursor: isSuperAdmin ? 'pointer' : 'default',
+                  border: allowMultiLogin ? '1px solid rgba(34,197,94,.45)' : '1px solid rgba(148,163,184,.25)',
+                  background: allowMultiLogin ? 'rgba(34,197,94,.16)' : 'rgba(148,163,184,.08)',
+                  color: allowMultiLogin ? '#22c55e' : '#8b949e', fontSize: 12, fontWeight: 600,
+                  opacity: multiLoginBusy === u.id ? .55 : 1
+                }}
+              >{multiLoginBusy === u.id ? '保存中…' : (allowMultiLogin ? '● 已开启' : '○ 已关闭')}</button></td>
               <td><div className="act-btns">
                 {canOperate(u) && <><button className="act-btn" title="编辑" onClick={() => setEditUser(u)}>✏️ 编辑</button>
                   {isSuperAdmin && <button className="act-btn" title="删除" onClick={() => del(u.id, u.username)}>🗑️</button>}</>}

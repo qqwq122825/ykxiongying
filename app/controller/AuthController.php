@@ -210,6 +210,8 @@ class AuthController extends BaseController
                     'avatar' => $dbUser['avatar'] ?? '/assets/img/mx_logo.png',
                     'maxDevices' => $dbUser['max_devices'] ?? 100,
                     'max_sub_users' => $dbUser['max_sub_users'] ?? null,
+                    'allow_multi_login' => !array_key_exists('allow_multi_login', $dbUser)
+                        || !in_array($dbUser['allow_multi_login'], [0, '0', false], true),
                 ],
             ],
             'role' => $dbUser['role'],
@@ -665,12 +667,18 @@ class AuthController extends BaseController
     // ========== 辅助方法 ==========
 
     /**
-     * 签发登录 token。允许同一账号多端同时在线，不再覆盖其它浏览器标签的登录态。
+     * 签发登录 token。开启多开时保留所有有效 token；
+     * 关闭多开时记录唯一 sid，后一次登录会使前一次登录失效。
      */
     private function issueLoginTokenResponse(array $user, string $message = 'success'): Response
     {
         $this->logLogin((string)$user['username'], 1);
         $sessionId = bin2hex(random_bytes(16));
+        $allowMultiLogin = !array_key_exists('allow_multi_login', $user)
+            || !in_array($user['allow_multi_login'], [0, '0', false], true);
+        if (!$allowMultiLogin) {
+            $this->saveUserSession((int)$user['id'], $sessionId);
+        }
         $token = $this->generateToken($user, $sessionId);
 
         return json([
@@ -686,15 +694,14 @@ class AuthController extends BaseController
                     'avatar' => $user['avatar'] ?? '/assets/img/mx_logo.png',
                     'maxDevices' => $user['max_devices'] ?? 100,
                     'max_sub_users' => $user['max_sub_users'] ?? null,
+                    'allow_multi_login' => $allowMultiLogin,
                 ],
             ],
             'message' => $message,
         ]);
     }
 
-    /**
-     * 历史兼容：旧库可能仍有 auth_session_* 设置；当前版本不再做会话互斥。
-     */
+    /** 保存单会话账号当前唯一 sid。 */
     private function saveUserSession(int $userId, string $sessionId): void
     {
         $key = 'auth_session_' . $userId;

@@ -1961,31 +1961,20 @@ wss.on('connection', (ws, req) => {
       ws.close(4001, 'Unauthorized');
       return;
     }
-    // 查数据库检查用户是否被禁用
+    // 查数据库检查禁用/过期/账号多开状态。
     withTimeout(
-      dbPool.execute(
-        'SELECT id, username, role, enabled, expire_at FROM fisher_users WHERE id = ? LIMIT 1',
-        [user.user_id]
-      ),
+      loadCurrentActor(dbPool, user),
       PANEL_AUTH_DB_TIMEOUT_MS,
       'WS account status query'
     )
-      .then(([rows]) => {
+      .then(actor => {
         if (ws.readyState !== 1) return;
-        const dbUser = rows[0];
-        const expired = Number(dbUser?.expire_at || 0) > 0 && Number(dbUser.expire_at) < Math.floor(Date.now() / 1000);
-        if (!dbUser || dbUser.enabled === 0 || dbUser.enabled === '0' || dbUser.enabled === false || expired) {
-          ws.close(4003, 'Account disabled');
+        if (!actor) {
+          ws.close(4003, 'Account disabled or session replaced');
           return;
         }
-        const currentUser = {
-          ...user,
-          user_id: dbUser.id,
-          username: dbUser.username,
-          role: dbUser.role,
-        };
         const { handleAdmin } = getHandler('./handlers/admin');
-        handleAdmin(ws, currentUser, connections);
+        handleAdmin(ws, actor, connections);
       })
       .catch(err => {
         console.error('[WS] Auth DB check error:', err.message);

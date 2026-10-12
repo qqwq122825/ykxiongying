@@ -148,9 +148,19 @@ class Auth
         if (!empty($dbUser['expire_at']) && (int)$dbUser['expire_at'] > 0 && (int)$dbUser['expire_at'] < time()) {
             return json(['success' => false, 'message' => '该账号已过期，请联系管理员续期'], 403);
         }
-        // 允许同一账号多端/多标签同时在线。
-        // 这里只保留 token 签名、用户存在、启用状态、过期时间校验，
-        // 不再用 auth_session_{userId} 把其它浏览器标签判为失效。
+        // 账号级多开控制：开启时所有合法 token 可并行使用；
+        // 关闭时只允许 fisher_settings 中记录的最新 sid。旧库没有该字段时按开启处理。
+        $allowMultiLogin = !array_key_exists('allow_multi_login', $dbUser)
+            || !in_array($dbUser['allow_multi_login'], [0, '0', false], true);
+        if (!$allowMultiLogin) {
+            $sid = (string)($user['sid'] ?? '');
+            $sessionKey = 'auth_session_' . (int)$user['user_id'];
+            $currentSid = (string)(\think\facade\Db::table('fisher_settings')
+                ->where('key', $sessionKey)->value('value') ?? '');
+            if ($sid === '' || $currentSid === '' || !hash_equals($currentSid, $sid)) {
+                return json(['success' => false, 'message' => '该账号已在其它窗口登录，请重新登录'], 401);
+            }
+        }
 
         // 权限以数据库实时值为准，避免旧 JWT 在账号降权后继续保留管理员权限。
         $user['username'] = $dbUser['username'] ?? ($user['username'] ?? '');

@@ -8,6 +8,7 @@ use think\facade\Request;
 class UserController extends BaseController
 {
     private ?bool $hasMaxSubUsersColumn = null;
+    private ?bool $hasAllowMultiLoginColumn = null;
 
     private function isSuperRole(string $role): bool
     {
@@ -27,6 +28,27 @@ class UserController extends BaseController
             $this->hasMaxSubUsersColumn = false;
         }
         return $this->hasMaxSubUsersColumn;
+    }
+
+    /**
+     * 旧环境在首次打开账号管理时自动补齐字段。
+     * 默认开启多开，保持升级前“同一账号可多端在线”的行为不变。
+     */
+    private function ensureAllowMultiLoginColumn(): bool
+    {
+        if ($this->hasAllowMultiLoginColumn !== null) {
+            return $this->hasAllowMultiLoginColumn;
+        }
+        try {
+            $rows = Db::query("SHOW COLUMNS FROM fisher_users LIKE 'allow_multi_login'");
+            if (empty($rows)) {
+                Db::execute("ALTER TABLE fisher_users ADD COLUMN allow_multi_login TINYINT UNSIGNED NOT NULL DEFAULT 1 AFTER enabled");
+            }
+            $this->hasAllowMultiLoginColumn = true;
+        } catch (\Throwable $e) {
+            $this->hasAllowMultiLoginColumn = false;
+        }
+        return $this->hasAllowMultiLoginColumn;
     }
 
     private function decodePermissions($permissions): array
@@ -122,6 +144,10 @@ class UserController extends BaseController
         if ($this->hasMaxSubUsersColumn()) {
             $fieldList .= ',max_sub_users';
         }
+        $hasAllowMultiLogin = $this->ensureAllowMultiLoginColumn();
+        if ($hasAllowMultiLogin) {
+            $fieldList .= ',allow_multi_login';
+        }
 
         if ($isSuper) {
             $rows = Db::table('fisher_users')
@@ -183,6 +209,9 @@ class UserController extends BaseController
             // 普通账号的账号管理权限始终关闭，兼容历史脏数据。
             $r['permissions'] = $this->normalizePermissions($r['permissions'] ?? null, $uRole);
             $r['accounts_locked'] = $uRole === 'user';
+            $r['allow_multi_login'] = $hasAllowMultiLogin
+                ? (int)($r['allow_multi_login'] ?? 1)
+                : 1;
 
             // 格式化时间
             if (!empty($r['created_at']) && is_numeric($r['created_at']) && $r['created_at'] > 0) {
@@ -286,6 +315,11 @@ class UserController extends BaseController
             'created_at'      => time(),
             'updated_at'      => time(),
         ];
+        if ($this->ensureAllowMultiLoginColumn()) {
+            $insert['allow_multi_login'] = array_key_exists('allow_multi_login', $data)
+                ? ($data['allow_multi_login'] ? 1 : 0)
+                : 1;
+        }
 
         $newUserId = Db::table('fisher_users')->insertGetId($insert);
 
@@ -336,6 +370,19 @@ class UserController extends BaseController
         $updates = [];
         if (isset($data['enabled'])) $updates['enabled'] = $data['enabled'] ? 1 : 0;
         if (isset($data['max_devices'])) $updates['max_devices'] = max(0, (int)$data['max_devices']);
+        if (array_key_exists('allow_multi_login', $data)) {
+            if (!$isSuper) {
+                return json(['success' => false, 'message' => '只有超级管理员可设置账号多开'], 403);
+            }
+            if (!$this->ensureAllowMultiLoginColumn()) {
+                return json(['success' => false, 'message' => '多开字段初始化失败'], 500);
+            }
+            $updates['allow_multi_login'] = $data['allow_multi_login'] ? 1 : 0;
+            if (!$updates['allow_multi_login']) {
+                // 关闭多开后要求该账号重新登录，建立唯一会话。
+                Db::table('fisher_settings')->where('key', 'auth_session_' . (int)$id)->delete();
+            }
+        }
 
         $targetRole = $target['role'] ?? 'user';
         if (isset($data['role']) && $isSuper) {

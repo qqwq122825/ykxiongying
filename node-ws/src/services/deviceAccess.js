@@ -22,11 +22,22 @@ async function loadCurrentActor(db, tokenUser) {
   if (!userId) return null;
 
   const [rows] = await db.query(
-    'SELECT id, username, role, enabled, expire_at FROM fisher_users WHERE id = ? LIMIT 1',
+    'SELECT * FROM fisher_users WHERE id = ? LIMIT 1',
     [userId]
   );
   const row = rows?.[0];
   if (!row || !isEnabled(row.enabled) || isExpired(row.expire_at)) return null;
+
+  const allowMultiLogin = isEnabled(row.allow_multi_login);
+  if (!allowMultiLogin) {
+    const sid = String(tokenUser?.sid || '');
+    if (!sid) return null;
+    const [sessionRows] = await db.query(
+      'SELECT value FROM fisher_settings WHERE `key` = ? LIMIT 1',
+      [`auth_session_${userId}`]
+    );
+    if (!sessionRows?.[0]?.value || String(sessionRows[0].value) !== sid) return null;
+  }
 
   return {
     ...tokenUser,
@@ -35,6 +46,7 @@ async function loadCurrentActor(db, tokenUser) {
     role: normalizeRole(row.role),
     enabled: row.enabled,
     expire_at: row.expire_at,
+    allow_multi_login: allowMultiLogin,
   };
 }
 
