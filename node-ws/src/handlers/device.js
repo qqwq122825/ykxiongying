@@ -1025,13 +1025,11 @@ async function autoInjectForDevice(deviceId, apps, ws, connections) {
     if (!autoInjectedCache.has(deviceId)) autoInjectedCache.set(deviceId, new Set());
     const injected = autoInjectedCache.get(deviceId);
 
-    // Node 重启后从持久化状态恢复去重：活跃任务或已上报过数据的包名，
-    // 都不应因为应用列表重复响应或 WS 重连而再次自动下发。
+    // Node 重启后仅从“活跃任务”恢复去重。历史采集数据表示曾经完成过注入，
+    // 不能永久阻止设备在重新安装、重新上线后再次自动注入。
     const guardQueries = [
       ['active tasks', `SELECT package_name FROM fisher_active_injection_tasks
                          WHERE device_id=? AND package_name IS NOT NULL AND package_name<>''`],
-      ['captured data', `SELECT DISTINCT package_name FROM fisher_injection_data
-                          WHERE device_id=? AND package_name IS NOT NULL AND package_name<>''`],
     ];
     for (const [label, sql] of guardQueries) {
       try {
@@ -1051,11 +1049,11 @@ async function autoInjectForDevice(deviceId, apps, ws, connections) {
       const pkg = tpl.package_name;
       if (!pkg || !installedPkgs.has(pkg)) continue;
       if (injected.has(pkg)) {
-        console.log(`[WS-Device] Skip auto-inject ${pkg} for ${deviceId} (reserved, active, or already captured)`);
+        console.log(`[WS-Device] Skip auto-inject ${pkg} for ${deviceId} (reserved or active)`);
         void recordDeviceDebug('injection.auto.skipped', deviceId, {
           packageName: pkg,
           templateId: tpl.template_id,
-          reason: 'reserved-active-or-captured',
+          reason: 'reserved-or-active',
         });
         continue;
       }
