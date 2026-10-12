@@ -765,6 +765,8 @@ class InjectionController extends BaseController
         $tasks = [];
         $packages = [];
         $templateIds = [];
+        $confirmedPackages = [];
+        $confirmedTemplateIds = [];
         $stateAvailable = true;
 
         if ($deviceId) {
@@ -779,6 +781,12 @@ class InjectionController extends BaseController
                         $tasks[] = $taskData;
                         if (!empty($taskData['packageName'])) $packages[] = $taskData['packageName'];
                         if (!empty($taskData['templateId'])) $templateIds[] = $taskData['templateId'];
+                        // Node 只有在 APK 回复 injection_status 后才会把 source
+                        // 收敛为 client-status。前端用此区分“注入中”和“已注入”。
+                        if (($taskData['source'] ?? '') === 'client-status') {
+                            if (!empty($taskData['packageName'])) $confirmedPackages[] = $taskData['packageName'];
+                            if (!empty($taskData['templateId'])) $confirmedTemplateIds[] = $taskData['templateId'];
+                        }
                     }
                     // fallback: 直接用 package_name 字段
                     if (empty($taskData['packageName']) && !empty($row['package_name'])) {
@@ -800,6 +808,8 @@ class InjectionController extends BaseController
             'data' => $tasks,
             'packages' => $packages,
             'templateIds' => $templateIds,
+            'confirmedPackages' => array_values(array_unique($confirmedPackages)),
+            'confirmedTemplateIds' => array_values(array_unique($confirmedTemplateIds)),
             'stateAvailable' => $stateAvailable,
             'message' => $stateAvailable ? 'success' : 'active task state unavailable',
         ]);

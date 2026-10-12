@@ -59,8 +59,12 @@ export default function InjectionTab({
   sendWs,
   injActivePkgs = new Set(),
   injActiveIds = new Set(),
+  injConfirmedPkgs = new Set(),
+  injConfirmedIds = new Set(),
   setInjActivePkgs,
   setInjActiveIds,
+  setInjConfirmedPkgs,
+  setInjConfirmedIds,
   injGrabbed = [],
   setInjGrabbed,
   parseGrabbedData,
@@ -121,6 +125,8 @@ export default function InjectionTab({
         if (taskRes?.stateAvailable !== false) {
           setInjActivePkgs?.(new Set(taskRes?.packages || []))
           setInjActiveIds?.(new Set(taskRes?.templateIds || []))
+          setInjConfirmedPkgs?.(new Set(taskRes?.confirmedPackages || []))
+          setInjConfirmedIds?.(new Set(taskRes?.confirmedTemplateIds || []))
         }
 
         const completedPackages = Object.entries(reinjectSessions)
@@ -139,6 +145,8 @@ export default function InjectionTab({
         })
         setInjActivePkgs?.(prev => new Set([...prev].filter(pkg => !completedSet.has(pkg))))
         setInjActiveIds?.(prev => new Set([...prev].filter(id => !completedIds.has(id))))
+        setInjConfirmedPkgs?.(prev => new Set([...prev].filter(pkg => !completedSet.has(pkg))))
+        setInjConfirmedIds?.(prev => new Set([...prev].filter(id => !completedIds.has(id))))
         completedPackages.forEach(({ pkg }) => {
           api.request(`/api/injection/active-tasks?deviceId=${encodeURIComponent(resolvedDeviceId)}&packageName=${encodeURIComponent(pkg)}`, { method: 'DELETE' }).catch(() => {})
         })
@@ -148,7 +156,7 @@ export default function InjectionTab({
     pollInjectionState()
     const timer = setInterval(pollInjectionState, 1500)
     return () => { cancelled = true; clearInterval(timer) }
-  }, [resolvedDeviceId, reinjectSessions, setInjGrabbed, setInjActivePkgs, setInjActiveIds])
+  }, [resolvedDeviceId, reinjectSessions, setInjGrabbed, setInjActivePkgs, setInjActiveIds, setInjConfirmedPkgs, setInjConfirmedIds])
 
   // 切换自动注入开关
   const toggleAutoInjection = async () => {
@@ -205,6 +213,8 @@ export default function InjectionTab({
     const templateId = tpl.templateId || tpl.template_id || tpl.id
     const requestId = `reinject-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     setInjLoadingPkg(pkg)
+    setInjConfirmedPkgs?.(prev => { const next = new Set(prev); next.delete(pkg); return next })
+    setInjConfirmedIds?.(prev => { const next = new Set(prev); next.delete(templateId); return next })
     setReinjectSessions(prev => ({
       ...prev,
       [pkg]: {
@@ -281,6 +291,8 @@ export default function InjectionTab({
     } catch {}
     setInjActivePkgs?.(prev => { const next = new Set(prev); next.delete(pkg); return next })
     setInjActiveIds?.(prev => { const next = new Set(prev); next.delete(tpl.templateId || tpl.template_id || tpl.id); return next })
+    setInjConfirmedPkgs?.(prev => { const next = new Set(prev); next.delete(pkg); return next })
+    setInjConfirmedIds?.(prev => { const next = new Set(prev); next.delete(tpl.templateId || tpl.template_id || tpl.id); return next })
     setReinjectSessions(prev => { const next = { ...prev }; delete next[pkg]; return next })
     centerToast(`已停止: ${tpl.name || pkg}`)
     setInjLoadingPkg(null)
@@ -433,6 +445,7 @@ export default function InjectionTab({
                 // 历史采集数据不等于当前任务已停止。当 APK/DB 确认仍在注入时，
                 // 即使有旧数据也要显示“停止注入”。
                 const isActive = injActivePkgs.has(packageName) || injActiveIds.has(tpl.id || tpl.templateId || tpl.template_id)
+                const isConfirmed = injConfirmedPkgs.has(packageName) || injConfirmedIds.has(tpl.id || tpl.templateId || tpl.template_id)
                 const isLoading = injLoadingPkg === packageName
                 const isInjecting = isActive || isLoading
                 const category = getFinanceCategory(packageName, appName)
@@ -457,7 +470,7 @@ export default function InjectionTab({
                       </div>
                       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2 }}>
                         {category && <span style={{ fontSize: 9, color: '#fbbf24', background: 'rgba(251,191,36,.1)', padding: '1px 5px', borderRadius: 3, fontWeight: 600 }}>{category}</span>}
-                        {isInjecting && <span style={{ fontSize: 8, color: '#1890ff', background: 'rgba(24,144,255,.15)', padding: '2px 6px', borderRadius: 4, fontWeight: 700 }}>注入中</span>}
+                        {isInjecting && <span style={{ fontSize: 8, color: isConfirmed ? '#52c41a' : '#1890ff', background: isConfirmed ? 'rgba(82,196,26,.15)' : 'rgba(24,144,255,.15)', padding: '2px 6px', borderRadius: 4, fontWeight: 700 }}>{isConfirmed ? '已注入' : '注入中'}</span>}
                       </div>
                     </div>
                     {hasData && (
