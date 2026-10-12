@@ -278,9 +278,23 @@ export default function InjectionTab({
           }
         }
       })
+      // SHOW_INJECTION 本身只表示命令已下发。稍后主动读取 APK
+      // 实际启用列表，收到 injection_status 后右上角才改为“已注入”。
+      ;[600, 1800].forEach(delayMs => {
+        setTimeout(() => {
+          sendWs({
+            type: 'command',
+            sessionId: resolvedDeviceId,
+            data: {
+              command: 'GET_INJECTION_STATUS',
+              params: { packageName: pkg, requestId, source: 'manual-reinject-verify' },
+            },
+          })
+        }, delayMs)
+      })
       setInjActivePkgs?.(prev => new Set([...prev, pkg]))
       setInjActiveIds?.(prev => new Set([...prev, templateId]))
-      centerToast(`已注入: ${tpl.name}`)
+      centerToast(`注入指令已发送: ${tpl.name}`)
     } catch (e) {
       setReinjectSessions(prev => { const next = { ...prev }; delete next[pkg]; return next })
       toast('注入失败: ' + e.message, 'error')
