@@ -3,6 +3,21 @@
 SET NAMES utf8mb4;
 SET FOREIGN_KEY_CHECKS=0;
 
+CREATE TABLE IF NOT EXISTS `fisher_debug_events` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `session_id` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '',
+  `source` varchar(32) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '',
+  `stage` varchar(96) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '',
+  `level` varchar(16) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'info',
+  `device_id` varchar(128) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '',
+  `event_time` bigint unsigned NOT NULL DEFAULT '0',
+  `details_json` longtext COLLATE utf8mb4_unicode_ci,
+  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_session_id` (`session_id`,`id`),
+  KEY `idx_device_id` (`device_id`,`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS `fisher_active_injection_tasks` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT,
   `device_id` varchar(128) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '',

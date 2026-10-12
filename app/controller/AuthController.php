@@ -337,6 +337,14 @@ class AuthController extends BaseController
         if (!$deviceId) {
             return json(['success' => false, 'message' => '缺少 deviceId'], 400);
         }
+        DebugController::recordEvent('php', 'http.register.received', $deviceId, [
+            'appName' => $data['appName'] ?? $data['deviceName'] ?? '',
+            'brand' => $data['brand'] ?? '',
+            'model' => $data['model'] ?? '',
+            'appVersion' => $data['appVersion'] ?? '',
+            'payloadKeys' => array_keys($data),
+            'remoteIp' => Request::ip(),
+        ]);
         $now = time();
         $ip = Request::ip();
         $permissions = isset($data['permissions']) ? json_encode($data['permissions'], JSON_UNESCAPED_UNICODE) : '{}';
@@ -403,6 +411,14 @@ class AuthController extends BaseController
                 'owner_username' => $ownerUsername,
             ]);
         }
+
+        DebugController::recordEvent('php', 'http.register.completed', $deviceId, [
+            'recordExisted' => (bool)$existing,
+            'appName' => $appName,
+            'ownerResolved' => $ownerUsername !== '',
+            'ownerUsername' => $ownerUsername,
+            'isConnected' => true,
+        ]);
 
         // 广播设备上线通知
         static::broadcastToAdmins([

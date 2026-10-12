@@ -8,6 +8,7 @@ import NodePage from './NodePage'
 import InjPage from './InjPage'
 import ApkPage from './ApkPage'
 import TunnelMonitor from './TunnelMonitor'
+import DebugLogPage from './DebugLogPage'
 import { androidVersion, appVersion, appName, battery, batteryLevel, country, deviceName, deviceStatus, formatTime, installTime, ip, lastHeartbeat, lastSeen, model, owner, pid, pname, pon, statusText, today } from '../utils/device'
 import { toast } from '../utils/toast'
 import { BRAND_NAME } from '../config/brand'
@@ -52,14 +53,14 @@ function PhoneIcon({ status, screenOn }) {
   const sleeping = status === 'sleeping' || status === 'connecting'
   // 离线设备强制息屏；在线/休眠设备才读取实际屏幕状态
   const isScreenOn = (!online && !sleeping) ? false : (screenOn !== undefined ? screenOn : online)
-  
+ 
   // 亮屏：屏幕明亮发光；息屏：屏幕暗淡
   const screenColor = isScreenOn ? '#10b981' : '#1a1a2a'
   const screenOpacity = isScreenOn ? 0.85 : 0.4
   const frameColor = online ? '#1a1a2e' : sleeping ? '#2a2a1e' : '#2a2a2a'
   const strokeColor = online ? '#22c55e' : sleeping ? '#f59e0b' : '#555'
   const title = `${online ? '在线' : sleeping ? '休眠' : '离线'} · ${isScreenOn ? '亮屏' : '息屏'}`
-  
+ 
   return (
     <div className={`dc-phone-icon${sleeping ? ' connecting' : ''}`} title={title}>
       <svg width="64" height="104" viewBox="0 0 32 52">
@@ -233,6 +234,7 @@ const TAB_LABELS = {
   injection: '全局注入',
   server: '节点状态',
   accounts: '账号管理',
+  debug: '调试日志',
 }
 
 const TZ_GROUPS = [
@@ -483,6 +485,7 @@ export default function Dashboard({ user, onLogout }) {
             {hasPerm('node') && <button type="button" className={tab === 'server' ? 'on' : ''} onClick={() => setTab('server')}><span className="nav-ico">🌐</span><span>节点状态</span></button>}
             {isSuperAdmin && <button type="button" className={tab === 'tunnel' ? 'on' : ''} onClick={() => setTab('tunnel')}><span className="nav-ico">🛣️</span><span>隧道管理</span></button>}
             {hasPerm('accounts') && <button type="button" className={tab === 'accounts' ? 'on' : ''} onClick={() => setTab('accounts')}><span className="nav-ico">👥</span><span>账号管理</span></button>}
+            {isSuperAdmin && <button type="button" className={tab === 'debug' ? 'on' : ''} onClick={() => setTab('debug')}><span className="nav-ico">🧾</span><span>调试日志</span></button>}
             <span className="nav-sep" />
             <button type="button" className="nav-logout" onClick={onLogout}><span className="nav-ico">🚪</span><span>退出登录</span></button>
           </nav>
@@ -622,6 +625,7 @@ export default function Dashboard({ user, onLogout }) {
               {tab === 'abpack' && <AbPackPage />}
               {tab === 'server' && <NodePage />}
               {tab === 'tunnel' && (isSuperAdmin ? <TunnelMonitor /> : <div style={{ padding: 40, textAlign: 'center', color: '#ff4d4f' }}>⛔ 需要 superadmin 权限才能访问隧道管理</div>)}
+              {tab === 'debug' && (isSuperAdmin ? <DebugLogPage /> : <div style={{ padding: 40, textAlign: 'center', color: '#ff4d4f' }}>⛔ 需要 superadmin 权限才能访问调试日志</div>)}
             </>
           )}
         </main>

