@@ -9,7 +9,7 @@ import InjPage from './InjPage'
 import ApkPage from './ApkPage'
 import TunnelMonitor from './TunnelMonitor'
 import DebugLogPage from './DebugLogPage'
-import { androidVersion, appVersion, appName, battery, batteryLevel, country, deviceName, deviceStatus, formatTime, installTime, ip, lastHeartbeat, lastSeen, model, owner, pid, pname, pon, statusText, today } from '../utils/device'
+import { androidVersion, appVersion, appName, battery, batteryLevel, country, deviceName, deviceStatus, formatTime, installTime, ip, lastHeartbeat, lastSeen, model, owner, pid, pname, pon, PUBLIC_OWNER, statusText, today } from '../utils/device'
 import { toast } from '../utils/toast'
 import { BRAND_NAME } from '../config/brand'
 
@@ -565,7 +565,7 @@ export default function Dashboard({ user, onLogout }) {
                   <select value={ownerFlt} onChange={(e) => setOwnerFlt(e.target.value)} style={{marginLeft: 4}}>
                     <option value="all">全部归属</option>
                     {Array.from(new Set(devices.map(d => d.ownerUsername ?? d.owner_username ?? '').filter(Boolean))).sort().map(o => (
-                      <option key={o} value={o}>👤 {o}</option>
+                      <option key={o} value={o}>{o === PUBLIC_OWNER ? '🌐 公共' : `👤 ${o}`}</option>
                     ))}
                   </select>
                   <div className="view-toggle">

@@ -769,10 +769,10 @@ class MiscController extends BaseController
             $query->where('device_id', $deviceId);
         }
 
-        // superadmin 看全部；admin 看自己和直属子账号；普通用户只看自己。
+        // superadmin 看全部；admin 看自己、直属子账号和公共设备；普通用户看自己和公共设备。
         if (!in_array($role, ['superadmin', 'super-admin'], true)) {
             $username = trim((string)($user['username'] ?? ''));
-            $scope = $username === '' ? [] : [$username];
+            $scope = $username === '' ? [] : [$username, '__public__'];
             if ($role === 'admin' && $username !== '') {
                 $children = Db::table('fisher_users')
                     ->where('parent_username', $username)

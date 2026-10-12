@@ -200,7 +200,7 @@ class Auth
         if (in_array($user['role'] ?? '', ['superadmin', 'super-admin'], true)) return null;
 
         $username = trim((string)($user['username'] ?? ''));
-        $scope = $username === '' ? [] : [$username];
+        $scope = $username === '' ? [] : [$username, '__public__'];
         if (($user['role'] ?? 'user') === 'admin' && $username !== '') {
             $children = \think\facade\Db::table('fisher_users')
                 ->where('parent_username', $username)

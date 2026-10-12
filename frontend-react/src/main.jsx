@@ -6,6 +6,7 @@ import ControlPage from './pages/ControlPage.jsx'
 import ComponentShowcase from './pages/ComponentShowcase.jsx'
 import { api, getToken, setToken } from './api/client'
 import { PANEL_TITLE } from './config/brand'
+import { PUBLIC_OWNER } from './utils/device'
 import './styles/design-tokens.css'
 import './styles/components.css'
 import './styles/global.css'
@@ -77,7 +78,7 @@ function DeviceAuthGate() {
             const deviceOwner = deviceData?.ownerUsername || deviceData?.owner_username || ''
             const currentUser = userData?.username || ''
 
-            if (deviceOwner && deviceOwner !== currentUser) {
+            if (deviceOwner && deviceOwner !== currentUser && deviceOwner !== PUBLIC_OWNER) {
               console.warn(`[AUTH] 权限拒绝：设备归属 ${deviceOwner}，当前用户 ${currentUser}`)
               setState('denied')
             } else if (!deviceOwner) {

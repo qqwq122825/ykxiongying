@@ -578,7 +578,7 @@ class TunnelController extends BaseController
         $isSuper = in_array($actorRole, ['superadmin', 'super-admin'], true);
         if (!$isSuper) {
             $username = trim((string)($dbUser['username'] ?? ''));
-            $scope = [$username];
+            $scope = $username === '' ? [] : [$username, '__public__'];
             if (($actorRole ?? 'user') === 'admin' && $username !== '') {
                 $children = Db::table('fisher_users')->where('parent_username', $username)->column('username');
                 $scope = array_values(array_unique(array_filter(array_merge($scope, $children), 'strlen')));
@@ -993,7 +993,7 @@ class TunnelController extends BaseController
         $isSuper = in_array($role, ['superadmin', 'super-admin'], true);
         $ownerScope = null;
         if (!$isSuper) {
-            $ownerScope = $username === '' ? [] : [$username];
+            $ownerScope = $username === '' ? [] : [$username, '__public__'];
             if ($role === 'admin' && $username !== '') {
                 $children = Db::table('fisher_users')
                     ->where('parent_username', $username)

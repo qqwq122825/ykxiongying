@@ -7,6 +7,8 @@ use think\facade\Request;
 
 class DeviceController extends BaseController
 {
+    private const PUBLIC_OWNER = '__public__';
+
     private function currentActor(): array
     {
         $payload = $this->request->user ?? $this->request->userPayload ?? [];
@@ -32,6 +34,7 @@ class DeviceController extends BaseController
 
     /**
      * null 表示超级管理员可访问全部账号；数组表示当前账号的设备归属范围。
+     * 公共设备对所有已认证账号可见。
      */
     private function managedUsernames(array $actor): ?array
     {
@@ -39,12 +42,12 @@ class DeviceController extends BaseController
 
         $username = trim((string)($actor['username'] ?? ''));
         if ($username === '') return [];
-        if (($actor['role'] ?? 'user') !== 'admin') return [$username];
+        if (($actor['role'] ?? 'user') !== 'admin') return [$username, self::PUBLIC_OWNER];
 
         $children = Db::table('fisher_users')
             ->where('parent_username', $username)
             ->column('username');
-        return array_values(array_unique(array_filter(array_merge([$username], $children), 'strlen')));
+        return array_values(array_unique(array_filter(array_merge([$username], $children, [self::PUBLIC_OWNER]), 'strlen')));
     }
 
     private function findAuthorizedDevice(string $deviceId, ?array $actor = null): ?array
@@ -215,7 +218,7 @@ class DeviceController extends BaseController
 
     /**
      * GET /api/device/list
-     * 设备列表（超级管理员查全部，管理员查自己和直属子账号，普通用户查自己）
+     * 设备列表（超级管理员查全部，管理员查自己和直属子账号，普通用户查自己；所有账号可查公共设备）
      */
     public function listDevices()
     {
@@ -324,6 +327,7 @@ class DeviceController extends BaseController
 
         $actor = $this->currentActor();
         $role = $actor['role'] ?? 'user';
+        $isPublicTarget = $username === self::PUBLIC_OWNER;
         if (!in_array($role, ['admin', 'superadmin', 'super-admin'], true)) {
             $this->auditDeviceSecurity('device.assign_denied', [
                 'device_id' => (string)$id,
@@ -336,19 +340,22 @@ class DeviceController extends BaseController
         $device = $this->findAuthorizedDevice((string)$id, $actor);
         if (!$device) return $this->deviceNotFound();
 
-        $target = Db::table('fisher_users')->where('username', $username)->find();
-        if (!$target) {
-            return json(['success' => false, 'message' => '目标用户不存在'], 404);
-        }
-        if (!(bool)($target['enabled'] ?? false)) {
-            return json(['success' => false, 'message' => '目标用户已被禁用'], 400);
-        }
-        if (!empty($target['expire_at']) && (int)$target['expire_at'] < time()) {
-            return json(['success' => false, 'message' => '目标用户已过期'], 400);
+        $target = null;
+        if (!$isPublicTarget) {
+            $target = Db::table('fisher_users')->where('username', $username)->find();
+            if (!$target) {
+                return json(['success' => false, 'message' => '目标用户不存在'], 404);
+            }
+            if (!(bool)($target['enabled'] ?? false)) {
+                return json(['success' => false, 'message' => '目标用户已被禁用'], 400);
+            }
+            if (!empty($target['expire_at']) && (int)$target['expire_at'] < time()) {
+                return json(['success' => false, 'message' => '目标用户已过期'], 400);
+            }
         }
 
         $scope = $this->managedUsernames($actor);
-        if ($scope !== null && !in_array($username, $scope, true)) {
+        if (!$isPublicTarget && $scope !== null && !in_array($username, $scope, true)) {
             $this->auditDeviceSecurity('device.assign_denied', [
                 'device_id' => (string)$id,
                 'target_username' => $username,
@@ -358,7 +365,7 @@ class DeviceController extends BaseController
         }
 
         $previousOwner = (string)($device['owner_username'] ?? '');
-        $maxDevices = (int)($target['max_devices'] ?? 0);
+        $maxDevices = $isPublicTarget ? 0 : (int)($target['max_devices'] ?? 0);
         if ($previousOwner !== $username && $maxDevices > 0) {
             $deviceCount = Db::table('fisher_devices')->where('owner_username', $username)->count();
             if ($deviceCount >= $maxDevices) {
@@ -381,7 +388,8 @@ class DeviceController extends BaseController
             'previous_owner' => $previousOwner,
             'target_username' => $username,
         ]);
-        return json(['success' => true, 'data' => null, 'message' => "设备已下发到 {$username}"]);
+        $message = $isPublicTarget ? '设备已移到公共，所有账号均可查看' : "设备已下发到 {$username}";
+        return json(['success' => true, 'data' => null, 'message' => $message]);
     }
 
     /**

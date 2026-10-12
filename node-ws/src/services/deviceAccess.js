@@ -1,5 +1,7 @@
 'use strict';
 
+const PUBLIC_OWNER = '__public__';
+
 function normalizeRole(role) {
   return String(role || 'user').trim().toLowerCase().replace(/_/g, '-');
 }
@@ -60,14 +62,14 @@ async function managedUsernames(db, user) {
 
   const username = String(user?.username || '').trim();
   if (!username) return [];
-  if (normalizeRole(user?.role) !== 'admin') return [username];
+  if (normalizeRole(user?.role) !== 'admin') return [username, PUBLIC_OWNER];
 
   const [rows] = await db.query(
     'SELECT username FROM fisher_users WHERE parent_username = ? AND enabled = 1',
     [username]
   );
   const children = (rows || []).map(row => String(row.username || '').trim()).filter(Boolean);
-  return [...new Set([username, ...children])];
+  return [...new Set([username, ...children, PUBLIC_OWNER])];
 }
 
 async function canAccessDevice(db, user, deviceId) {
@@ -102,6 +104,7 @@ async function listAuthorizedDevices(db, user) {
 }
 
 module.exports = {
+  PUBLIC_OWNER,
   normalizeRole,
   isSuperAdmin,
   loadCurrentActor,

@@ -1128,19 +1128,10 @@ if (req.url && req.url.startsWith('/api/tunnel/config')) {
           res.end(JSON.stringify({ success: false, error: 'Forbidden: dangerous command blocked' }));
           return;
         }
-        // security fix: verify device ownership
-        if (authUser.role !== 'superadmin') {
-          try {
-            const [rows] = await dbPool.execute(
-              'SELECT owner_username FROM fisher_devices WHERE device_id = ? LIMIT 1',
-              [deviceId]
-            );
-            if (rows.length > 0 && rows[0].owner_username && rows[0].owner_username !== authUser.username) {
-              return sendAuthError(res, 403, 'Forbidden: not your device');
-            }
-          } catch (e) {
-            console.error('[security] owner check failed:', e.message);
-          }
+        // security fix: use the same ownership scope as panel WebSocket/PHP.
+        // Admins may access direct-child and public devices; public does not bypass authentication.
+        if (!await verifyDeviceOwnership(req, deviceId)) {
+          return sendAuthError(res, 403, 'Forbidden: not your device');
         }
         const tunnelPort = await getDeviceTunnelPort(deviceId);
         const postData = JSON.stringify({ command: cmd });

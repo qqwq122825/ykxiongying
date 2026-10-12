@@ -163,8 +163,15 @@ export function deviceStatus(device) {
 /**
  * 获取设备归属（分配的账号）
  */
-export function owner(device) {
+export const PUBLIC_OWNER = '__public__'
+
+export function ownerValue(device) {
   return device?.owner_username || device?.ownerUsername || device?.owner || device?.assignedTo || device?.username || ''
+}
+
+export function owner(device) {
+  const value = ownerValue(device)
+  return value === PUBLIC_OWNER ? '公共' : value
 }
 
 /**
