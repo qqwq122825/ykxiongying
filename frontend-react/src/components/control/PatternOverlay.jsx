@@ -14,9 +14,9 @@ import { useMemo, useState } from 'react'
 function calcPatternPoints(bounds) {
   const w = bounds.right - bounds.left
   const h = bounds.bottom - bounds.top
-  // 九宫格均匀分布在 bounds 内，边距约 1/8
-  const padX = w / 8
-  const padY = h / 8
+  // 九宫格按 3×3 单元格中心分布：1/6、1/2、5/6，确保数字落在正方形内部。
+  const padX = w / 6
+  const padY = h / 6
   const stepX = (w - 2 * padX) / 2
   const stepY = (h - 2 * padY) / 2
 

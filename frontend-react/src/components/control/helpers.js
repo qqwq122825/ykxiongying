@@ -33,7 +33,9 @@ export function findPatternViewBounds(readerData) {
   const root = getReaderRoot(readerData)
   if (!root) return null
 
-  let bestSquare = null // 启发式：最大的近似正方形区域
+  let exactMatch = null
+  let bestInteractiveSquare = null // 阅读器中实际画出绿色边框的可交互正方形
+  let bestSquare = null
 
   function walk(node) {
     if (!node || typeof node !== 'object') return null
@@ -42,13 +44,13 @@ export function findPatternViewBounds(readerData) {
     const desc = node.description || node.contentDescription || ''
     const text = node.text || ''
 
-    // 策略1: 精确类名匹配
-    for (const kw of patternKeywords) {
-      if (type.includes(kw) || String(resId).includes(kw) || String(desc).includes(kw)) {
-        if (node.bounds && typeof node.bounds.left === 'number') {
-          return node.bounds
-        }
-      }
+    // 策略1: 记录精确类名匹配，但继续遍历子节点。
+    // 某些系统的 LockPatternView bounds 会连同提示文字/紧急呼叫一起包住，不能直接用于点位。
+    const isExactPatternNode = patternKeywords.some(kw =>
+      type.includes(kw) || String(resId).includes(kw) || String(desc).includes(kw)
+    )
+    if (isExactPatternNode && !exactMatch && node.bounds && typeof node.bounds.left === 'number') {
+      exactMatch = node.bounds
     }
 
     // 策略2: 收集近似正方形的大面积节点（可能是图案区域）
@@ -59,7 +61,11 @@ export function findPatternViewBounds(readerData) {
       const ratio = w / (h || 1)
       // 近似正方形（宽高比 0.8~1.2）且面积较大（宽度>200px）
       if (ratio >= 0.8 && ratio <= 1.2 && w > 200 && h > 200) {
-        if (!bestSquare || w > (bestSquare.right - bestSquare.left)) {
+        // 优先使用阅读器中显示绿色边框的可交互子节点，并排除可能过大的精确包装节点。
+        if (!isExactPatternNode && (node.clickable || node.focusable) && (!bestInteractiveSquare || w > (bestInteractiveSquare.right - bestInteractiveSquare.left))) {
+          bestInteractiveSquare = b
+        }
+        if (!isExactPatternNode && (!bestSquare || w > (bestSquare.right - bestSquare.left))) {
           bestSquare = b
         }
       }
@@ -69,18 +75,16 @@ export function findPatternViewBounds(readerData) {
     const children = node.children || node.nodes || []
     if (Array.isArray(children)) {
       for (const child of children) {
-        const result = walk(child)
-        if (result) return result
+        walk(child)
       }
     }
     return null
   }
 
-  const exactMatch = walk(root)
-  if (exactMatch) return exactMatch
+  walk(root)
 
-  // 策略2兜底：返回最大的正方形区域
-  return bestSquare
+  // 优先绿色可交互正方形，其次普通正方形，最后才使用可能偏大的精确包装节点。
+  return bestInteractiveSquare || bestSquare || exactMatch
 }
 
 /**
