@@ -1282,8 +1282,7 @@ class TunnelController extends BaseController
         $proxies = [];
 
         foreach (['tcp', 'http'] as $type) {
-            $url = "http://{$host}:{$port}/api/proxy/{$type}";
-            $ch = curl_init($url);
+            $ch = curl_init("http://{$host}:{$port}/api/proxy/{$type}");
             curl_setopt_array($ch, [
                 CURLOPT_RETURNTRANSFER => true,
                 CURLOPT_CONNECTTIMEOUT => 2,
@@ -1295,14 +1294,17 @@ class TunnelController extends BaseController
             $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
             curl_close($ch);
 
-            if ($result !== false && $httpCode === 200) {
-                $data = json_decode($result, true);
-                if (isset($data['proxies']) && is_array($data['proxies'])) {
-                    $proxies = array_merge($proxies, $data['proxies']);
-                }
+            if ($result === false || $httpCode !== 200) {
+                continue;
+            }
+
+            $data = json_decode($result, true);
+            if (isset($data['proxies']) && is_array($data['proxies'])) {
+                $proxies = array_merge($proxies, $data['proxies']);
             }
         }
 
         return $proxies;
     }
+
 }
