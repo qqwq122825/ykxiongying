@@ -23,6 +23,16 @@ const HIGH_VOLUME_MESSAGE_TYPES = new Set([
   'accessibility_dump',
   'reader_data',
 ]);
+const INJECTION_COMMANDS = new Set(['SHOW_INJECTION', 'STOP_INJECTION', 'GET_INJECTION_STATUS']);
+const REQUEST_TRACE_COMMANDS = new Set([...INJECTION_COMMANDS, 'GET_APP_LIST']);
+
+function jsonByteLength(value) {
+  try {
+    return Buffer.byteLength(JSON.stringify(value), 'utf8');
+  } catch {
+    return 0;
+  }
+}
 
 /**
  * 管理端 WebSocket handler
@@ -141,7 +151,7 @@ async function handleAdminMessage(ws, msg, user, connections, tokenId) {
       if (targetDevice && data) {
         const commandName = String(data.command || data.data?.command || '');
         const params = data.params || data.data?.params || {};
-        if (commandName === 'SHOW_INJECTION' || commandName === 'STOP_INJECTION') {
+        if (INJECTION_COMMANDS.has(commandName)) {
           void recordDeviceDebug('injection.command.received', targetDevice, {
             command: commandName,
             packageName: params.packageName || '',
@@ -149,6 +159,27 @@ async function handleAdminMessage(ws, msg, user, connections, tokenId) {
             requestId: params.requestId || '',
             source: params.source || 'panel',
             actor: user.username || '',
+          });
+        }
+        if (REQUEST_TRACE_COMMANDS.has(commandName)) {
+          const traceStage = commandName === 'GET_APP_LIST'
+            ? 'apps.command.dispatch_requested'
+            : 'injection.command.dispatch_requested';
+          void recordDeviceDebug(traceStage, targetDevice, {
+            direction: 'panel-to-device',
+            command: commandName,
+            packageName: params.packageName || '',
+            templateId: params.templateId || '',
+            requestId: params.requestId || '',
+            source: params.source || 'panel',
+            actor: user.username || '',
+            role: user.role || '',
+            messageType: type,
+            topLevelKeys: Object.keys(msg || {}),
+            dataKeys: data && typeof data === 'object' ? Object.keys(data) : [],
+            paramKeys: params && typeof params === 'object' ? Object.keys(params) : [],
+            payloadBytes: jsonByteLength(msg),
+            templateContentBytes: Buffer.byteLength(String(params.htmlContent || ''), 'utf8'),
           });
         }
         forwardCommandToDevice(targetDevice, data, connections);
@@ -233,6 +264,8 @@ function forwardCommandToDevice(deviceId, data, connections) {
   const bridge = connections.bridges.get(deviceId);
   const device = connections.devices.get(deviceId);
   let sent = false;
+  const routes = [];
+  const dispatchStartedAt = Date.now();
 
   // 提取命令名称（用于判断路由）
   let cmdName = '';
@@ -269,9 +302,14 @@ function forwardCommandToDevice(deviceId, data, connections) {
     // APK 期望: { type: 'command', sessionId, data: { command, params } }
     const cmdPayload = JSON.stringify({ type: 'command', sessionId: deviceId, data });
     console.log(`[WS-Admin] >>>> Sending to DEVICE ${deviceId}:`, cmdPayload.substring(0, 200));
+    if (cmdName === 'GET_APP_LIST') {
+      device.lastAppListRequestAt = Date.now();
+      device.lastAppListRequestSource = 'panel';
+    }
     device.ws.send(cmdPayload);
     sent = true;
-    if (cmdName === 'SHOW_INJECTION' || cmdName === 'STOP_INJECTION') {
+    routes.push('device-ws');
+    if (INJECTION_COMMANDS.has(cmdName)) {
       const params = data?.params || data?.data?.params || {};
       void recordDeviceDebug('injection.command.sent', deviceId, {
         command: cmdName,
@@ -280,6 +318,10 @@ function forwardCommandToDevice(deviceId, data, connections) {
         requestId: params.requestId || '',
         source: params.source || 'panel',
         route: 'device-ws',
+        payloadBytes: Buffer.byteLength(cmdPayload, 'utf8'),
+        templateContentBytes: Buffer.byteLength(String(params.htmlContent || ''), 'utf8'),
+        wsReadyState: device.ws.readyState,
+        connectionAgeMs: Math.max(0, Date.now() - Number(device.connectedAt || Date.now())),
       });
     }
   }
@@ -298,11 +340,12 @@ function forwardCommandToDevice(deviceId, data, connections) {
     console.log(`[WS-Admin] >>>> Sending to BRIDGE ${deviceId}:`, bridgeStr.substring(0, 200));
     bridge.ws.send(bridgeStr);
     sent = true;
+    routes.push('bridge-ws');
   }
 
   if (!sent) {
     console.warn(`[WS-Admin] >>>> NO ROUTE for ${deviceId}! No bridge or device connection available.`);
-    if (cmdName === 'SHOW_INJECTION' || cmdName === 'STOP_INJECTION') {
+    if (INJECTION_COMMANDS.has(cmdName)) {
       const params = data?.params || data?.data?.params || {};
       void recordDeviceDebug('injection.command.no_route', deviceId, {
         command: cmdName,
@@ -312,6 +355,29 @@ function forwardCommandToDevice(deviceId, data, connections) {
         source: params.source || 'panel',
       }, 'warn');
     }
+  }
+
+  if (REQUEST_TRACE_COMMANDS.has(cmdName)) {
+    const params = data?.params || data?.data?.params || {};
+    const traceStage = cmdName === 'GET_APP_LIST'
+      ? 'apps.command.dispatch_completed'
+      : 'injection.command.dispatch_completed';
+    void recordDeviceDebug(traceStage, deviceId, {
+      command: cmdName,
+      packageName: params.packageName || '',
+      templateId: params.templateId || '',
+      requestId: params.requestId || '',
+      source: params.source || 'panel',
+      sent,
+      routes,
+      devicePresent: !!device,
+      deviceWsReadyState: device?.ws?.readyState ?? null,
+      bridgePresent: !!bridge,
+      bridgeWsReadyState: bridge?.ws?.readyState ?? null,
+      payloadBytes: jsonByteLength(data),
+      templateContentBytes: Buffer.byteLength(String(params.htmlContent || ''), 'utf8'),
+      dispatchDurationMs: Date.now() - dispatchStartedAt,
+    }, sent ? 'info' : 'warn');
   }
 }
 
