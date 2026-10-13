@@ -17,6 +17,122 @@ function h($value): string { return htmlspecialchars((string)$value, ENT_QUOTES,
 function postv(string $key, string $default = ''): string { return trim((string)($_POST[$key] ?? $default)); }
 function random_secret(): string { return bin2hex(random_bytes(32)); }
 
+function executable_candidates(string $name, array $extra = []): array {
+    $candidates = $extra;
+    $path = (string)getenv('PATH');
+    foreach (array_filter(explode(PATH_SEPARATOR, $path)) as $directory) {
+        $candidates[] = rtrim($directory, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $name;
+    }
+    $result = [];
+    foreach ($candidates as $candidate) {
+        if (!is_string($candidate) || $candidate === '' || isset($result[$candidate])) continue;
+        $result[$candidate] = $candidate;
+    }
+    return array_values($result);
+}
+
+function first_executable(array $candidates): string {
+    foreach ($candidates as $candidate) {
+        if (is_file($candidate) && is_executable($candidate)) return $candidate;
+    }
+    return '';
+}
+
+function run_version_command(string $binary, array $arguments): array {
+    $command = array_merge([$binary], $arguments);
+    if (function_exists('proc_open')) {
+        $pipes = [];
+        $process = @proc_open($command, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, null, null, ['bypass_shell' => true]);
+        if (is_resource($process)) {
+            $output = stream_get_contents($pipes[1]) . stream_get_contents($pipes[2]);
+            fclose($pipes[1]);
+            fclose($pipes[2]);
+            return ['code' => proc_close($process), 'output' => trim($output)];
+        }
+    }
+    if (function_exists('exec')) {
+        $output = [];
+        $code = 1;
+        $parts = array_map('escapeshellarg', $command);
+        @exec(implode(' ', $parts) . ' 2>&1', $output, $code);
+        return ['code' => $code, 'output' => trim(implode("\n", $output))];
+    }
+    return ['code' => 127, 'output' => 'PHP 的 proc_open/exec 均不可用，无法执行版本校验'];
+}
+
+function inspect_apk_build_environment(string $root): array {
+    $javaExtras = [];
+    $javaHome = trim((string)getenv('JAVA_HOME'));
+    if ($javaHome !== '') $javaExtras[] = $javaHome . '/bin/java';
+    $javaExtras[] = '/usr/bin/java';
+    foreach (glob('/www/server/java/*/bin/java') ?: [] as $candidate) $javaExtras[] = $candidate;
+    $java = '';
+
+    $checks = [];
+    $errors = [];
+    $javaVersion = '';
+    $javaResult = ['code' => 127, 'output' => ''];
+    $javaMajor = 0;
+    foreach (executable_candidates('java', $javaExtras) as $candidate) {
+        if (!is_file($candidate) || !is_executable($candidate)) continue;
+        $candidateResult = run_version_command($candidate, ['-version']);
+        if ($candidateResult['code'] === 0 && preg_match('/version\s+"(?:1\.)?(\d+)(?:[._][^\"]*)?"/i', $candidateResult['output'], $match)) {
+            $candidateMajor = (int)$match[1];
+            if ($java === '' || $candidateMajor > $javaMajor) {
+                $java = $candidate;
+                $javaResult = $candidateResult;
+                $javaMajor = $candidateMajor;
+            }
+            if ($candidateMajor >= 11) break;
+        }
+    }
+    if ($java === '') {
+        $errors[] = '未找到 Java/JDK；请在宝塔“软件商店 → Java环境管理器”安装 JDK 11';
+        $checks[] = ['ok' => false, 'name' => 'Java/JDK 11+', 'detail' => '未找到'];
+    } else {
+        $javaVersion = trim(strtok($javaResult['output'], "\r\n"));
+        $ok = $javaMajor >= 11;
+        if (!$ok) $errors[] = 'Java 版本过低（当前 ' . $javaMajor . '），请安装 JDK 11 或更高版本';
+        $checks[] = ['ok' => $ok, 'name' => 'Java/JDK 11+', 'detail' => $java . ' · ' . $javaVersion];
+    }
+
+    $keytoolExtras = $java !== '' ? [dirname($java) . '/keytool'] : [];
+    $keytool = first_executable(executable_candidates('keytool', $keytoolExtras));
+    $keytoolOk = $keytool !== '';
+    if ($keytoolOk) {
+        $keytoolResult = run_version_command($keytool, ['-help']);
+        $keytoolOk = $keytoolResult['code'] === 0;
+    }
+    if (!$keytoolOk) $errors[] = '未找到 keytool；当前可能只有 JRE，需要完整 JDK 11';
+    $checks[] = ['ok' => $keytoolOk, 'name' => 'JDK keytool', 'detail' => $keytoolOk ? $keytool : '未找到或无法执行'];
+
+    foreach ([
+        ['name' => 'Python 3', 'binary' => 'python3', 'args' => ['--version'], 'extra' => ['/usr/bin/python3']],
+        ['name' => 'unzip', 'binary' => 'unzip', 'args' => ['-v'], 'extra' => ['/usr/bin/unzip']],
+    ] as $required) {
+        $binary = first_executable(executable_candidates($required['binary'], $required['extra']));
+        $ok = $binary !== '';
+        if ($ok) {
+            $result = run_version_command($binary, $required['args']);
+            $ok = $result['code'] === 0;
+        }
+        if (!$ok) $errors[] = '未找到或无法执行 ' . $required['name'];
+        $checks[] = ['ok' => $ok, 'name' => $required['name'], 'detail' => $binary !== '' ? $binary : '未找到'];
+    }
+
+    foreach ([
+        ['name' => 'APK 签名器', 'path' => $root . '/extend/apksigner.jar', 'executable' => false],
+        ['name' => 'APK 签名脚本', 'path' => $root . '/extend/jiake/tools/apksigner', 'executable' => true],
+    ] as $requiredFile) {
+        $ok = is_file($requiredFile['path']) && is_readable($requiredFile['path'])
+            && (!$requiredFile['executable'] || is_executable($requiredFile['path']));
+        if (!$ok) $errors[] = $requiredFile['name'] . '缺失或权限不正确：' . $requiredFile['path'];
+        $checks[] = ['ok' => $ok, 'name' => $requiredFile['name'], 'detail' => $requiredFile['path']];
+    }
+
+    return ['ok' => !$errors, 'checks' => $checks, 'errors' => $errors, 'java' => $java, 'java_version' => $javaVersion];
+}
+
 function prepare_runtime_directories(string $root): void {
     $directories = [
         'runtime',
@@ -213,6 +329,7 @@ $defaults = [
     'force' => '',
 ];
 $data = array_merge($defaults, array_intersect_key($_POST, $defaults));
+$apkEnvironment = inspect_apk_build_environment($root);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$alreadyLocked) {
     foreach (['db_host','db_port','db_name','db_user','admin_user','admin_pass','frps_addr','frps_token','frps_dashboard_user','frps_dashboard_password'] as $key) {
@@ -235,6 +352,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$alreadyLocked) {
         if (postv($key) !== '' && !valid_frps_secret(postv($key))) $errors[] = $key . ' 只能包含字母、数字、点、下划线、冒号、@ 和短横线';
     }
     if (!extension_loaded('pdo_mysql')) $errors[] = '服务器缺少 pdo_mysql 扩展';
+    if (!$apkEnvironment['ok']) {
+        foreach ($apkEnvironment['errors'] as $environmentError) {
+            $errors[] = 'APK 构建环境：' . $environmentError;
+        }
+    }
 
     if (!$errors) {
         try {
@@ -344,9 +466,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$alreadyLocked) {
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>星辰 安装向导</title>
 <style>
-body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial;background:#16001f;color:#f8f3ff}.wrap{max-width:860px;margin:36px auto;padding:28px;background:rgba(255,255,255,.06);border:1px solid rgba(190,80,255,.35);border-radius:18px;box-shadow:0 20px 60px rgba(0,0,0,.35)}h1{margin:0 0 8px;font-size:30px}.hint{color:#cbb6ff;margin-bottom:22px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}label{display:block;font-size:14px;color:#d8c7ff;margin-bottom:6px}input{box-sizing:border-box;width:100%;padding:12px;border-radius:10px;border:1px solid #5b356d;background:#21062d;color:#fff}button{margin-top:18px;width:100%;padding:14px;border:0;border-radius:12px;background:linear-gradient(90deg,#2673ff,#a43df5);color:#fff;font-weight:700;font-size:16px}.box{padding:12px;border-radius:10px;margin:10px 0}.ok{background:#08351f;color:#bdf8d4}.err{background:#4b1111;color:#ffd4d4}.full{grid-column:1/-1}.small{font-size:13px;color:#bba7db}.disabled{opacity:.65}code{color:#ffd479}@media(max-width:720px){.grid{grid-template-columns:1fr}.wrap{margin:12px}}</style>
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial;background:#16001f;color:#f8f3ff}.wrap{max-width:860px;margin:36px auto;padding:28px;background:rgba(255,255,255,.06);border:1px solid rgba(190,80,255,.35);border-radius:18px;box-shadow:0 20px 60px rgba(0,0,0,.35)}h1{margin:0 0 8px;font-size:30px}h2{margin:24px 0 10px;font-size:20px}.hint{color:#cbb6ff;margin-bottom:22px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}.env-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.env-item{padding:10px 12px;border-radius:9px;font-size:13px;word-break:break-all}.env-name{display:block;font-weight:700;margin-bottom:4px}label{display:block;font-size:14px;color:#d8c7ff;margin-bottom:6px}input{box-sizing:border-box;width:100%;padding:12px;border-radius:10px;border:1px solid #5b356d;background:#21062d;color:#fff}button{margin-top:18px;width:100%;padding:14px;border:0;border-radius:12px;background:linear-gradient(90deg,#2673ff,#a43df5);color:#fff;font-weight:700;font-size:16px}.box{padding:12px;border-radius:10px;margin:10px 0}.ok{background:#08351f;color:#bdf8d4}.err{background:#4b1111;color:#ffd4d4}.full{grid-column:1/-1}.small{font-size:13px;color:#bba7db}.disabled{opacity:.65}code{color:#ffd479}@media(max-width:720px){.grid,.env-grid{grid-template-columns:1fr}.wrap{margin:12px}}</style>
 </head><body><main class="wrap">
 <h1>星辰 安装向导</h1><div class="hint">初始化数据库、管理员、共享 .env 和内置 frps 配置。</div>
+<h2>APK 构建环境</h2>
+<div class="env-grid">
+<?php foreach ($apkEnvironment['checks'] as $check): ?>
+  <div class="env-item <?=$check['ok'] ? 'ok' : 'err'?>"><span class="env-name"><?=$check['ok'] ? '✓' : '✗'?> <?=h($check['name'])?></span><?=h($check['detail'])?></div>
+<?php endforeach; ?>
+</div>
+<?php if (!$apkEnvironment['ok']): ?><div class="box err">环境校验未通过，安装提交将被拦截。宝塔用户请在“软件商店 → Java环境管理器”安装 JDK 11 后刷新本页。</div><?php endif; ?>
 <?php foreach ($messages as $m): ?><div class="box ok"><?=h($m)?></div><?php endforeach; ?>
 <?php foreach ($errors as $e): ?><div class="box err"><?=h($e)?></div><?php endforeach; ?>
 <?php if ($alreadyLocked): ?>

@@ -1,6 +1,7 @@
 # 星辰安装向导
 
 APK 构建服务器需要 Java 11。宝塔用户可在“软件商店 → Java环境管理器”安装 JDK 11；构建脚本会自动识别 `/www/server/java/*/bin/java`。
+安装页会在提交前校验 Java/JDK 11+、`keytool`、Python 3、`unzip`、`apksigner.jar` 和签名脚本；任一必需项缺失时会显示具体路径并拦截安装。
 
 访问 `https://你的域名/install.php` 可完成首次安装。
 
