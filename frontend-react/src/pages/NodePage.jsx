@@ -39,7 +39,7 @@ export default function NodePage(){
   const[loading,setLoading]=useState(true),[data,setData]=useState(null),[error,setError]=useState(null),[refresh,setRefresh]=useState(new Date())
   const[wsStatus,setWsStatus]=useState('检测中')
   const load=useCallback(async()=>{setLoading(true);setError(null);try{const r=await api.systemInfo();const d=r.data||r;if(d)setData(d);setRefresh(new Date())}catch(e){setError(e.message||"获取系统信息失败")}finally{setLoading(false)}},[])
-  useEffect(()=>{load();const t=setInterval(load,30000);return()=>clearInterval(t)},[load])
+  useEffect(()=>{load();const t=setInterval(load,1000);return()=>clearInterval(t)},[load])
   useEffect(()=>{
     let ws,closed=false,timer
     function check(){
