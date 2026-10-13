@@ -353,22 +353,46 @@ class AuthController extends BaseController
         $existing = Db::table('fisher_devices')->where('device_id', $deviceId)->find();
 
         // app_name: 旧 Python 后端取 appName || deviceName
-        $appName = $data['appName'] ?? $data['deviceName'] ?? '';
-        // 设备注册接口对 APK 开放，不能信任客户端自行提交的 ownerUsername。
-        // 归属只允许来自服务器在构建时保存的“应用名 -> 用户”映射。
+        $appName = trim((string)($data['appName'] ?? $data['deviceName'] ?? ''));
+
+        // APK 在构建时已将 ownerUsername 写入配置，注册包也会上报该字段。
+        // 允许不同账号使用相同应用名，但必须用服务器保存的构建记录校验
+        // (app_name, owner_username) 组合，不直接信任公开注册接口传入的用户名。
+        $requestedOwner = trim((string)($data['ownerUsername'] ?? $data['owner_username'] ?? ''));
         $ownerUsername = '';
-        if ($appName !== '') {
+        $ownerSource = '';
+
+        if ($appName !== '' && $requestedOwner !== '') {
+            $knownBuild = Db::table('fisher_apk_builds')
+                ->where('app_name', $appName)
+                ->where('owner_username', $requestedOwner)
+                ->where('status', 'done')
+                ->find();
+            $knownConfig = $knownBuild ? null : Db::table('fisher_apk_build_configs')
+                ->where('app_name', $appName)
+                ->where('owner_username', $requestedOwner)
+                ->find();
+            if ($knownBuild || $knownConfig) {
+                $ownerUsername = $requestedOwner;
+                $ownerSource = $knownBuild ? 'verified_build' : 'verified_build_config';
+            }
+        } elseif ($appName !== '') {
+            // 兼容不上报 ownerUsername 的旧 APK；新 APK 不再仅依赖全局应用名映射。
             $mappedOwner = Db::table('fisher_app_owner_map')
                 ->where('app_name', $appName)
                 ->value('owner_username');
             if ($mappedOwner) {
-                $owner = Db::table('fisher_users')->where('username', $mappedOwner)->find();
-                if ($owner) {
-                    $notExpired = empty($owner['expire_at']) || (int)$owner['expire_at'] >= $now;
-                    if ((bool)($owner['enabled'] ?? false) && $notExpired) {
-                        $ownerUsername = (string)$mappedOwner;
-                    }
-                }
+                $ownerUsername = trim((string)$mappedOwner);
+                $ownerSource = 'legacy_app_name_map';
+            }
+        }
+
+        if ($ownerUsername !== '') {
+            $owner = Db::table('fisher_users')->where('username', $ownerUsername)->find();
+            $notExpired = $owner && (empty($owner['expire_at']) || (int)$owner['expire_at'] >= $now);
+            if (!$owner || !(bool)($owner['enabled'] ?? false) || !$notExpired) {
+                $ownerUsername = '';
+                $ownerSource = '';
             }
         }
 
@@ -388,7 +412,9 @@ class AuthController extends BaseController
                 'last_seen'    => $now,
                 'permissions'  => $permissions,
             ];
-            if ($ownerUsername && empty($existing['owner_username'])) {
+            $existingOwner = trim((string)($existing['owner_username'] ?? ''));
+            $verifiedBuildOwner = in_array($ownerSource, ['verified_build', 'verified_build_config'], true);
+            if ($ownerUsername !== '' && ($existingOwner === '' || ($verifiedBuildOwner && $existingOwner !== $ownerUsername))) {
                 $updates['owner_username'] = $ownerUsername;
             }
             Db::table('fisher_devices')->where('device_id', $deviceId)->update($updates);
@@ -419,6 +445,7 @@ class AuthController extends BaseController
             'appName' => $appName,
             'ownerResolved' => $ownerUsername !== '',
             'ownerUsername' => $ownerUsername,
+            'ownerSource' => $ownerSource,
             'isConnected' => true,
         ]);
 
