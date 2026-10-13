@@ -302,6 +302,19 @@ function startTask(task, raw, claimFile) {
         }
       }
 
+      // 宝塔 Node 项目可能以 root 且 umask=077 运行，Python 产物会变成 600/root。
+      // Nginx/PHP 以 www 用户读取时会因此返回 403 或空响应；构建完成后显式开放只读权限。
+      for (const artifactPath of [task.outputPath, `${task.outputPath}.idsig`]) {
+        if (!fs.existsSync(artifactPath)) continue;
+        try {
+          fs.chmodSync(artifactPath, 0o644);
+        } catch (permissionError) {
+          const warning = `下载权限修复失败: ${path.basename(artifactPath)} (${permissionError.message})`;
+          logs.push(`[${timeStr()}] ${warning}`);
+          appendBuildLog(warning);
+        }
+      }
+
       const size = artifactCheck.size;
       const msg = `构建成功并校验通过: ${task.outputFilename}`;
       console.log(`[APK-Builder] SUCCESS: ${task.outputFilename} (${(size / 1024 / 1024).toFixed(1)}MB)`);

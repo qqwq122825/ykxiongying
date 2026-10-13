@@ -45,7 +45,7 @@ export default function ApkPage(){
   useEffect(()=>{loadApkList()},[])
   useEffect(()=>{api.request("/api/apk/cdn-config").then(r=>{const d=r.data||r;if(d.provider)setCdn(d)}).catch(()=>{})},[])
   useEffect(()=>{api.request("/api/apk/bt-deploy-config").then(r=>{const d=r.data||r;if(d.downloadDomain||d.host)setBtCfg(d)}).catch(()=>{})},[])
-  const apkPublicUrl=(fn)=>{const safe=encodeURIComponent(fn||"");const path="/api/apk/download?filename="+safe;const domain=(btCfg.downloadDomain||"").trim().replace(/\/+$/,"");return domain?domain+path:path}
+  const apkPublicUrl=(fn)=>{const safe=encodeURIComponent(fn||"");const path="/apk_output/"+safe;const domain=(btCfg.downloadDomain||"").trim().replace(/\/+$/,"");return domain?domain+path:path}
   const absoluteApkUrl=(fn)=>{const url=apkPublicUrl(fn);return /^https?:\/\//i.test(url)?url:window.location.origin+url}
   const activeItems=useMemo(()=>list.filter(x=>["submitting","queued","building"].includes(x.status||x.build_status)),[list])
   const queuedCount=useMemo(()=>list.filter(x=>(x.status||x.build_status)==="queued").length,[list])
