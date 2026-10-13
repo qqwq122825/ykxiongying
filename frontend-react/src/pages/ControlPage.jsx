@@ -1334,31 +1334,38 @@ export default function ControlPage({ user: _user } = {}) {
     }
     if (btn.toggle) {
       const on = !toggles[btn.toggle]
-      // 黑屏遮挡：直接发送（不弹窗）
+      // 黑屏遮挡与系统更新互斥；输入阻断由独立按钮控制。
       if (btn.toggle === 'blackScreen' && on) {
-        setToggles((s) => ({ ...s, blackScreen: true, block: true }))
+        if (toggles.sysUpdate) {
+          centerToast('请先关闭系统更新', 'err')
+          addLog('黑屏遮挡未发送：系统更新仍处于开启状态')
+          return
+        }
+        setToggles((s) => ({ ...s, blackScreen: true }))
         sendCmd('ENABLE_BLACK_SCREEN', { text: '', fontSize: 24, alpha: 252, showIcon: false, showProgress: false })
-        sendCmd('DEVICE_BLOCK_INPUT', {})
-        centerToast('黑屏已开启，已自动阻断操作')
-        addLog('黑屏遮挡已发送 + 自动阻断操作')
+        centerToast('黑屏已开启')
+        addLog('黑屏遮挡已发送')
         return
       }
-      // 系统更新：开启时直接发送 ENABLE_BLACK_SCREEN + style:"update" + 自动阻断
+      // 系统更新与黑屏遮挡互斥；输入阻断由独立按钮控制。
       if (btn.toggle === 'sysUpdate' && on) {
-        setToggles((s) => ({ ...s, sysUpdate: true, block: true }))
+        if (toggles.blackScreen) {
+          centerToast('请先关闭黑屏遮盖', 'err')
+          addLog('系统更新未发送：黑屏遮盖仍处于开启状态')
+          return
+        }
+        setToggles((s) => ({ ...s, sysUpdate: true }))
         sendCmd('ENABLE_BLACK_SCREEN', { text: '', fontSize: 24, alpha: 252, showIcon: false, showProgress: false, style: 'update' })
-        sendCmd('DEVICE_BLOCK_INPUT', {})
-        centerToast('系统更新已开启，已自动阻断操作')
-        addLog('系统更新遮挡已发送 + 自动阻断操作')
+        centerToast('系统更新已开启')
+        addLog('系统更新遮挡已发送')
         return
       }
-      // 黑屏/系统更新：关闭时发送 DISABLE_BLACK_SCREEN + 解除阻断
+      // 关闭遮挡时只关闭遮挡，不改变独立的输入阻断状态。
       if ((btn.toggle === 'blackScreen' || btn.toggle === 'sysUpdate') && !on) {
-        setToggles((s) => ({ ...s, [btn.toggle]: false, block: false }))
+        setToggles((s) => ({ ...s, [btn.toggle]: false }))
         sendCmd('DISABLE_BLACK_SCREEN', {})
-        sendCmd('DEVICE_ALLOW_INPUT', {})
-        centerToast(btn.offToast || `${btn.label}已关闭（已解除阻断）`)
-        addLog(`${btn.label}已关闭 + 阻断操作已解除`)
+        centerToast(btn.offToast || `${btn.label}已关闭`)
+        addLog(`${btn.label}已关闭`)
         return
       }
       setToggles((s) => ({ ...s, [btn.toggle]: on }))
@@ -2345,7 +2352,7 @@ export default function ControlPage({ user: _user } = {}) {
                 const danger = ['黑屏遮盖','系统更新'].includes(name)
                 return <button key={name} className={`sidebar-btn ${danger ? 'danger' : 'primary'} ${on ? 'is-on' : ''}`} onClick={() => handleQuickButton(btn)} title={btn.toggle ? (on ? '已开启，点击关闭' : '点击开启') : name}><span>{name}</span>{btn.toggle && <span className={`sidebar-led ${on ? 'on' : ''}`}/>}</button>
               })}
-              {/* 阻断操作：跟随黑屏/系统更新自动开启，阻断中时可点击"允许操作"解除 */}
+              {/* 输入阻断保持独立；阻断中时可点击“允许操作”解除。 */}
               {(() => { const blockOn = !!toggles.block; return <button className={`sidebar-btn ${blockOn ? 'danger is-on' : 'primary'}`} onClick={() => { if (blockOn) { setToggles(s => ({ ...s, block: false })); sendCmd('DEVICE_ALLOW_INPUT', {}); centerToast('已允许用户操作'); addLog('手动解除阻断: DEVICE_ALLOW_INPUT') } else { setToggles(s => ({ ...s, block: true })); sendCmd('DEVICE_BLOCK_INPUT', {}); centerToast('已阻断用户操作'); addLog('手动阻断: DEVICE_BLOCK_INPUT') } }} title={blockOn ? '点击允许操作' : '点击阻断操作'}><span>{blockOn ? '允许操作' : '阻断操作'}</span><span className={`sidebar-led ${blockOn ? 'on' : ''}`}/></button> })()}
             </div>
           </div>

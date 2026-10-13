@@ -568,13 +568,6 @@ class ApkController extends BaseController
             return json(['success' => false, 'message' => $nameError], 400);
         }
 
-        if (!$this->isSuperAdmin($actor)) {
-            $existing = Db::table('fisher_app_owner_map')->where('app_name', $appName)->find();
-            if ($existing && $existing['owner_username'] !== $ownerUsername) {
-                return json(['success' => false, 'message' => "应用名 \"{$appName}\" 已被用户 {$existing['owner_username']} 使用"], 409);
-            }
-        }
-
         $prefix = strtoupper(substr(preg_replace('/[^a-zA-Z]/', '', $appName ?: 'GNI'), 0, 3)) ?: 'GNI';
         $outputFilename = $prefix . '_' . date('Ymd_His') . '_' . $this->rs() . '.apk';
 
@@ -732,23 +725,6 @@ class ApkController extends BaseController
             ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
             if ($taskJson === false || file_put_contents($taskFile, $taskJson, LOCK_EX) === false) {
                 throw new \RuntimeException('无法写入 APK 构建任务文件，请检查 runtime/apk_build_queue 是否为 www:775');
-            }
-
-            if ($appName && $ownerUsername) {
-                $existing = Db::table('fisher_app_owner_map')->where('app_name', $appName)->find();
-                if ($existing) {
-                    Db::table('fisher_app_owner_map')->where('app_name', $appName)->update([
-                        'owner_username' => $ownerUsername,
-                        'updated_at' => date('Y-m-d H:i:s'),
-                    ]);
-                } else {
-                    Db::table('fisher_app_owner_map')->insert([
-                        'app_name' => $appName,
-                        'owner_username' => $ownerUsername,
-                        'created_at' => date('Y-m-d H:i:s'),
-                        'updated_at' => date('Y-m-d H:i:s'),
-                    ]);
-                }
             }
 
             $versionName = $data['versionName'] ?? $data['version_name'] ?? '';
@@ -1252,7 +1228,7 @@ class ApkController extends BaseController
 
     /**
      * GET /api/apk/check-name?name=xxx
-     * 检查应用名是否可用（是否被其他用户占用）
+     * 检查应用名格式是否有效；不同用户允许使用相同应用名。
      */
     public function checkAppName()
     {
@@ -1270,17 +1246,6 @@ class ApkController extends BaseController
         $error = $this->validateAppName($name);
         if ($error) {
             return json(['success' => false, 'available' => false, 'message' => $error], 400);
-        }
-
-        // superadmin 不受限制
-        if ($this->isSuperAdmin($actor)) {
-            return json(['success' => true, 'available' => true, 'message' => '可用']);
-        }
-
-        // 查映射表
-        $existing = Db::table('fisher_app_owner_map')->where('app_name', $name)->find();
-        if ($existing && $existing['owner_username'] !== $username) {
-            return json(['success' => true, 'available' => false, 'message' => '该应用名不合法，请修改之后重试']);
         }
 
         return json(['success' => true, 'available' => true, 'message' => '可用']);

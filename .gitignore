@@ -8,3 +8,6 @@
 
 # Codex local change/verification artifacts
 /.codex_changes/
+
+# Codex local transaction records
+/.codex/
