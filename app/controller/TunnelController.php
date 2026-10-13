@@ -1263,12 +1263,22 @@ class TunnelController extends BaseController
      */
     private function fetchFrpsProxies()
     {
-        $host = env('frps.dashboard_host', '127.0.0.1');
-        $port = (int)env('frps.dashboard_port', 7500);
-        $user = env('frps.dashboard_user', 'admin');
-        $password = env('frps.dashboard_password', '');
+        // 某些生产入口不会自动把项目根目录 .env 注入 ThinkPHP Env。
+        // 安装器生成的是项目级共享配置，因此这里直接读取文件作为可靠来源，
+        // 再回退到 env()，避免 Dashboard 密码被解析为空而让前端永久显示“连接中”。
+        $envFile = dirname(__DIR__, 2) . '/.env';
+        $fileEnv = [];
+        if (is_file($envFile)) {
+            $parsedEnv = @parse_ini_file($envFile, false, INI_SCANNER_RAW);
+            if (is_array($parsedEnv)) {
+                $fileEnv = $parsedEnv;
+            }
+        }
 
-        $auth = base64_encode("{$user}:{$password}");
+        $host = (string)($fileEnv['FRPS_DASHBOARD_HOST'] ?? env('frps.dashboard_host', '127.0.0.1'));
+        $port = (int)($fileEnv['FRPS_DASHBOARD_PORT'] ?? env('frps.dashboard_port', 7500));
+        $user = (string)($fileEnv['FRPS_DASHBOARD_USER'] ?? env('frps.dashboard_user', 'admin'));
+        $password = (string)($fileEnv['FRPS_DASHBOARD_PASSWORD'] ?? env('frps.dashboard_password', ''));
         $proxies = [];
 
         foreach (['tcp', 'http'] as $type) {
@@ -1276,13 +1286,16 @@ class TunnelController extends BaseController
             $ch = curl_init($url);
             curl_setopt_array($ch, [
                 CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_CONNECTTIMEOUT => 2,
                 CURLOPT_TIMEOUT => 5,
-                CURLOPT_HTTPHEADER => ["Authorization: Basic {$auth}"],
+                CURLOPT_HTTPAUTH => CURLAUTH_BASIC,
+                CURLOPT_USERPWD => "{$user}:{$password}",
             ]);
             $result = curl_exec($ch);
+            $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
             curl_close($ch);
 
-            if ($result) {
+            if ($result !== false && $httpCode === 200) {
                 $data = json_decode($result, true);
                 if (isset($data['proxies']) && is_array($data['proxies'])) {
                     $proxies = array_merge($proxies, $data['proxies']);

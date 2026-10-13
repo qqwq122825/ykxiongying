@@ -295,6 +295,9 @@ deploy_project_files() {
     chmod +x "${INSTALL_ROOT}/node-ws/stop.sh"
     chmod +x "${INSTALL_ROOT}/node-ws/restart.sh"
     chmod +x "${INSTALL_ROOT}/deploy/start.sh"
+    chmod +x "${INSTALL_ROOT}/deploy/install-frps.sh"
+    chmod +x "${INSTALL_ROOT}/deploy/verify-install.sh"
+    chmod +x "${INSTALL_ROOT}/install.sh"
     
     log_info "项目文件部署完成: ${INSTALL_ROOT}"
 }
@@ -769,7 +772,32 @@ ENDSITECONF
 
 # 配置开机自启
 setup_autostart() {
-    log_step 12 "配置系统服务和开机自启"
+    log_step 13 "配置系统服务和开机自启"
+
+    # systemd service for frps。Dashboard 仅监听 127.0.0.1，状态由 PHP 后端读取，
+    # 不对公网暴露 7500。
+    cat > /etc/systemd/system/xingchen-frps.service << 'ENDFRPS'
+[Unit]
+Description=Xingchen FRPS Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www
+Group=www
+WorkingDirectory={INSTALL_ROOT}/frps
+ExecStart={INSTALL_ROOT}/frps/frps -c {INSTALL_ROOT}/frps/frps.ini
+Restart=always
+RestartSec=5
+LimitNOFILE=65535
+StandardOutput=append:{INSTALL_ROOT}/frps/log/frps-systemd.log
+StandardError=append:{INSTALL_ROOT}/frps/log/frps-systemd.log
+
+[Install]
+WantedBy=multi-user.target
+ENDFRPS
+    sed -i "s|{INSTALL_ROOT}|${INSTALL_ROOT}|g" /etc/systemd/system/xingchen-frps.service
     
     # systemd service for fisher-ws
     cat > /etc/systemd/system/fisher-ws.service << 'ENDWS'
@@ -794,8 +822,10 @@ WantedBy=multi-user.target
 ENDWS
     sed -i "s|{INSTALL_ROOT}|${INSTALL_ROOT}|g" /etc/systemd/system/fisher-ws.service
     
-    systemctl daemon-reload 2>/dev/null || true
-    systemctl enable fisher-ws 2>/dev/null || true
+    systemctl daemon-reload
+    systemctl enable xingchen-frps fisher-ws
+    systemctl restart xingchen-frps
+    systemctl restart fisher-ws
     
     # 启用 pm2 开机自启
     if command -v pm2 &> /dev/null; then
@@ -805,9 +835,27 @@ ENDWS
     log_info "开机自启服务配置完成"
 }
 
+# 安装结束前执行一次真实联通验证。任何关键项失败都会让一键安装明确失败，
+# 不再出现“脚本显示完成、前端却一直连接中”的半安装状态。
+verify_installation() {
+    log_step 14 "验证共享配置、FRPS Dashboard 与服务状态"
+
+    local verifier="${INSTALL_ROOT}/deploy/verify-install.sh"
+    if [ ! -x "${verifier}" ]; then
+        chmod +x "${verifier}" 2>/dev/null || true
+    fi
+    if [ ! -x "${verifier}" ]; then
+        log_error "缺少安装验证器: ${verifier}"
+        exit 1
+    fi
+
+    bash "${verifier}" --root "${INSTALL_ROOT}" --env "${INSTALL_ROOT}/.env" --require-live
+    log_info "共享 .env、Node 链接、FRPS 配置、Dashboard 鉴权和服务监听全部验证通过"
+}
+
 # 配置 Python 虚拟环境和依赖
 setup_python_env() {
-    log_step 13 "配置 Python APK 打包环境"
+    log_step 12 "配置 Python APK 打包环境"
     
     PYENV_DIR="${INSTALL_ROOT}/extend/.venv"
     
@@ -888,7 +936,7 @@ show_summary() {
     echo "  │  前端界面:      http://${EXTERNAL_IP}:8888"
     echo "  │  后端 API:      http://${EXTERNAL_IP}/api/..."
     echo "  │  WebSocket:     ws://${EXTERNAL_IP}:8889"
-    echo "  │  FRP 面板:      http://${EXTERNAL_IP}:7500"
+    echo "  │  FRP 面板:      http://127.0.0.1:7500（仅服务器本机）"
     echo "  │  宝塔面板:      http://${EXTERNAL_IP}:8888 (默认端口)"
     echo "  └─────────────────────────────────────────────────────────┘"
     echo ""
@@ -974,11 +1022,14 @@ main() {
     setup_bt_site
     save_state "11"
     
-    setup_autostart
-    save_state "12"
-    
     setup_python_env
+    save_state "12"
+
+    setup_autostart
     save_state "13"
+
+    verify_installation
+    save_state "14"
     
     show_summary
     save_state "done" "complete"

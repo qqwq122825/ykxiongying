@@ -60,6 +60,27 @@ function run_version_command(string $binary, array $arguments): array {
     return ['code' => 127, 'output' => 'PHP 的 proc_open/exec 均不可用，无法执行版本校验'];
 }
 
+function prepare_bundled_frps(string $root, string $envFile): array {
+    $bash = first_executable(executable_candidates('bash', ['/bin/bash', '/usr/bin/bash']));
+    if ($bash === '') {
+        throw new RuntimeException('未找到 bash，无法自动安装内置 frps');
+    }
+    $installer = $root . '/deploy/install-frps.sh';
+    $verifier = $root . '/deploy/verify-install.sh';
+    if (!is_file($installer)) throw new RuntimeException('缺少 deploy/install-frps.sh');
+    if (!is_file($verifier)) throw new RuntimeException('缺少 deploy/verify-install.sh');
+
+    $installResult = run_version_command($bash, [$installer, '--env', $envFile]);
+    if ($installResult['code'] !== 0) {
+        throw new RuntimeException("内置 frps 自动安装失败：\n" . $installResult['output']);
+    }
+    $verifyResult = run_version_command($bash, [$verifier, '--root', $root, '--env', $envFile, '--static-only']);
+    if ($verifyResult['code'] !== 0) {
+        throw new RuntimeException("FRPS 静态验证失败：\n" . $verifyResult['output']);
+    }
+    return ['install' => $installResult['output'], 'verify' => $verifyResult['output']];
+}
+
 function inspect_apk_build_environment(string $root): array {
     $javaExtras = [];
     $javaHome = trim((string)getenv('JAVA_HOME'));
@@ -453,6 +474,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$alreadyLocked) {
 
             write_env_file($envFile, $cfg);
             link_node_env($root, $envFile);
+            $frpsPreparation = prepare_bundled_frps($root, $envFile);
+            $messages[] = '内置 frps 已自动安装并通过配置校验；完整一键部署会同时注册并启动 systemd 服务';
             file_put_contents($lockFile, "installed_at=" . date('c') . "\nadmin={$adminUser}\n", LOCK_EX);
             $alreadyLocked = true;
             $messages[] = '安装完成，管理员已创建/更新';
@@ -480,7 +503,7 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial;back
 <?php foreach ($errors as $e): ?><div class="box err"><?=h($e)?></div><?php endforeach; ?>
 <?php if ($alreadyLocked): ?>
   <div class="box ok">系统已安装。锁文件：<code>runtime/install.lock</code></div>
-  <div class="box ok">在服务器终端执行一次：<br><code>sudo bash <?=h($root)?>/deploy/install-frps.sh</code><br>将生成 <code><?=h($root)?>/frps/</code>，可在宝塔 Node 项目中选择 <code>start</code> 启动。</div>
+  <div class="box ok">共享 <code>.env</code> 与内置 <code>frps/</code> 已由安装程序生成并校验。完整服务器部署请直接执行：<br><code>sudo bash <?=h($root)?>/install.sh</code></div>
   <p class="small">如需重新安装，请先备份数据，再删除 <code>runtime/install.lock</code> 后访问本页。</p>
   <p><a style="color:#9fd4ff" href="/">进入系统</a></p>
 <?php else: ?>
@@ -511,6 +534,6 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial;back
   </div>
   <button type="submit">开始安装</button>
 </form>
-<p class="small">安装成功后会生成唯一的根目录 <code>.env</code>。再执行页面给出的命令，即会从项目内置包生成 <code>frps/</code> 目录。</p>
+<p class="small">安装成功后会一次性生成根目录 <code>.env</code>、Node 共享链接及 <code>frps/</code> 配置并完成静态校验。</p>
 <?php endif; ?>
 </main></body></html>
