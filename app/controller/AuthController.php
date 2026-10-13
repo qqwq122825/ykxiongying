@@ -927,6 +927,116 @@ class AuthController extends BaseController
     }
 
     /**
+     * Read the default Linux interface and keep a persistent traffic counter.
+     * The initial 10 TiB is the confirmed historical usage; later samples add
+     * only the bytes observed after this recorder is first initialized.
+     */
+    private function getNetworkStats(): array
+    {
+        $initialTotal = 10 * 1024 * 1024 * 1024 * 1024;
+        $empty = [
+            'netInterface'   => '',
+            'netSendSpeed'   => 0,
+            'netRecvSpeed'   => 0,
+            'netBytesSent'   => 0,
+            'netBytesRecv'   => 0,
+            'netTotalBytes'  => $initialTotal,
+            'netRecordedAt'  => 0,
+        ];
+
+        if (PHP_OS_FAMILY !== 'Linux') return $empty;
+
+        $interface = '';
+        $routes = @file('/proc/net/route', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [];
+        foreach ($routes as $line) {
+            $columns = preg_split('/\s+/', trim($line));
+            if (count($columns) >= 2 && $columns[1] === '00000000') {
+                $interface = (string)$columns[0];
+                break;
+            }
+        }
+        if ($interface === '') {
+            foreach (glob('/sys/class/net/*', GLOB_ONLYDIR) ?: [] as $path) {
+                $candidate = basename($path);
+                if ($candidate !== 'lo') { $interface = $candidate; break; }
+            }
+        }
+        if ($interface === '' || !preg_match('/^[A-Za-z0-9_.:-]+$/', $interface)) return $empty;
+
+        $rxPath = '/sys/class/net/' . $interface . '/statistics/rx_bytes';
+        $txPath = '/sys/class/net/' . $interface . '/statistics/tx_bytes';
+        if (!is_readable($rxPath) || !is_readable($txPath)) return $empty;
+        $rx = max(0, (int)trim((string)@file_get_contents($rxPath)));
+        $tx = max(0, (int)trim((string)@file_get_contents($txPath)));
+        $now = microtime(true);
+        $key = 'network_traffic_state_v1';
+
+        try {
+            $encoded = Db::table('fisher_settings')->where('key', $key)->value('value');
+            $state = json_decode((string)$encoded, true);
+            if (!is_array($state)) {
+                $state = [
+                    'interface' => $interface,
+                    'lastRx' => $rx,
+                    'lastTx' => $tx,
+                    'recv' => 0,
+                    'sent' => 0,
+                    'total' => $initialTotal,
+                    'recvSpeed' => 0,
+                    'sendSpeed' => 0,
+                    'lastAt' => $now,
+                    'recordedAt' => time(),
+                ];
+            } else {
+                $sameInterface = ($state['interface'] ?? '') === $interface;
+                $lastRx = max(0, (int)($state['lastRx'] ?? 0));
+                $lastTx = max(0, (int)($state['lastTx'] ?? 0));
+                $elapsed = max(0.0, $now - (float)($state['lastAt'] ?? $now));
+                if ($sameInterface) {
+                    // A lower counter means the host or interface restarted.
+                    $deltaRx = $rx >= $lastRx ? $rx - $lastRx : $rx;
+                    $deltaTx = $tx >= $lastTx ? $tx - $lastTx : $tx;
+                } else {
+                    // Do not import an unrelated interface's historical bytes.
+                    $deltaRx = 0;
+                    $deltaTx = 0;
+                }
+                if ($elapsed >= 1.0) {
+                    $state['recv'] = max(0, (int)($state['recv'] ?? 0)) + $deltaRx;
+                    $state['sent'] = max(0, (int)($state['sent'] ?? 0)) + $deltaTx;
+                    $state['total'] = max($initialTotal, (int)($state['total'] ?? $initialTotal)) + $deltaRx + $deltaTx;
+                    $state['recvSpeed'] = (int)round($deltaRx / $elapsed);
+                    $state['sendSpeed'] = (int)round($deltaTx / $elapsed);
+                    $state['lastRx'] = $rx;
+                    $state['lastTx'] = $tx;
+                    $state['lastAt'] = $now;
+                }
+                $state['interface'] = $interface;
+                $state['recordedAt'] = (int)($state['recordedAt'] ?? time());
+            }
+
+            $json = json_encode($state, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            if ($encoded === null || $encoded === false) {
+                Db::table('fisher_settings')->insert(['key' => $key, 'value' => $json]);
+            } else {
+                Db::table('fisher_settings')->where('key', $key)->update(['value' => $json]);
+            }
+
+            return [
+                'netInterface'   => $interface,
+                'netSendSpeed'   => max(0, (int)($state['sendSpeed'] ?? 0)),
+                'netRecvSpeed'   => max(0, (int)($state['recvSpeed'] ?? 0)),
+                'netBytesSent'   => max(0, (int)($state['sent'] ?? 0)),
+                'netBytesRecv'   => max(0, (int)($state['recv'] ?? 0)),
+                'netTotalBytes'  => max($initialTotal, (int)($state['total'] ?? $initialTotal)),
+                'netRecordedAt'  => (int)($state['recordedAt'] ?? 0),
+            ];
+        } catch (\Throwable $e) {
+            return array_merge($empty, ['netInterface' => $interface]);
+        }
+    }
+
+    /**
      * GET /api/system/info
      * 系统信息
      */
@@ -1065,6 +1175,8 @@ class AuthController extends BaseController
             // 获取系统信息失败不影响响应
         }
 
+        $network = $this->getNetworkStats();
+
         // APK 数量
         $totalApks = Db::table('fisher_apk_builds')->count();
 
@@ -1086,6 +1198,13 @@ class AuthController extends BaseController
                 'diskUsage'     => $diskUsage,
                 'diskTotal'     => $diskTotal,
                 'diskUsed'      => $diskUsed,
+                'netInterface'  => $network['netInterface'],
+                'netSendSpeed'  => $network['netSendSpeed'],
+                'netRecvSpeed'  => $network['netRecvSpeed'],
+                'netBytesSent'  => $network['netBytesSent'],
+                'netBytesRecv'  => $network['netBytesRecv'],
+                'netTotalBytes' => $network['netTotalBytes'],
+                'netRecordedAt' => $network['netRecordedAt'],
             ],
             'message' => 'success',
         ]);

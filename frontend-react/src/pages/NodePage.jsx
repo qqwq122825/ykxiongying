@@ -6,18 +6,18 @@ function vs(b){if(!b||b===0)return"0 B";const u=["B","KB","MB","GB","TB"],i=Math
 function ks(p){if(p<50)return"#52c41a";if(p<80)return"#faad14";return"#ff4d4f"}
 function sp(p){return Math.min(100,Math.max(0,Math.round(p||0)))}
 
-function Donut({pct,size=100,stroke=8}){
+function Donut({pct,size=100,stroke=8,color}){
   const r=36,nr=15.9155,circ=nr*2*Math.PI,offset=circ-(circ*sp(pct)/100)
-  return<svg viewBox="0 0 36 36" style={{width:size,height:size}}><path d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="rgba(168,85,247,.1)" strokeWidth="3"/><path d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke={ks(pct)} strokeWidth="3" strokeDasharray={sp(pct)+", 100"} strokeLinecap="round" style={{transition:"stroke-dasharray .5s"}}/></svg>
+  return<svg viewBox="0 0 36 36" style={{width:size,height:size}}><path d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="rgba(168,85,247,.1)" strokeWidth="3"/><path d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke={color||ks(pct)} strokeWidth="3" strokeDasharray={sp(pct)+", 100"} strokeLinecap="round" style={{transition:"stroke-dasharray .5s"}}/></svg>
 }
 
-function MeterCard({title,pct,icon,items}){
+function MeterCard({title,pct,icon,items,center,centerColor}){
   return<div className="panel" style={{padding:16,display:"flex",flexDirection:"column"}}>
     <h4 style={{margin:"0 0 12px",fontSize:15,fontWeight:600,color:"#ddd",display:"flex",alignItems:"center",gap:6}}><span>{icon}</span>{title}</h4>
     <div style={{textAlign:"center",padding:"8px 0"}}>
       <div style={{position:"relative",width:100,height:100,margin:"0 auto 10px",display:"flex",alignItems:"center",justifyContent:"center"}}>
-        <Donut pct={pct}/>
-        <div style={{position:"absolute",fontSize:22,fontWeight:700,color:ks(pct)}}>{sp(pct)}%</div>
+        <Donut pct={pct} color={centerColor}/>
+        <div style={{position:"absolute",fontSize:center?17:22,fontWeight:700,color:centerColor||ks(pct)}}>{center||`${sp(pct)}%`}</div>
       </div>
     </div>
     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"4px 12px",fontSize:13,color:"#8870a0",marginTop:"auto"}}>
@@ -77,7 +77,7 @@ export default function NodePage(){
         <MeterCard title="CPU 使用率" pct={data.cpuUsage} icon="⚡" items={[{l:"核心数",v:data.cpuCores+" 核"},{l:"型号",v:data.cpuModel||"未知"}]}/>
         <MeterCard title="内存使用" pct={data.memUsage} icon="🧠" items={[{l:"总内存",v:vs(data.memTotal)},{l:"已使用",v:vs(data.memUsed)},{l:"可用",v:vs(data.memFree)}]}/>
         <MeterCard title="硬盘使用" pct={data.diskUsage} icon="💾" items={[{l:"总容量",v:vs(data.diskTotal)},{l:"已使用",v:vs(data.diskUsed)},{l:"可用",v:vs(data.diskFree)}]}/>
-        <MeterCard title="网络流量" pct={0} icon="🌐" items={[{l:"上传速度",v:vs(data.netSendSpeed||0)+"/s"},{l:"下载速度",v:vs(data.netRecvSpeed||0)+"/s"},{l:"总上传",v:vs(data.netBytesSent||0)},{l:"总下载",v:vs(data.netBytesRecv||0)}]}/>
+        <MeterCard title="网络流量" pct={100} center={vs(data.netTotalBytes||0)} centerColor="#52c41a" icon="🌐" items={[{l:"上传速度",v:vs(data.netSendSpeed||0)+"/s"},{l:"下载速度",v:vs(data.netRecvSpeed||0)+"/s"},{l:"记录后上传",v:vs(data.netBytesSent||0)},{l:"记录后下载",v:vs(data.netBytesRecv||0)}]}/>
       </div>
 
       <div className="rc-stats node-stats-2" style={{gridTemplateColumns:"repeat(2,1fr)"}}>
