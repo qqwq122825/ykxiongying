@@ -80,9 +80,18 @@ def _linux_sign(self, input_path, output_path):
     
     # apksigner
     local_apksigner_jar = os.path.join(base_dir, 'apksigner.jar')
-    java_bin = sh.which('java')
-    if not java_bin and os.path.exists('/usr/bin/java'):
-        java_bin = '/usr/bin/java'
+    java_candidates = [
+        sh.which('java'),
+        os.path.join(os.environ.get('JAVA_HOME', ''), 'bin', 'java'),
+        '/usr/bin/java',
+    ]
+    java_server_root = '/www/server/java'
+    if os.path.isdir(java_server_root):
+        java_candidates.extend(
+            os.path.join(java_server_root, name, 'bin', 'java')
+            for name in sorted(os.listdir(java_server_root), reverse=True)
+        )
+    java_bin = next((candidate for candidate in java_candidates if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK)), None)
 
     apksigner_cmd = None
     if sh.which('apksigner'):

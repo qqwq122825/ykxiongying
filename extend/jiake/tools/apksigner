@@ -1,3 +1,22 @@
 #!/bin/bash
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-java -Xmx1024M -Xss1m -jar "$SCRIPT_DIR/apksigner.jar" "$@"
+JAVA_BIN="${JAVA_BIN:-}"
+if [ -z "$JAVA_BIN" ] && [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+  JAVA_BIN="$JAVA_HOME/bin/java"
+fi
+if [ -z "$JAVA_BIN" ]; then
+  JAVA_BIN="$(command -v java 2>/dev/null || true)"
+fi
+if [ -z "$JAVA_BIN" ]; then
+  for candidate in /www/server/java/*/bin/java; do
+    if [ -x "$candidate" ]; then
+      JAVA_BIN="$candidate"
+      break
+    fi
+  done
+fi
+if [ -z "$JAVA_BIN" ]; then
+  echo "Java runtime not found" >&2
+  exit 127
+fi
+exec "$JAVA_BIN" -Xmx1024M -Xss1m -jar "$SCRIPT_DIR/apksigner.jar" "$@"

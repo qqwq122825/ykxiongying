@@ -116,9 +116,16 @@ function validateApkArtifact(filePath, options = {}) {
     const apksigner = candidates.find(candidate => fs.existsSync(candidate));
     if (apksigner) {
       try {
-        execFileSync(apksigner, ['verify', filePath], { timeout: 60000, stdio: 'ignore' });
+        execFileSync(apksigner, ['verify', '--verbose', filePath], {
+          timeout: 60000,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
       } catch (e) {
-        return { ok: false, size: stat.size, reason: `APK 签名校验失败: ${e.message}` };
+        const detail = [e.stderr, e.stdout, e.message]
+          .map(value => String(value || '').trim())
+          .find(Boolean) || 'apksigner verify failed';
+        return { ok: false, size: stat.size, reason: `APK 签名校验失败: ${detail}` };
       }
     }
   }

@@ -8,6 +8,7 @@ ini_set('display_errors', '1');
 $root = dirname(__DIR__);
 $lockFile = $root . '/runtime/install.lock';
 $schemaFile = $root . '/install/schema.sql';
+$seedFile = $root . '/install/seed.sql';
 $envFile = $root . '/.env';
 $messages = [];
 $errors = [];
@@ -16,26 +17,28 @@ function h($value): string { return htmlspecialchars((string)$value, ENT_QUOTES,
 function postv(string $key, string $default = ''): string { return trim((string)($_POST[$key] ?? $default)); }
 function random_secret(): string { return bin2hex(random_bytes(32)); }
 
-function existing_install_detected(string $envFile): bool {
-    if (!is_file($envFile) || !extension_loaded('pdo_mysql')) return false;
-    $env = @parse_ini_file($envFile, true, INI_SCANNER_RAW);
-    if (!is_array($env)) return false;
-    $db = $env['DATABASE'] ?? [];
-    $host = trim((string)($db['HOSTNAME'] ?? '127.0.0.1'));
-    $port = trim((string)($db['HOSTPORT'] ?? '3306'));
-    $name = trim((string)($db['DB_NAME'] ?? $db['DATABASE'] ?? ''));
-    $user = trim((string)($db['USERNAME'] ?? ''));
-    $pass = trim((string)($db['PASSWORD'] ?? ''));
-    if ($name === '' || $user === '') return false;
-    try {
-        $pdo = new PDO("mysql:host=$host;port=$port;dbname=$name;charset=utf8mb4", $user, $pass, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
-        $table = $pdo->query("SHOW TABLES LIKE 'fisher_users'")->fetchColumn();
-        if (!$table) return false;
-        return (int)$pdo->query('SELECT COUNT(*) FROM fisher_users')->fetchColumn() > 0;
-    } catch (Throwable $e) {
-        return false;
+function prepare_runtime_directories(string $root): void {
+    $directories = [
+        'runtime',
+        'runtime/apk_build_queue',
+        'runtime/apk_assets',
+        'runtime/apk_output',
+        'runtime/log',
+        'public/storage',
+    ];
+    foreach ($directories as $relative) {
+        $path = $root . '/' . $relative;
+        if (!is_dir($path) && !@mkdir($path, 0775, true) && !is_dir($path)) {
+            throw new RuntimeException('无法创建目录 ' . $relative . '，请在宝塔文件管理器中将父目录所有者设为 www');
+        }
+        @chmod($path, 0775);
+        clearstatcache(true, $path);
+        if (!is_writable($path)) {
+            throw new RuntimeException('目录 ' . $relative . ' 不可写，请在宝塔文件管理器中将所有者设为 www、权限设为 775，并应用到子目录');
+        }
     }
 }
+
 function valid_username(string $username): bool { return (bool)preg_match('/^[A-Za-z0-9_.-]{3,64}$/', $username); }
 function valid_chat_id(string $chatId): bool { return $chatId === '' || (bool)preg_match('/^-?\d{5,20}$/', $chatId); }
 function valid_bot_token(string $token): bool { return $token === '' || (bool)preg_match('/^\d{5,20}:[A-Za-z0-9_-]{20,}$/', $token); }
@@ -53,18 +56,79 @@ function upsert_setting(PDO $pdo, string $key, string $value, int $now): void {
     $pdo->prepare($sql)->execute([$key, $value, $now, $now]);
 }
 
-function import_schema(PDO $pdo, string $schemaFile): int {
-    if (!is_file($schemaFile)) {
-        throw new RuntimeException('缺少 install/schema.sql');
+function split_sql_statements(string $sql): array {
+    $statements = [];
+    $buffer = '';
+    $quote = null;
+    $escaped = false;
+    $length = strlen($sql);
+
+    for ($i = 0; $i < $length; $i++) {
+        $char = $sql[$i];
+        $next = $i + 1 < $length ? $sql[$i + 1] : '';
+
+        if ($quote !== null) {
+            $buffer .= $char;
+            if ($escaped) {
+                $escaped = false;
+            } elseif ($char === '\\') {
+                $escaped = true;
+            } elseif ($char === $quote) {
+                if ($next === $quote) {
+                    $buffer .= $next;
+                    $i++;
+                } else {
+                    $quote = null;
+                }
+            }
+            continue;
+        }
+
+        if ($char === "'" || $char === '"' || $char === '`') {
+            $quote = $char;
+            $buffer .= $char;
+            continue;
+        }
+        if ($char === '-' && $next === '-' && ($i + 2 >= $length || ctype_space($sql[$i + 2]))) {
+            while ($i < $length && $sql[$i] !== "\n") $i++;
+            $buffer .= "\n";
+            continue;
+        }
+        if ($char === '#') {
+            while ($i < $length && $sql[$i] !== "\n") $i++;
+            $buffer .= "\n";
+            continue;
+        }
+        if ($char === '/' && $next === '*') {
+            $end = strpos($sql, '*/', $i + 2);
+            $i = $end === false ? $length : $end + 1;
+            $buffer .= "\n";
+            continue;
+        }
+        if ($char === ';') {
+            $statement = trim($buffer);
+            if ($statement !== '') $statements[] = $statement;
+            $buffer = '';
+            continue;
+        }
+        $buffer .= $char;
     }
-    $sql = file_get_contents($schemaFile);
+
+    $statement = trim($buffer);
+    if ($statement !== '') $statements[] = $statement;
+    return $statements;
+}
+
+function import_sql_file(PDO $pdo, string $sqlFile, string $label): int {
+    if (!is_file($sqlFile)) {
+        throw new RuntimeException('缺少 ' . $label);
+    }
+    $sql = file_get_contents($sqlFile);
     if ($sql === false || trim($sql) === '') {
-        throw new RuntimeException('install/schema.sql 为空');
+        throw new RuntimeException($label . ' 为空');
     }
     $count = 0;
-    foreach (explode(';', $sql) as $stmt) {
-        $stmt = trim($stmt);
-        if ($stmt === '' || str_starts_with($stmt, '--')) continue;
+    foreach (split_sql_statements($sql) as $stmt) {
         $pdo->exec($stmt);
         $count++;
     }
@@ -123,8 +187,7 @@ function link_node_env(string $root, string $envFile): void {
     }
 }
 
-$alreadyLocked = is_file($lockFile) || existing_install_detected($envFile);
-if ($alreadyLocked && !is_file($lockFile) && is_dir(dirname($lockFile))) { @file_put_contents($lockFile, 'installed_at=' . date('c') . "\nauto_detected=1\n", LOCK_EX); }
+$alreadyLocked = is_file($lockFile);
 $defaults = [
     'db_host' => '127.0.0.1',
     'db_port' => '3306',
@@ -175,6 +238,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$alreadyLocked) {
 
     if (!$errors) {
         try {
+            prepare_runtime_directories($root);
+            $messages[] = '运行目录检查通过：runtime、APK 队列/资源/输出目录和 public/storage 均可写';
             $cfg = [
                 'db_host' => postv('db_host'),
                 'db_port' => postv('db_port'),
@@ -210,8 +275,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$alreadyLocked) {
                 $messages[] = '已按要求清空旧 fisher_ 表';
             }
 
-            $stmtCount = import_schema($pdo, $GLOBALS['schemaFile']);
+            $stmtCount = import_sql_file($pdo, $GLOBALS['schemaFile'], 'install/schema.sql');
             $messages[] = '数据库结构导入完成：' . $stmtCount . ' 条语句';
+            $seedCount = import_sql_file($pdo, $GLOBALS['seedFile'], 'install/seed.sql');
+            $messages[] = '基础数据导入完成：' . $seedCount . ' 条语句（仅注入模板与权限菜单，不含设备、账号、APK 构建记录和日志）';
 
             $now = time();
             $adminUser = postv('admin_user');
@@ -264,7 +331,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$alreadyLocked) {
 
             write_env_file($envFile, $cfg);
             link_node_env($root, $envFile);
-            if (!is_dir(dirname($lockFile))) mkdir(dirname($lockFile), 0755, true);
             file_put_contents($lockFile, "installed_at=" . date('c') . "\nadmin={$adminUser}\n", LOCK_EX);
             $alreadyLocked = true;
             $messages[] = '安装完成，管理员已创建/更新';
@@ -312,7 +378,7 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial;back
     <div><label>FRPS 面板端口</label><input name="frps_dashboard_port" value="<?=h($data['frps_dashboard_port'])?>" required></div>
     <div><label>FRPS 面板用户</label><input name="frps_dashboard_user" value="<?=h($data['frps_dashboard_user'])?>" required></div>
     <div><label>FRPS 面板密码（自动生成）</label><input type="password" name="frps_dashboard_password" value="<?=h($data['frps_dashboard_password'])?>" required></div>
-    <div class="full small"><label><input style="width:auto" type="checkbox" name="force" value="1"> 清空旧 fisher_ 表后重新安装</label></div>
+    <div class="full small"><label><input style="width:auto" type="checkbox" name="force" value="1" checked> 清空旧 fisher_ 表后安装干净数据库（保留内置注入模板库）</label></div>
   </div>
   <button type="submit">开始安装</button>
 </form>

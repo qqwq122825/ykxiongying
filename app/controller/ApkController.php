@@ -690,6 +690,16 @@ class ApkController extends BaseController
                 file_put_contents($debugLog, "  BG EXCEPTION: " . $e->getMessage() . "\n", FILE_APPEND);
             }
 
+            $queueDir = runtime_path() . 'apk_build_queue' . DIRECTORY_SEPARATOR;
+            if (!is_dir($queueDir) && !@mkdir($queueDir, 0775, true) && !is_dir($queueDir)) {
+                throw new \RuntimeException('无法创建 APK 构建队列目录，请在宝塔文件管理器中将 runtime 所有者设为 www、权限设为 775');
+            }
+            @chmod($queueDir, 0775);
+            clearstatcache(true, $queueDir);
+            if (!is_writable($queueDir)) {
+                throw new \RuntimeException('APK 构建队列目录不可写，请在宝塔文件管理器中将 runtime/apk_build_queue 所有者设为 www、权限设为 775');
+            }
+
             $encrypt = false;
             $buildId = Db::table('fisher_apk_builds')->insertGetId([
                 'filename'       => $outputFilename,
@@ -703,10 +713,6 @@ class ApkController extends BaseController
                 'created_at'     => time(),
             ]);
 
-            $queueDir = runtime_path() . 'apk_build_queue' . DIRECTORY_SEPARATOR;
-            if (!is_dir($queueDir)) {
-                mkdir($queueDir, 0755, true);
-            }
             $taskFile = $queueDir . sprintf('%013d_%06d_%s.json', (int)(microtime(true) * 1000), $buildId, $this->rs());
             $taskJson = json_encode([
                 'buildId'         => $buildId,
@@ -725,7 +731,7 @@ class ApkController extends BaseController
                 'createdAt'       => time(),
             ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
             if ($taskJson === false || file_put_contents($taskFile, $taskJson, LOCK_EX) === false) {
-                throw new \RuntimeException('无法写入 APK 构建任务文件');
+                throw new \RuntimeException('无法写入 APK 构建任务文件，请检查 runtime/apk_build_queue 是否为 www:775');
             }
 
             if ($appName && $ownerUsername) {
@@ -782,16 +788,29 @@ class ApkController extends BaseController
                 'message' => '任务已加入构建队列',
             ]);
         } catch (\Throwable $e) {
+            $failureReason = trim((string)preg_replace('/\s+/', ' ', $e->getMessage()));
+            if ($failureReason === '') $failureReason = '未知错误';
+            $failureReason = substr($failureReason, 0, 220);
             $state['is_building'] = false;
             $state['progress'] = 0;
-            $state['message'] = '构建任务创建失败: ' . $e->getMessage();
-            $state['logs'] = array_merge($state['logs'] ?? [], ['[' . date('H:i:s') . '] 任务创建失败: ' . $e->getMessage()]);
+            $state['message'] = '构建任务创建失败: ' . $failureReason;
+            $state['logs'] = array_merge($state['logs'] ?? [], ['[' . date('H:i:s') . '] 任务创建失败: ' . $failureReason]);
             try {
                 $this->saveBuildState($state);
+                if ($buildId > 0) {
+                    Db::table('fisher_apk_builds')->where('id', $buildId)->update([
+                        'status' => 'failed',
+                        'progress' => 0,
+                        'message' => $failureReason,
+                        'updated_at' => time(),
+                    ]);
+                }
             } catch (\Throwable $ignored) {
             }
-            error_log('[APK Build] task creation failed: ' . $e->getMessage());
-            return json(['success' => false, 'message' => '构建任务创建失败，请查看服务器日志'], 500);
+            // 异常已经被完整记录，避免 shutdown 回调再次覆盖成“异常终止”。
+            $buildQueued = true;
+            error_log('[APK Build] task creation failed: ' . $failureReason);
+            return json(['success' => false, 'message' => $state['message']], 500);
         }
     }
 
