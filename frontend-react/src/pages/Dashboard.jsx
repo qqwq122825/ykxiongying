@@ -327,6 +327,7 @@ export default function Dashboard({ user, onLogout }) {
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(30)
   const [selected, setSelected] = useState(new Set())
+  const [batchDeleting, setBatchDeleting] = useState(false)
   const [remarkDevice, setRemarkDevice] = useState(null)
   const [remarkValue, setRemarkValue] = useState('')
   const [remarkSaving, setRemarkSaving] = useState(false)
@@ -417,6 +418,47 @@ export default function Dashboard({ user, onLogout }) {
       toast('备注更新失败: ' + e.message)
     } finally {
       setRemarkSaving(false)
+    }
+  }
+
+  async function handleBatchDelete() {
+    const ids = Array.from(selected).filter(Boolean)
+    if (ids.length === 0 || batchDeleting) return
+    if (!window.confirm(`确认删除已选的 ${ids.length} 台设备？此操作不可恢复。`)) return
+
+    setBatchDeleting(true)
+    const succeeded = []
+    const failed = []
+    const pending = [...ids]
+    const workerCount = Math.min(5, pending.length)
+
+    try {
+      await Promise.all(Array.from({ length: workerCount }, async () => {
+        while (pending.length > 0) {
+          const id = pending.shift()
+          try {
+            await api.deleteDevice(id)
+            succeeded.push(id)
+          } catch (error) {
+            failed.push({ id, message: error?.message || '删除失败' })
+          }
+        }
+      }))
+
+      setSelected((previous) => {
+        const next = new Set(previous)
+        succeeded.forEach((id) => next.delete(id))
+        return next
+      })
+      await refresh()
+
+      if (failed.length > 0) {
+        toast(`已删除 ${succeeded.length} 台，${failed.length} 台失败，失败项已保留选中`, 'error')
+      } else {
+        toast(`已删除 ${succeeded.length} 台设备`)
+      }
+    } finally {
+      setBatchDeleting(false)
     }
   }
 
@@ -581,7 +623,10 @@ export default function Dashboard({ user, onLogout }) {
                 <div className="batch-bar">
                   已选 {selected.size} 台设备
                   <button type="button" className="rc-btn" onClick={() => { toast(`批量操作执行于 ${selected.size} 台设备`); setSelected(new Set()) }}>批量执行</button>
-                  <button type="button" className="rc-btn danger" onClick={() => setSelected(new Set())}>取消选择</button>
+                  <button type="button" className="rc-btn danger" disabled={batchDeleting} onClick={handleBatchDelete}>
+                    {batchDeleting ? '删除中...' : '删除所选'}
+                  </button>
+                  <button type="button" className="rc-btn" disabled={batchDeleting} onClick={() => setSelected(new Set())}>取消选择</button>
                 </div>
               )}
 
