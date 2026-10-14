@@ -2058,7 +2058,7 @@ wss.on('connection', (ws, req) => {
       ws.close(4002, 'Missing sessionId');
       return;
     }
-    handleDevice(ws, sessionId, connections);
+    handleDevice(ws, sessionId, connections, realIp);
   } else if (pathname === '/ws/bridge') {
     // local-service bridge
     const deviceId = query.deviceId || '';

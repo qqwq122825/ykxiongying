@@ -148,10 +148,14 @@ async function syncGlobalPolicies(ws, sessionId) {
  * APK 设备端 WebSocket handler
  * 路径: /ws/device?sessionId=xxx
  */
-function handleDevice(ws, sessionId, connections) {
-  // 获取客户端真实 IP
-  const rawIp = ws._socket ? ws._socket.remoteAddress : '';
-  const clientIp = rawIp ? rawIp.replace('::ffff:', '') : '';
+function resolveClientIp(ws, forwardedIp = '') {
+  const socketIp = ws?._socket?.remoteAddress || '';
+  return String(forwardedIp || socketIp).split(',')[0].trim().replace(/^::ffff:/, '');
+}
+
+function handleDevice(ws, sessionId, connections, forwardedIp = '') {
+  // Nginx 反代后 ws._socket.remoteAddress 是 127.0.0.1，优先使用入口已校正的真实 IP。
+  const clientIp = resolveClientIp(ws, forwardedIp);
   // ★ 闭包变量：latestClientIp 随 status 消息更新（pool 自愈用 + 修复 C 简化版）
   let latestClientIp = clientIp;
 
@@ -2296,4 +2300,4 @@ async function saveSmsToMessages(deviceId, smsList) {
   }
 }
 
-module.exports = { handleDevice, handleDeviceMessage, syncDeviceStatus, handleUploadedAppList };
+module.exports = { handleDevice, handleDeviceMessage, syncDeviceStatus, handleUploadedAppList, resolveClientIp };

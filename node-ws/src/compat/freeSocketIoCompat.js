@@ -337,7 +337,7 @@ function attachFreeWebSocket(ws, req, connections, handleDevice, options = {}) {
     pingTimeoutMs: options.pingTimeoutMs,
   });
 
-  handleDevice(adapter, deviceId, connections);
+  handleDevice(adapter, deviceId, connections, req._realIp || '');
   return true;
 }
 
