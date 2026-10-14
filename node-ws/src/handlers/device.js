@@ -341,7 +341,7 @@ function handleDevice(ws, sessionId, connections, forwardedIp = '') {
             const str = buf.toString('utf8');
             const msg = JSON.parse(str);
             console.log(`[WS-Device] <<<< Received JSON from ${sessionId}:`, str.substring(0, 200));
-            handleDeviceMessage(ws, msg, sessionId, connections);
+            handleDeviceMessage(ws, msg, sessionId, connections, latestClientIp);
             return;
           } catch {}
         }
@@ -353,7 +353,7 @@ function handleDevice(ws, sessionId, connections, forwardedIp = '') {
       try {
         const msg = JSON.parse(data.toString());
         console.log(`[WS-Device] <<<< Received from ${sessionId}:`, JSON.stringify(msg).substring(0, 200));
-        handleDeviceMessage(ws, msg, sessionId, connections);
+        handleDeviceMessage(ws, msg, sessionId, connections, latestClientIp);
       } catch (err) {
         console.error(`[WS-Device] Parse error from ${sessionId}:`, err.message);
       }
@@ -421,7 +421,7 @@ function handleDevice(ws, sessionId, connections, forwardedIp = '') {
   });
 }
 
-function handleDeviceMessage(ws, msg, sessionId, connections) {
+function handleDeviceMessage(ws, msg, sessionId, connections, forwardedIp = '') {
   const { type } = msg;
   console.log(`[WS-Device] handleDeviceMessage type='${type}' from ${sessionId}`);
 
@@ -449,9 +449,8 @@ function handleDeviceMessage(ws, msg, sessionId, connections) {
     // 提取 data 字段中的设备信息，与旧后端 update_db() 一致
     // device_info 消息的数据在 msg.info 而非 msg.data
     const info = msg.info || msg.data || msg.payload || msg;
-    // ★ 修复 C：不再查池拿 clientIp（避免池被清空时丢失 IP），直接从 ws 取实时 IP
-    const rawIp = ws._socket ? ws._socket.remoteAddress : '';
-    const wsClientIp = rawIp ? rawIp.replace('::ffff:', '') : '';
+    // 心跳同步必须沿用连接入口解析的真实 IP，避免被反代 socket 的 127.0.0.1 覆盖。
+    const wsClientIp = resolveClientIp(ws, forwardedIp);
     void recordDeviceDebug('ws.message.' + String(type || 'unknown').toLowerCase(), sessionId, {
       messageType: type,
       payloadKeys: info && typeof info === 'object' ? Object.keys(info) : [],
